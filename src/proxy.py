@@ -7,6 +7,7 @@ from mitmproxy.addonmanager import Loader
 import logging
 import json
 import asyncio
+import uuid
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,8 @@ class LLMRouterAddon:
 
         # 更新捕获请求的URL为转发后的真实地址
         captured_req.url = new_url
+        # 生成唯一调用ID
+        captured_req.call_id = str(uuid.uuid4())
 
         # 存储捕获的请求，等待响应处理
         self._pending_requests[id(flow)] = captured_req
@@ -174,6 +177,16 @@ class LLMRouterAddon:
         path = flow.request.path
 
         try:
+            # 服务静态网页
+            if path == "/" or path == "/index.html":
+                web_path = Path(__file__).parent.parent / "web" / "index.html"
+                if web_path.exists():
+                    content = web_path.read_bytes()
+                    flow.response = http.Response.make(200, content, {"Content-Type": "text/html; charset=utf-8"})
+                else:
+                    flow.response = http.Response.make(404, b"Web UI not found", {"Content-Type": "text/plain"})
+                return
+
             # 使用同步方式查询
             conn = sqlite3.connect(self.config.database.path)
             conn.row_factory = sqlite3.Row
@@ -315,7 +328,8 @@ class LLMRouterAddon:
                 stream_type=stream_type,
                 first_token_ms=first_token_ms,
                 original_model=captured_req.original_model,
-                overridden_model=captured_req.overridden_model
+                overridden_model=captured_req.overridden_model,
+                call_id=captured_req.call_id
             )
         )
 
@@ -329,11 +343,13 @@ class LLMRouterAddon:
         stream_type: str = "non_stream",
         first_token_ms: Optional[int] = None,
         original_model: str = None,
-        overridden_model: str = None
+        overridden_model: str = None,
+        call_id: str = None
     ):
         """保存调用记录到数据库"""
         try:
             await self.storage.save_call(
+                call_id=call_id,
                 timestamp=captured_req.timestamp,
                 url=captured_req.url,
                 method=captured_req.method,

@@ -28,6 +28,7 @@ class CallStorage:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS llm_calls (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    call_id TEXT NOT NULL UNIQUE,
                     timestamp TEXT NOT NULL,
                     url TEXT NOT NULL,
                     method TEXT,
@@ -51,6 +52,7 @@ class CallStorage:
     
     async def save_call(
         self,
+        call_id: str,
         timestamp: str,
         url: str,
         method: str,
@@ -73,14 +75,15 @@ class CallStorage:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO llm_calls (
-                    timestamp, url, method,
+                    call_id, timestamp, url, method,
                     request_headers, request_body,
                     response_headers, response_body,
                     duration_ms, tokens_input, tokens_output, token_source,
                     stream_type, first_token_ms,
                     original_model, overridden_model
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
+                call_id,
                 timestamp,
                 url,
                 method,

@@ -17,6 +17,9 @@ class CapturedRequest:
     headers: dict                     # 请求头
     body: Optional[str] = None        # 请求体
     start_time: float = 0.0           # 开始时间(秒)
+    call_id: str = ""                 # 唯一调用ID (UUID)
+    original_model: str = ""          # 原始模型
+    overridden_model: str = ""        # 映射后的模型
 
 
 @dataclass
