@@ -269,12 +269,17 @@ function renderTable(data) {
       // 调用ID列：可点击，鼠标指针手型
       if (col.key === 'call_id') {
         td.classList.add('truncate-cell', 'text-blue-500', 'cursor-pointer', 'hover:underline');
+        td.title = val; // tooltip
         td.addEventListener('click', (e) => {
           e.stopPropagation();
           showDetail(row);
         });
-      } else if (col.key === 'url' || col.key === 'original_model' || col.key === 'overridden_model') {
-        td.classList.add(col.key === 'url' ? 'truncate-cell-long' : 'truncate-cell');
+      } else if (col.key === 'url') {
+        td.classList.add('truncate-cell-long');
+        td.title = val; // tooltip
+      } else if (col.key === 'original_model' || col.key === 'overridden_model') {
+        td.classList.add('truncate-cell');
+        td.title = val; // tooltip
       }
       if (col.key === 'stream_type') {
         val = val === 'stream' ? '流式' : '非流式';
