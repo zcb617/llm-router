@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Router - 登录</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            border: 'hsl(var(--border))',
+            background: 'hsl(var(--background))',
+            foreground: 'hsl(var(--foreground))',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    :root {
+      --background: 0 0% 100%;
+      --foreground: 222.2 84% 4.9%;
+      --border: 214.3 31.8% 91.4%;
+    }
+    .dark {
+      --background: 222.2 84% 4.9%;
+      --foreground: 210 40% 98%;
+      --border: 217.2 32.6% 17.5%;
+    }
+    body { background: hsl(var(--background)); color: hsl(var(--foreground)); }
+    html, body { height: 100%; }
+    .tab-active { border-bottom: 2px solid #3b82f6; color: #3b82f6; }
+  </style>
+</head>
+<body class="flex items-center justify-center h-full">
+  <div class="w-full max-w-md px-8">
+    <!-- Logo / Title -->
+    <div class="text-center mb-8">
+      <h1 class="text-3xl font-bold">LLM Router</h1>
+      <p class="text-zinc-500 mt-2">本地 LLM 代理网关</p>
+    </div>
+
+    <!-- Login/Register Card -->
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 shadow-2xl overflow-hidden">
+      <!-- Tabs -->
+      <div class="flex border-b border-zinc-300 dark:border-zinc-700">
+        <button id="loginTab" class="flex-1 py-3 text-center font-medium tab-active">登录</button>
+        <button id="registerTab" class="flex-1 py-3 text-center font-medium text-zinc-500">注册</button>
+      </div>
+
+      <div class="p-6">
+        <!-- Login Form -->
+        <form id="loginForm" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-1">邮箱</label>
+            <input id="loginEmail" type="text" required placeholder="邮箱或用户名"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">密码</label>
+            <input id="loginPassword" type="password" required placeholder="请输入密码"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div id="loginError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+          <button type="submit" class="w-full py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium">
+            登录
+          </button>
+        </form>
+
+        <!-- Register Form -->
+        <form id="registerForm" class="space-y-4 hidden">
+          <div>
+            <label class="block text-sm font-medium mb-1">邮箱</label>
+            <input id="registerEmail" type="email" required placeholder="david@qq.com"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">密码</label>
+            <input id="registerPassword" type="password" required placeholder="至少6位"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">确认密码</label>
+            <input id="registerConfirmPassword" type="password" required placeholder="再次输入密码"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div id="registerError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+          <div id="registerSuccess" class="hidden text-sm text-green-500 bg-green-50 dark:bg-green-900/20 rounded-lg p-2">注册成功，请登录</div>
+          <button type="submit" class="w-full py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium">
+            注册
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <p class="text-center text-xs text-zinc-500 mt-6">默认管理员账号: admin / admin</p>
+  </div>
+
+<script>
+const loginTab = document.getElementById('loginTab');
+const registerTab = document.getElementById('registerTab');
+const loginForm = document.getElementById('loginForm');
+const registerForm = document.getElementById('registerForm');
+
+// Tab 切换
+loginTab.addEventListener('click', () => {
+  loginTab.classList.add('tab-active');
+  loginTab.classList.remove('text-zinc-500');
+  registerTab.classList.remove('tab-active');
+  registerTab.classList.add('text-zinc-500');
+  loginForm.classList.remove('hidden');
+  registerForm.classList.add('hidden');
+  clearErrors();
+});
+
+registerTab.addEventListener('click', () => {
+  registerTab.classList.add('tab-active');
+  registerTab.classList.remove('text-zinc-500');
+  loginTab.classList.remove('tab-active');
+  loginTab.classList.add('text-zinc-500');
+  registerForm.classList.remove('hidden');
+  loginForm.classList.add('hidden');
+  clearErrors();
+});
+
+function clearErrors() {
+  document.getElementById('loginError').classList.add('hidden');
+  document.getElementById('registerError').classList.add('hidden');
+  document.getElementById('registerSuccess').classList.add('hidden');
+}
+
+function showError(formId, msg) {
+  const el = document.getElementById(formId);
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+// 邮箱格式校验
+const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+// 登录
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clearErrors();
+
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+
+  if (!email) {
+    showError('loginError', '邮箱不能为空');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+
+    if (res.ok) {
+      // 登录成功，保存 token
+      localStorage.setItem('llm_token', data.token);
+      localStorage.setItem('llm_email', data.email);
+      localStorage.setItem('llm_user_id', data.user_id);
+      // 跳转控制台
+      window.location.href = '/web/console.html';
+    } else {
+      showError('loginError', data.error || '登录失败');
+    }
+  } catch (err) {
+    showError('loginError', '网络错误，请重试: ' + err.message);
+  }
+});
+
+// 注册
+registerForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clearErrors();
+
+  const email = document.getElementById('registerEmail').value.trim();
+  const password = document.getElementById('registerPassword').value;
+  const confirmPassword = document.getElementById('registerConfirmPassword').value;
+
+  if (!EMAIL_REGEX.test(email)) {
+    showError('registerError', '邮箱格式不正确');
+    return;
+  }
+
+  if (password.length < 6) {
+    showError('registerError', '密码长度不能少于6位');
+    return;
+  }
+
+  if (password !== confirmPassword) {
+    showError('registerError', '两次输入的密码不一致');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+
+    if (res.ok) {
+      document.getElementById('registerSuccess').classList.remove('hidden');
+      // 清空表单
+      document.getElementById('registerEmail').value = '';
+      document.getElementById('registerPassword').value = '';
+      document.getElementById('registerConfirmPassword').value = '';
+    } else {
+      showError('registerError', data.error || '注册失败');
+    }
+  } catch (err) {
+    showError('registerError', '网络错误，请重试: ' + err.message);
+  }
+});
+
+// 如果已登录，直接跳转控制台
+if (localStorage.getItem('llm_token')) {
+  window.location.href = '/web/console.html';
+}
+</script>
+</body>
+</html>

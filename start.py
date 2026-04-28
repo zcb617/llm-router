@@ -13,6 +13,36 @@ from src.config import load_config
 from src.proxy import create_addon
 
 
+def init_auth(storage):
+    """初始化认证表并创建默认管理员"""
+    try:
+        # 判断是否使用 PostgreSQL
+        is_pg = storage.postgresql is not None
+        if is_pg:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=storage.postgresql.host, port=storage.postgresql.port,
+                user=storage.postgresql.user, password=storage.postgresql.password,
+                database=storage.postgresql.dbname
+            )
+            cur = conn.cursor()
+            storage.init_auth_tables(is_pg=True, cur=cur, conn=conn)
+            cur.close()
+            conn.close()
+        else:
+            storage.init_auth_tables(is_pg=False)
+
+        # 检查是否已有用户
+        if storage.get_user_count() == 0:
+            from src.auth import hash_password
+            storage.create_user("admin", hash_password("admin"))
+            print("  [认证] 默认管理员已创建: admin / admin")
+        else:
+            print("  [认证] 认证表已就绪")
+    except Exception as e:
+        print(f"  [认证] 初始化警告: {e}")
+
+
 async def run_proxy(config):
     """运行代理服务器"""
     from mitmproxy.options import Options
@@ -57,6 +87,15 @@ def main():
                 print(f"    model: {src} -> {dst}")
     print(f"Database: {config.database.path}")
     print(f"Query API: http://localhost:{config.proxy.listen_port}/api/calls")
+
+    # 初始化认证系统
+    print("\nInitializing auth system...")
+    from src.storage import CallStorage
+    storage = CallStorage(
+        config.database.path,
+        config.database.postgresql
+    )
+    init_auth(storage)
 
     # 使用mitmproxy Python API启动代理
     print(f"\nStarting proxy on port {config.proxy.listen_port}...")

@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Router - 控制台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            border: 'hsl(var(--border))',
+            background: 'hsl(var(--background))',
+            foreground: 'hsl(var(--foreground))',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    :root {
+      --background: 0 0% 100%;
+      --foreground: 222.2 84% 4.9%;
+      --border: 214.3 31.8% 91.4%;
+    }
+    .dark {
+      --background: 222.2 84% 4.9%;
+      --foreground: 210 40% 98%;
+      --border: 217.2 32.6% 17.5%;
+    }
+    body { background: hsl(var(--background)); color: hsl(var(--foreground)); }
+    html, body { height: 100%; }
+    .menu-item.active { background: rgba(59,130,246,0.15); color: #3b82f6; border-right: 3px solid #3b82f6; }
+    .sort-asc::after { content: ' ▲'; }
+    .sort-desc::after { content: ' ▼'; }
+    .modal-backdrop { background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); }
+    .json-body { font-family: 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
+    .truncate-cell { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .truncate-cell-long { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  </style>
+</head>
+<body class="h-full flex flex-col">
+  <!-- Top Header -->
+  <header class="bg-white dark:bg-zinc-900 border-b border-zinc-300 dark:border-zinc-700 px-4 py-3 flex items-center justify-between flex-shrink-0">
+    <div class="flex items-center gap-3">
+      <h1 class="text-lg font-bold">LLM Router</h1>
+      <span class="text-sm text-zinc-500">控制台</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="userEmail" class="text-sm text-zinc-500"></span>
+      <button id="logoutBtn" class="px-3 py-1 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">
+        退出登录
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <div class="flex flex-1 min-h-0">
+    <!-- Sidebar -->
+    <aside class="w-52 bg-zinc-900 text-zinc-300 flex-shrink-0 flex flex-col">
+      <nav class="py-4">
+        <a href="#" data-page="logs" id="menuLogs" class="menu-item active flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-800 transition text-sm">
+          <span class="text-lg">📋</span>
+          <span>调用日志</span>
+        </a>
+        <a href="#" data-page="keys" id="menuKeys" class="menu-item flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-800 transition text-sm">
+          <span class="text-lg">🔑</span>
+          <span>密钥管理</span>
+        </a>
+      </nav>
+    </aside>
+
+    <!-- Main Panel -->
+    <main class="flex-1 p-6 overflow-hidden flex flex-col min-h-0">
+      <!-- ==================== 调用日志面板 ==================== -->
+      <div id="logsPanel" class="flex flex-col flex-1 min-h-0">
+        <!-- Search -->
+        <div class="flex flex-wrap gap-3 mb-4">
+          <div class="flex-1 min-w-[200px]">
+            <input id="searchOriginal" type="text" placeholder="原始模型名称..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div class="flex-1 min-w-[200px]">
+            <input id="searchOverridden" type="text" placeholder="映射模型名称..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <button id="searchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
+          <button id="resetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
+          <button id="colSettingsBtn" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" title="列设置">
+            ⚙
+          </button>
+        </div>
+
+        <!-- Table -->
+        <div id="tableWrapper" class="overflow-hidden rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <div class="overflow-auto h-full">
+            <table class="text-sm" style="min-width: 1400px; table-layout: auto;">
+              <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+                <tr id="headerRow"></tr>
+              </thead>
+              <tbody id="tableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Pagination -->
+        <div class="flex items-center justify-between mt-4 flex-wrap gap-3">
+          <div class="flex items-center gap-2">
+            <span class="text-sm text-zinc-500">每页</span>
+            <select id="pageSize" class="px-2 py-1 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+            <span class="text-sm text-zinc-500">条</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="pageInfo" class="text-sm text-zinc-500">第 1 页，共 1 页（0 条）</span>
+            <button id="prevBtn" class="px-3 py-1 rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition disabled:opacity-40">上一页</button>
+            <button id="nextBtn" class="px-3 py-1 rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition disabled:opacity-40">下一页</button>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-sm text-zinc-500">跳转到</span>
+            <input id="jumpPage" type="number" min="1" class="w-16 px-2 py-1 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-center">
+            <button id="jumpBtn" class="px-3 py-1 rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">跳转</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== 密钥管理面板 ==================== -->
+      <div id="keysPanel" class="hidden flex flex-col flex-1 min-h-0">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-bold">密钥管理</h2>
+          <button id="createKeyBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center gap-1">
+            <span>+</span> 新建密钥
+          </button>
+        </div>
+
+        <!-- Keys Table -->
+        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <table class="text-sm w-full" style="table-layout: auto;">
+            <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">名称</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">密钥</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">过期时间</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">状态</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">创建时间</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
+              </tr>
+            </thead>
+            <tbody id="keysTableBody"></tbody>
+          </table>
+        </div>
+        <div id="keysEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">
+          暂无密钥，请点击上方「+ 新建密钥」创建
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ==================== 新建密钥弹窗 ==================== -->
+  <div id="createKeyModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-96 shadow-2xl">
+      <h2 class="text-lg font-semibold mb-4">新建密钥</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">密钥名称</label>
+          <input id="newKeyName" type="text" required placeholder="如：生产环境密钥"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">过期天数</label>
+          <input id="newKeyDays" type="number" required min="1" value="30"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div id="createKeyError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelCreateKey" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitCreateKey" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">创建</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 密钥详情（创建后显示完整Key） ==================== -->
+  <div id="newKeyResultModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[500px] shadow-2xl">
+      <h2 class="text-lg font-semibold mb-2">密钥创建成功</h2>
+      <p class="text-sm text-zinc-500 mb-4">请妥善保管此密钥，创建后将不再显示完整值。</p>
+      <div class="flex items-center gap-2 mb-4">
+        <input id="newKeyResult" type="text" readonly
+          class="flex-1 px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 font-mono text-sm">
+        <button id="copyNewKey" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">复制</button>
+      </div>
+      <div class="flex justify-end">
+        <button id="closeNewKeyResult" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">我知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 调用详情弹窗 ==================== -->
+  <div id="detailModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 w-[90vw] max-w-4xl max-h-[85vh] overflow-y-auto shadow-2xl">
+      <div class="flex items-center justify-between p-4 border-b border-zinc-300 dark:border-zinc-700">
+        <h2 class="text-lg font-semibold">调用详情</h2>
+        <button id="closeDetailBtn" class="text-zinc-500 hover:text-zinc-300 text-2xl">&times;</button>
+      </div>
+      <div class="p-4 space-y-4">
+        <div class="grid grid-cols-2 gap-4 text-sm">
+          <div><span class="text-zinc-500">调用ID:</span> <code id="dCallId" class="ml-1 font-mono"></code></div>
+          <div><span class="text-zinc-500">时间:</span> <span id="dTimestamp" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">方法:</span> <span id="dMethod" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">URL:</span> <span id="dUrl" class="ml-1 break-all"></span></div>
+          <div><span class="text-zinc-500">原始模型:</span> <span id="dOriginalModel" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">映射模型:</span> <span id="dOverriddenModel" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">耗时:</span> <span id="dDuration" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">首字耗时:</span> <span id="dFirstToken" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">流式类型:</span> <span id="dStreamType" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">Token:</span> <span id="dTokens" class="ml-1"></span></div>
+        </div>
+        <div>
+          <h3 class="font-semibold mb-1 text-sm">请求头</h3>
+          <pre id="dReqHeaders" class="json-body bg-zinc-100 dark:bg-zinc-800 rounded p-3 text-xs"></pre>
+        </div>
+        <div>
+          <h3 class="font-semibold mb-1 text-sm">请求体</h3>
+          <pre id="dReqBody" class="json-body bg-zinc-100 dark:bg-zinc-800 rounded p-3 text-xs"></pre>
+        </div>
+        <div>
+          <h3 class="font-semibold mb-1 text-sm">响应头</h3>
+          <pre id="dResHeaders" class="json-body bg-zinc-100 dark:bg-zinc-800 rounded p-3 text-xs"></pre>
+        </div>
+        <div>
+          <h3 class="font-semibold mb-1 text-sm">响应体</h3>
+          <pre id="dResBody" class="json-body bg-zinc-100 dark:bg-zinc-800 rounded p-3 text-xs"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 列设置弹窗 ==================== -->
+  <div id="colModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-96 max-h-[80vh] overflow-y-auto shadow-2xl">
+      <h2 class="text-lg font-semibold mb-4">列设置</h2>
+      <div id="colList" class="space-y-2"></div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="colResetBtn" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">恢复默认</button>
+        <button id="colSaveBtn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ============ 认证检查 ============
+const token = localStorage.getItem('llm_token');
+const userEmail = localStorage.getItem('llm_email');
+if (!token) {
+  window.location.href = '/web/login.html';
+}
+document.getElementById('userEmail').textContent = userEmail || '';
+
+// 退出登录
+document.getElementById('logoutBtn').addEventListener('click', () => {
+  localStorage.removeItem('llm_token');
+  localStorage.removeItem('llm_email');
+  localStorage.removeItem('llm_user_id');
+  window.location.href = '/web/login.html';
+});
+
+// ============ 菜单切换 ============
+const menuLogs = document.getElementById('menuLogs');
+const menuKeys = document.getElementById('menuKeys');
+const logsPanel = document.getElementById('logsPanel');
+const keysPanel = document.getElementById('keysPanel');
+
+function switchPage(page) {
+  if (page === 'logs') {
+    menuLogs.classList.add('active');
+    menuKeys.classList.remove('active');
+    logsPanel.classList.remove('hidden');
+    keysPanel.classList.add('hidden');
+    keysPanel.classList.remove('flex');
+  } else {
+    menuKeys.classList.add('active');
+    menuLogs.classList.remove('active');
+    keysPanel.classList.remove('hidden');
+    keysPanel.classList.add('flex');
+    logsPanel.classList.add('hidden');
+    loadKeys();
+  }
+}
+
+menuLogs.addEventListener('click', (e) => { e.preventDefault(); switchPage('logs'); });
+menuKeys.addEventListener('click', (e) => { e.preventDefault(); switchPage('keys'); });
+
+// ============ 调用日志（复用 index.html 逻辑） ============
+const COLUMNS = [
+  { key: 'call_id', label: '调用ID', default: true, minWidth: '180px' },
+  { key: 'timestamp', label: '时间', default: true, minWidth: '165px' },
+  { key: 'method', label: '方法', default: true, minWidth: '60px', width: '60px' },
+  { key: 'url', label: 'URL', default: true, minWidth: '200px' },
+  { key: 'original_model', label: '原始模型', default: true, minWidth: '140px' },
+  { key: 'overridden_model', label: '映射模型', default: true, minWidth: '140px' },
+  { key: 'duration_ms', label: '耗时(ms)', default: true, minWidth: '100px' },
+  { key: 'first_token_ms', label: '首字耗时(ms)', default: true, minWidth: '120px' },
+  { key: 'stream_type', label: '流式类型', default: true, minWidth: '100px' },
+  { key: 'tokens_input', label: '输入Token', default: true, minWidth: '100px' },
+  { key: 'tokens_output', label: '输出Token', default: true, minWidth: '110px' },
+];
+const STORAGE_KEY = 'llm_router_columns';
+let logsState = {
+  page: 1, pageSize: 20, total: 0,
+  sortKey: 'timestamp', sortDir: 'desc',
+  searchOriginal: '', searchOverridden: '',
+  columns: COLUMNS.map(c => ({...c, visible: true}))
+};
+
+function getAuthHeaders() { return { 'Authorization': 'Bearer ' + token }; }
+
+function loadColumns() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      logsState.columns = parsed.map(c => ({...c, visible: c.visible !== undefined ? c.visible : true}));
+      return;
+    } catch(e) {}
+  }
+  logsState.columns = COLUMNS.map(c => ({...c, visible: true}));
+}
+
+function saveColumns() { localStorage.setItem(STORAGE_KEY, JSON.stringify(logsState.columns)); }
+function getVisibleColumns() {
+  if (!logsState || !logsState.columns) return [];
+  return logsState.columns.filter(c => c.visible);
+}
+
+function renderHeader() {
+  const tr = document.getElementById('headerRow');
+  const visible = getVisibleColumns();
+  tr.innerHTML = '';
+  visible.forEach(col => {
+    const th = document.createElement('th');
+    th.className = 'px-4 py-2 text-left font-medium whitespace-nowrap cursor-pointer select-none';
+    if (logsState.sortKey === col.key) th.classList.add(logsState.sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+    th.textContent = col.label;
+    th.addEventListener('click', () => {
+      if (logsState.sortKey === col.key) logsState.sortDir = logsState.sortDir === 'asc' ? 'desc' : 'asc';
+      else { logsState.sortKey = col.key; logsState.sortDir = 'asc'; }
+      loadLogsData();
+    });
+    tr.appendChild(th);
+  });
+}
+
+function renderTable(data) {
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = '';
+  const visible = getVisibleColumns();
+  data.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    visible.forEach(col => {
+      const td = document.createElement('td');
+      td.className = 'px-4 py-2 whitespace-nowrap';
+      if (col.width) td.style.width = col.width;
+      if (col.minWidth) td.style.minWidth = col.minWidth;
+      let val = row[col.key] ?? '';
+      if (col.key === 'timestamp' && val) {
+        try {
+          const d = new Date(val);
+          val = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+        } catch(e) {}
+      }
+      if (col.key === 'call_id' && !val) val = row.id != null ? '#' + row.id : '';
+      if (col.key === 'call_id') {
+        td.classList.add('truncate-cell', 'text-blue-500', 'cursor-pointer', 'hover:underline');
+        td.title = val;
+        td.addEventListener('click', (e) => { e.stopPropagation(); showDetail(row); });
+      } else if (col.key === 'url') { td.classList.add('truncate-cell-long'); td.title = val; }
+      else if (col.key === 'original_model' || col.key === 'overridden_model') { td.classList.add('truncate-cell'); td.title = val; }
+      if (col.key === 'stream_type') val = val === 'stream' ? '流式' : '非流式';
+      td.textContent = val;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function renderPagination() {
+  const totalPages = Math.max(1, Math.ceil(logsState.total / logsState.pageSize));
+  document.getElementById('pageInfo').textContent = `第 ${logsState.page} 页，共 ${totalPages} 页（${logsState.total} 条）`;
+  document.getElementById('prevBtn').disabled = logsState.page <= 1;
+  document.getElementById('nextBtn').disabled = logsState.page >= totalPages;
+}
+
+async function loadLogsData() {
+  const params = new URLSearchParams({
+    limit: logsState.pageSize, offset: (logsState.page - 1) * logsState.pageSize,
+    sort: logsState.sortKey, dir: logsState.sortDir,
+    search_original: logsState.searchOriginal, search_overridden: logsState.searchOverridden
+  });
+  try {
+    const res = await fetch('/api/calls?' + params.toString(), { headers: getAuthHeaders() });
+    const data = await res.json();
+    let calls = data.calls || [];
+    if (logsState.sortKey) {
+      calls.sort((a, b) => {
+        let va = a[logsState.sortKey] ?? '', vb = b[logsState.sortKey] ?? '';
+        if (typeof va === 'number') return logsState.sortDir === 'asc' ? va - vb : vb - va;
+        return logsState.sortDir === 'asc' ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+      });
+    }
+    logsState.total = data.total || 0;
+    renderHeader(); renderTable(calls); renderPagination();
+  } catch(e) {
+    document.getElementById('tableBody').innerHTML = '<tr><td colspan="99" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>';
+  }
+}
+
+function showDetail(row) {
+  document.getElementById('dCallId').textContent = row.call_id || 'N/A';
+  document.getElementById('dTimestamp').textContent = row.timestamp || '';
+  document.getElementById('dMethod').textContent = row.method || '';
+  document.getElementById('dUrl').textContent = row.url || '';
+  document.getElementById('dOriginalModel').textContent = row.original_model || '-';
+  document.getElementById('dOverriddenModel').textContent = row.overridden_model || '-';
+  document.getElementById('dDuration').textContent = (row.duration_ms ?? '-') + ' ms';
+  document.getElementById('dFirstToken').textContent = row.first_token_ms ? row.first_token_ms + ' ms' : '-';
+  document.getElementById('dStreamType').textContent = row.stream_type === 'stream' ? '流式' : '非流式';
+  document.getElementById('dTokens').textContent = `输入: ${row.tokens_input ?? 0}, 输出: ${row.tokens_output ?? 0}`;
+  try { document.getElementById('dReqHeaders').textContent = JSON.stringify(JSON.parse(row.request_headers || '{}'), null, 2); } catch { document.getElementById('dReqHeaders').textContent = row.request_headers || ''; }
+  try { document.getElementById('dReqBody').textContent = JSON.stringify(JSON.parse(row.request_body || '{}'), null, 2); } catch { document.getElementById('dReqBody').textContent = row.request_body || ''; }
+  try { document.getElementById('dResHeaders').textContent = JSON.stringify(JSON.parse(row.response_headers || '{}'), null, 2); } catch { document.getElementById('dResHeaders').textContent = row.response_headers || ''; }
+  try { document.getElementById('dResBody').textContent = JSON.stringify(JSON.parse(row.response_body || '{}'), null, 2); } catch { document.getElementById('dResBody').textContent = row.response_body || ''; }
+  document.getElementById('detailModal').classList.remove('hidden');
+}
+
+document.getElementById('closeDetailBtn').addEventListener('click', () => document.getElementById('detailModal').classList.add('hidden'));
+document.getElementById('detailModal').addEventListener('click', (e) => { if (e.target === document.getElementById('detailModal')) document.getElementById('detailModal').classList.add('hidden'); });
+
+// 搜索和分页
+document.getElementById('searchBtn').addEventListener('click', () => {
+  logsState.searchOriginal = document.getElementById('searchOriginal').value.trim();
+  logsState.searchOverridden = document.getElementById('searchOverridden').value.trim();
+  logsState.page = 1; loadLogsData();
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+  document.getElementById('searchOriginal').value = '';
+  document.getElementById('searchOverridden').value = '';
+  logsState.searchOriginal = ''; logsState.searchOverridden = '';
+  logsState.page = 1; loadLogsData();
+});
+document.getElementById('pageSize').addEventListener('change', (e) => { logsState.pageSize = parseInt(e.target.value); logsState.page = 1; loadLogsData(); });
+document.getElementById('prevBtn').addEventListener('click', () => { if (logsState.page > 1) { logsState.page--; loadLogsData(); } });
+document.getElementById('nextBtn').addEventListener('click', () => { const t = Math.ceil(logsState.total / logsState.pageSize); if (logsState.page < t) { logsState.page++; loadLogsData(); } });
+document.getElementById('jumpBtn').addEventListener('click', () => { const p = parseInt(document.getElementById('jumpPage').value); const t = Math.ceil(logsState.total / logsState.pageSize); if (p >= 1 && p <= t) { logsState.page = p; loadLogsData(); } });
+document.getElementById('jumpPage').addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('jumpBtn').click(); });
+
+// 列设置
+document.getElementById('colSettingsBtn').addEventListener('click', () => {
+  const list = document.getElementById('colList'); list.innerHTML = '';
+  logsState.columns.forEach((col, idx) => {
+    const div = document.createElement('div');
+    div.className = 'flex items-center gap-2 p-2 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800';
+    div.innerHTML = `<input type="checkbox" ${col.visible ? 'checked' : ''} data-idx="${idx}" class="col-cb"><span class="flex-1 text-sm">${col.label}</span>`;
+    list.appendChild(div);
+  });
+  document.getElementById('colModal').classList.remove('hidden');
+});
+document.getElementById('colModal').addEventListener('click', (e) => { if (e.target === document.getElementById('colModal')) document.getElementById('colModal').classList.add('hidden'); });
+document.getElementById('colResetBtn').addEventListener('click', () => { logsState.columns = COLUMNS.map(c => ({...c})); saveColumns(); document.getElementById('colModal').classList.add('hidden'); renderHeader(); loadLogsData(); });
+document.getElementById('colSaveBtn').addEventListener('click', () => { document.querySelectorAll('.col-cb').forEach(cb => { const i = parseInt(cb.dataset.idx); logsState.columns[i].visible = cb.checked; }); saveColumns(); document.getElementById('colModal').classList.add('hidden'); renderHeader(); loadLogsData(); });
+
+// ============ 密钥管理 ============
+async function loadKeys() {
+  const tbody = document.getElementById('keysTableBody');
+  const empty = document.getElementById('keysEmpty');
+  try {
+    const res = await fetch('/api/keys', { headers: getAuthHeaders() });
+    const data = await res.json();
+    const keys = data.keys || [];
+    tbody.innerHTML = '';
+    if (keys.length === 0) { empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    const today = new Date().toISOString().split('T')[0];
+    keys.forEach(k => {
+      const tr = document.createElement('tr');
+      tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+      const isExpired = k.expires_at < today;
+      const statusClass = isExpired ? 'text-red-500' : 'text-green-500';
+      const statusText = isExpired ? '已过期' : '有效';
+      // 显示掩码
+      const keyDisplay = k.key_masked || '****';
+      tr.innerHTML = `
+        <td class="px-4 py-2 whitespace-nowrap">${k.name}</td>
+        <td class="px-4 py-2 whitespace-nowrap font-mono text-xs">${keyDisplay}</td>
+        <td class="px-4 py-2 whitespace-nowrap">${k.expires_at || '-'}</td>
+        <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
+        <td class="px-4 py-2 whitespace-nowrap">${k.created_at || '-'}</td>
+        <td class="px-4 py-2 whitespace-nowrap">
+          <button class="copy-key-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${k.id}">复制</button>
+          <button class="delete-key-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${k.id}">删除</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+    // 复制密钥
+    tbody.querySelectorAll('.copy-key-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const keyId = btn.dataset.id;
+        try {
+          const res = await fetch(`/api/keys/${keyId}/reveal`, { headers: getAuthHeaders() });
+          const data = await res.json();
+          if (res.ok) {
+            navigator.clipboard.writeText(data.key);
+            btn.textContent = '已复制!';
+            setTimeout(() => { btn.textContent = '复制'; }, 1500);
+          } else {
+            alert(data.error || '获取密钥失败');
+          }
+        } catch(e) {
+          alert('网络错误: ' + e.message);
+        }
+      });
+    });
+    // 删除密钥
+    tbody.querySelectorAll('.delete-key-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('确定删除此密钥？此操作不可恢复。')) return;
+        const keyId = btn.dataset.id;
+        try {
+          const res = await fetch('/api/keys/' + keyId, { method: 'DELETE', headers: getAuthHeaders() });
+          if (res.ok) { loadKeys(); }
+          else { const d = await res.json(); alert(d.error || '删除失败'); }
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
+    });
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+}
+
+// 创建密钥
+document.getElementById('createKeyBtn').addEventListener('click', () => {
+  document.getElementById('newKeyName').value = '';
+  document.getElementById('newKeyDays').value = '30';
+  document.getElementById('createKeyError').classList.add('hidden');
+  document.getElementById('createKeyModal').classList.remove('hidden');
+});
+document.getElementById('cancelCreateKey').addEventListener('click', () => document.getElementById('createKeyModal').classList.add('hidden'));
+document.getElementById('createKeyModal').addEventListener('click', (e) => { if (e.target === document.getElementById('createKeyModal')) document.getElementById('createKeyModal').classList.add('hidden'); });
+
+document.getElementById('submitCreateKey').addEventListener('click', async () => {
+  const name = document.getElementById('newKeyName').value.trim();
+  const days = parseInt(document.getElementById('newKeyDays').value);
+  if (!name) { document.getElementById('createKeyError').textContent = '名称不能为空'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+  if (!days || days < 1) { document.getElementById('createKeyError').textContent = '天数必须为正整数'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+  try {
+    const res = await fetch('/api/keys', {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, expire_days: days })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('createKeyModal').classList.add('hidden');
+      // 显示完整密钥
+      document.getElementById('newKeyResult').value = data.key;
+      document.getElementById('newKeyResultModal').classList.remove('hidden');
+      loadKeys();
+    } else {
+      document.getElementById('createKeyError').textContent = data.error || '创建失败';
+      document.getElementById('createKeyError').classList.remove('hidden');
+    }
+  } catch(e) {
+    document.getElementById('createKeyError').textContent = '网络错误: ' + e.message;
+    document.getElementById('createKeyError').classList.remove('hidden');
+  }
+});
+
+document.getElementById('copyNewKey').addEventListener('click', () => {
+  navigator.clipboard.writeText(document.getElementById('newKeyResult').value);
+  document.getElementById('copyNewKey').textContent = '已复制!';
+  setTimeout(() => { document.getElementById('copyNewKey').textContent = '复制'; }, 1500);
+});
+document.getElementById('closeNewKeyResult').addEventListener('click', () => document.getElementById('newKeyResultModal').classList.add('hidden'));
+document.getElementById('newKeyResultModal').addEventListener('click', (e) => { if (e.target === document.getElementById('newKeyResultModal')) document.getElementById('newKeyResultModal').classList.add('hidden'); });
+
+// ============ 初始化 ============
+function calcTableHeight() {
+  const wrapper = document.getElementById('tableWrapper');
+  if (!wrapper) return;
+  const rect = wrapper.getBoundingClientRect();
+  const available = window.innerHeight - rect.top - 60;
+  wrapper.style.height = Math.max(300, available) + 'px';
+}
+window.addEventListener('resize', calcTableHeight);
+calcTableHeight();
+loadColumns();
+loadLogsData();
+</script>
+</body>
+</html>

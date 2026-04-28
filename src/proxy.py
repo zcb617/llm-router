@@ -9,6 +9,7 @@ import json
 import asyncio
 import uuid
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -95,15 +96,38 @@ class LLMRouterAddon:
 
         path = flow.request.path
 
-        # 处理本地Web UI（优先级最高）
-        if path in ("/web", "/web/", "/web/index.html"):
+        # 处理本地Web UI和控制台API（优先级最高）
+        if path.startswith("/web") or path.startswith("/api/") or path == "/health" or path == "/favicon.ico" or path == "/":
             self._handle_local_api(flow)
             return
 
-        # 处理本地查询API请求（不转发到上游）
-        if path.startswith("/api/") or path == "/health":
-            self._handle_local_api(flow)
+        # === LLM 转发请求：验证 API Key ===
+        auth_header = flow.request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            user_api_key = auth_header[7:]
+        else:
+            # 无 API Key，返回 401
+            flow.response = http.Response.make(
+                401,
+                json.dumps({"error": "Unauthorized: missing API key"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"}
+            )
             return
+
+        # 验证 API Key
+        from src.console_api import verify_api_key
+        key_info = verify_api_key(user_api_key, self.storage)
+        if key_info is None:
+            flow.response = http.Response.make(
+                403,
+                json.dumps({"error": "Invalid or expired API key"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"}
+            )
+            return
+
+        # 存储用户信息到 flow.metadata，供 response() 使用
+        flow.metadata["user_id"] = key_info["user_id"]
+        flow.metadata["api_key_id"] = key_info["id"]
 
         # 捕获请求数据
         captured_req = self.capturer.capture_request(flow)
@@ -205,14 +229,44 @@ class LLMRouterAddon:
         path = flow.request.path
 
         try:
+            # === 控制台 API 路由（优先处理） ===
+            from src.console_api import handle_console_api
+            if path.startswith("/api/auth") or path.startswith("/api/keys"):
+                handled = handle_console_api(flow, self.storage, path, self.config)
+                if handled:
+                    return
+
             # 服务静态网页
-            if path in ("/web", "/web/", "/web/index.html"):
-                web_path = Path(__file__).parent.parent / "web" / "index.html"
-                if web_path.exists():
-                    content = web_path.read_bytes()
+            if path == "/favicon.ico":
+                flow.response = http.Response.make(204)
+                return
+
+            if path == "/" or path in ("/web", "/web/"):
+                # 默认跳转到控制台
+                flow.response = http.Response.make(302, b"", {"Location": "/web/console.html"})
+                return
+
+            if path == "/web/index.html":
+                # 兼容旧入口，跳转到登录页
+                flow.response = http.Response.make(302, b"", {"Location": "/web/login.html"})
+                return
+
+            if path == "/web/login.html":
+                login_path = Path(__file__).parent.parent / "web" / "login.html"
+                if login_path.exists():
+                    content = login_path.read_bytes()
                     flow.response = http.Response.make(200, content, {"Content-Type": "text/html; charset=utf-8"})
                 else:
-                    flow.response = http.Response.make(404, b"Web UI not found", {"Content-Type": "text/plain"})
+                    flow.response = http.Response.make(404, b"Login page not found", {"Content-Type": "text/plain"})
+                return
+
+            if path == "/web/console.html":
+                console_path = Path(__file__).parent.parent / "web" / "console.html"
+                if console_path.exists():
+                    content = console_path.read_bytes()
+                    flow.response = http.Response.make(200, content, {"Content-Type": "text/html; charset=utf-8"})
+                else:
+                    flow.response = http.Response.make(404, b"Console page not found", {"Content-Type": "text/plain"})
                 return
 
             # 根据配置连接数据库（同步）
@@ -236,10 +290,25 @@ class LLMRouterAddon:
 
             if path.startswith("/api/calls/"):
                 call_id = int(path.split("/")[-1])
+                # 从 JWT 提取 user_id
+                from src.auth import verify_jwt_token
+                auth_header = flow.request.headers.get("Authorization", "")
+                user_id = None
+                if auth_header.startswith("Bearer "):
+                    payload = verify_jwt_token(auth_header[7:])
+                    if payload:
+                        user_id = payload.get("user_id")
+                
                 if is_pg:
-                    cur.execute("SELECT * FROM llm_calls WHERE id = %s OR call_id = %s", (call_id, call_id))
+                    if user_id:
+                        cur.execute("SELECT * FROM llm_calls WHERE (id = %s OR call_id = %s) AND user_id = %s", (call_id, call_id, user_id))
+                    else:
+                        cur.execute("SELECT * FROM llm_calls WHERE id = %s OR call_id = %s", (call_id, call_id))
                 else:
-                    cur.execute("SELECT * FROM llm_calls WHERE id = ? OR call_id = ?", (call_id, call_id))
+                    if user_id:
+                        cur.execute("SELECT * FROM llm_calls WHERE (id = ? OR call_id = ?) AND user_id = ?", (call_id, call_id, user_id))
+                    else:
+                        cur.execute("SELECT * FROM llm_calls WHERE id = ? OR call_id = ?", (call_id, call_id))
                 row = cur.fetchone()
                 if row:
                     if is_pg:
@@ -258,21 +327,40 @@ class LLMRouterAddon:
                         {"Content-Type": "application/json"}
                     )
             elif path.startswith("/api/calls"):
+                # 从 JWT 提取 user_id（控制台已登录）
+                from src.auth import verify_jwt_token
+                auth_header = flow.request.headers.get("Authorization", "")
+                user_id = None
+                if auth_header.startswith("Bearer "):
+                    payload = verify_jwt_token(auth_header[7:])
+                    if payload:
+                        user_id = payload.get("user_id")
+
                 query_str = urlencode(list(flow.request.query.items()))
                 params = parse_qs(query_str)
                 limit = int(params.get("limit", [100])[0])
                 offset = int(params.get("offset", [0])[0])
-                
+
                 if is_pg:
-                    cur.execute("SELECT COUNT(*) FROM llm_calls")
-                    total = cur.fetchone()[0]
-                    cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT %s OFFSET %s", (limit, offset))
+                    if user_id:
+                        cur.execute("SELECT COUNT(*) FROM llm_calls WHERE user_id = %s", (user_id,))
+                        total = cur.fetchone()[0]
+                        cur.execute("SELECT * FROM llm_calls WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s OFFSET %s", (user_id, limit, offset))
+                    else:
+                        cur.execute("SELECT COUNT(*) FROM llm_calls")
+                        total = cur.fetchone()[0]
+                        cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT %s OFFSET %s", (limit, offset))
                     rows = cur.fetchall()
                     calls = [dict(zip([d.name for d in cur.description], r)) for r in rows]
                 else:
-                    cur.execute("SELECT COUNT(*) FROM llm_calls")
-                    total = cur.fetchone()[0]
-                    cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT ? OFFSET ?", (limit, offset))
+                    if user_id:
+                        cur.execute("SELECT COUNT(*) FROM llm_calls WHERE user_id = ?", (user_id,))
+                        total = cur.fetchone()[0]
+                        cur.execute("SELECT * FROM llm_calls WHERE user_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?", (user_id, limit, offset))
+                    else:
+                        cur.execute("SELECT COUNT(*) FROM llm_calls")
+                        total = cur.fetchone()[0]
+                        cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT ? OFFSET ?", (limit, offset))
                     calls = [dict(r) for r in cur.fetchall()]
                 
                 flow.response = http.Response.make(
@@ -381,6 +469,8 @@ class LLMRouterAddon:
         )
 
         # 异步保存到数据库
+        user_id = flow.metadata.get("user_id")
+        api_key_id = flow.metadata.get("api_key_id")
         asyncio.create_task(
             self._save_call(
                 captured_req=captured_req,
@@ -392,7 +482,9 @@ class LLMRouterAddon:
                 first_token_ms=first_token_ms,
                 original_model=captured_req.original_model,
                 overridden_model=captured_req.overridden_model,
-                call_id=captured_req.call_id
+                call_id=captured_req.call_id,
+                user_id=user_id,
+                api_key_id=api_key_id
             )
         )
 
@@ -407,11 +499,13 @@ class LLMRouterAddon:
         first_token_ms: Optional[int] = None,
         original_model: str = None,
         overridden_model: str = None,
-        call_id: str = None
+        call_id: str = None,
+        user_id: Optional[int] = None,
+        api_key_id: Optional[int] = None
     ):
         """保存调用记录到数据库"""
         try:
-            await self.storage.save_call(
+            self.storage.save_call_with_user(
                 call_id=call_id,
                 timestamp=captured_req.timestamp,
                 url=captured_req.url,
@@ -427,7 +521,9 @@ class LLMRouterAddon:
                 stream_type=stream_type,
                 first_token_ms=first_token_ms,
                 original_model=original_model,
-                overridden_model=overridden_model
+                overridden_model=overridden_model,
+                user_id=user_id,
+                api_key_id=api_key_id
             )
             logger.info("Call record saved to database")
         except Exception as e:
