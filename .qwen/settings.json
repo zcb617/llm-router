@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(github.com)",
+      "mcp__filesystem__create_directory",
+      "Bash(mkdir *)",
+      "Bash(dir *)",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(pip show *)",
+      "Bash(start *)",
+      "Bash(netstat *)",
+      "Bash(findstr *)",
+      "Bash(timeout *)",
+      "Bash(curl *)",
+      "Bash(停止代理.bat)",
+      "Bash(taskkill *)",
+      "Bash(echo.)",
+      "Bash(tasklist)",
+      "Bash(git init)",
+      "Bash(git add *)"
+    ]
+  },
+  "$version": 3
+}

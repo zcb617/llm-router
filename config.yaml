@@ -1,0 +1,10 @@
+proxy:
+  listen_port: 38888
+  routes:
+    /kimi: https://api.kimi.com/coding/
+    /openai: https://api.openai.com/v1
+    /glm: https://open.bigmodel.cn/api/paas/v4
+    /deepseek: https://api.deepseek.com/v1
+
+database:
+  path: "./llm_calls.db"

@@ -1,0 +1,6 @@
+mitmproxy>=10.0.0
+tiktoken>=0.5.0
+aiosqlite>=0.19.0
+pyyaml>=6.0
+fastapi>=0.104.0
+uvicorn>=0.24.0

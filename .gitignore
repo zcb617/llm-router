@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Database
+*.db
+*.db-journal
+
+# Certs
+certs/
+
+# Config
+.llm_router_config.json
+
+# Logs
+*.log
