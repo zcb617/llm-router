@@ -178,7 +178,7 @@ class LLMRouterAddon:
 
         try:
             # 服务静态网页
-            if path == "/" or path == "/index.html":
+            if path in ("/web", "/web/", "/web/index.html"):
                 web_path = Path(__file__).parent.parent / "web" / "index.html"
                 if web_path.exists():
                     content = web_path.read_bytes()
