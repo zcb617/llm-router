@@ -25,11 +25,17 @@ class LLMRouterAddon:
             if config_file.exists():
                 with open(config_file) as f:
                     raw_config = json.load(f)
-                from src.config import Config, ProxyConfig, DatabaseConfig
+                from src.config import Config, ProxyConfig, DatabaseConfig, ModelMappingConfig
+                model_mappings = {}
+                for key, mapping in raw_config["proxy"]["model_mappings"].items():
+                    model_mappings[key] = ModelMappingConfig(
+                        target_base_url=mapping["target_base_url"],
+                        model_overrides=mapping.get("model_overrides") or {}
+                    )
                 config = Config(
                     proxy=ProxyConfig(
                         listen_port=raw_config["proxy"]["listen_port"],
-                        routes=raw_config["proxy"]["routes"]
+                        model_mappings=model_mappings
                     ),
                     database=DatabaseConfig(
                         path=raw_config["database"]["path"]
@@ -60,11 +66,11 @@ class LLMRouterAddon:
     def load(self, loader: Loader):
         """加载addon"""
         logger.info(f"LLM Router addon loaded, listening on port {self.config.proxy.listen_port}")
-        logger.info(f"Loaded {len(self.config.proxy.routes)} routes")
+        logger.info(f"Loaded {len(self.config.proxy.model_mappings)} model mappings")
     
     def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
-        from src.config import match_route
+        from src.config import match_model
         from urllib.parse import urlparse
 
         # 处理本地查询API请求（不转发到上游）
@@ -75,46 +81,73 @@ class LLMRouterAddon:
         # 捕获请求数据
         captured_req = self.capturer.capture_request(flow)
 
-        # 解析路径（去掉host和port）
+        # 解析路径
         parsed = urlparse(captured_req.url)
         path = parsed.path
 
         logger.info(f"Intercepted request: {captured_req.method} {path}")
 
-        # 匹配路由
-        route_result = match_route(path, self.config.proxy.routes)
-        if route_result is None:
-            logger.warning(f"No route matched for path: {path}")
-            # 不匹配，直接返回404
+        # 从请求 body 提取 model 参数
+        model_name = self._extract_model(captured_req.body)
+        if not model_name:
+            logger.warning("No model found in request body")
+            flow.response = http.Response.make(
+                400,
+                b'{"error": "Model parameter is required in request body"}',
+                {"Content-Type": "application/json"}
+            )
+            return
+
+        logger.info(f"Model from body: {model_name}")
+
+        # 匹配 model 映射
+        mapping = match_model(model_name, self.config.proxy.model_mappings)
+        if mapping is None:
+            logger.warning(f"No model mapping matched for: {model_name}")
             flow.response = http.Response.make(
                 404,
-                b'{"error": "No route matched. Please configure a route prefix."}',
+                json.dumps({"error": f"No model mapping for '{model_name}'"}, ensure_ascii=False).encode("utf-8"),
                 {"Content-Type": "application/json"}
             )
             return
 
-        target_base_url, remaining_path = route_result
+        target_base_url = mapping.target_base_url
+        logger.info(f"Model mapping: {model_name} -> {target_base_url}")
 
-        # 如果只是 base 路径（无剩余路径），返回 200 探活响应
-        if not remaining_path:
-            logger.debug(f"Base path probe detected, returning 200 OK")
-            flow.response = http.Response.make(
-                200,
-                b'{"status":"ok"}',
-                {"Content-Type": "application/json"}
-            )
-            # 标记为本地响应，response() hook 中跳过处理
-            flow.metadata["local_response"] = True
-            return
-
-        logger.info(f"Route matched: {path} -> {target_base_url}{remaining_path}")
+        # 如果有 model override，替换 body 中的 model 值
+        override_model = mapping.model_overrides.get(model_name)
+        if override_model:
+            logger.info(f"Model override: {model_name} -> {override_model}")
+            new_body = self._replace_model_in_body(captured_req.body, override_model)
+            captured_req.body = new_body
+            # 更新 flow 的 body
+            flow.request.content = new_body.encode("utf-8")
 
         # 重写URL
-        new_url = self.capturer.rewrite_url(flow, target_base_url, remaining_path)
+        new_url = self.capturer.rewrite_url(flow, target_base_url, path)
         logger.info(f"Rewritten URL: {new_url}")
 
         # 存储捕获的请求，等待响应处理
         self._pending_requests[id(flow)] = captured_req
+
+    def _extract_model(self, body: str) -> str | None:
+        """从请求 body 中提取 model 参数"""
+        if not body:
+            return None
+        try:
+            data = json.loads(body)
+            return data.get("model")
+        except (json.JSONDecodeError, AttributeError):
+            return None
+
+    def _replace_model_in_body(self, body: str, new_model: str) -> str:
+        """替换请求 body 中的 model 字段"""
+        try:
+            data = json.loads(body)
+            data["model"] = new_model
+            return json.dumps(data, ensure_ascii=False)
+        except (json.JSONDecodeError, AttributeError):
+            return body
 
     def _handle_local_api(self, flow: http.HTTPFlow):
         """处理本地API请求（不转发）"""
@@ -148,8 +181,9 @@ class LLMRouterAddon:
                     )
             elif path.startswith("/api/calls"):
                 # 获取调用列表
-                from urllib.parse import parse_qs
-                params = parse_qs(flow.request.query)
+                from urllib.parse import parse_qs, urlencode
+                query_str = urlencode(list(flow.request.query.items()))
+                params = parse_qs(query_str)
                 limit = int(params.get("limit", [100])[0])
                 offset = int(params.get("offset", [0])[0])
                 db.execute("SELECT COUNT(*) FROM llm_calls")

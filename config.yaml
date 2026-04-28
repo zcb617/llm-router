@@ -1,10 +1,16 @@
 proxy:
   listen_port: 38888
-  routes:
-    /kimi: https://api.kimi.com/coding/
-    /openai: https://api.openai.com/v1
-    /glm: https://open.bigmodel.cn/api/paas/v4
-    /deepseek: https://api.deepseek.com/v1
+  model_mappings:
+    kimi:
+      target_base_url: https://api.kimi.com/coding/
+      model_overrides:
+        claude-sonnet-4-6: kimi-for-coding
+    openai:
+      target_base_url: https://api.openai.com/v1
+    glm:
+      target_base_url: https://open.bigmodel.cn/api/paas/v4
+    deepseek:
+      target_base_url: https://api.deepseek.com/v1
 
 database:
   path: "./llm_calls.db"

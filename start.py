@@ -48,9 +48,12 @@ def main():
     config = load_config(config_path)
 
     print(f"Proxy port: {config.proxy.listen_port}")
-    print(f"Routes: {len(config.proxy.routes)}")
-    for prefix, target in config.proxy.routes.items():
-        print(f"  {prefix} => {target}")
+    print(f"Model mappings: {len(config.proxy.model_mappings)}")
+    for key, mapping in config.proxy.model_mappings.items():
+        print(f"  {key} => {mapping.target_base_url}")
+        if mapping.model_overrides:
+            for src, dst in mapping.model_overrides.items():
+                print(f"    model: {src} -> {dst}")
     print(f"Database: {config.database.path}")
     print(f"Query API: http://localhost:{config.proxy.listen_port}/api/calls")
 
