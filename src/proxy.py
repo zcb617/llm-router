@@ -30,7 +30,8 @@ class LLMRouterAddon:
                 for key, mapping in raw_config["proxy"]["model_mappings"].items():
                     model_mappings[key] = ModelMappingConfig(
                         target_base_url=mapping["target_base_url"],
-                        model_overrides=mapping.get("model_overrides") or {}
+                        model_overrides=mapping.get("model_overrides") or {},
+                        api_key=mapping.get("api_key")
                     )
                 config = Config(
                     proxy=ProxyConfig(
@@ -113,6 +114,11 @@ class LLMRouterAddon:
 
         target_base_url = mapping.target_base_url
         logger.info(f"Model mapping: {model_name} -> {target_base_url}")
+
+        # 替换 API key
+        if mapping.api_key:
+            logger.info("Replacing API key")
+            flow.request.headers["Authorization"] = f"Bearer {mapping.api_key}"
 
         # 如果有 model override，替换 body 中的 model 值
         override_model = mapping.model_overrides.get(model_name)

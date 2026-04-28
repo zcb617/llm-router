@@ -3,14 +3,18 @@ proxy:
   model_mappings:
     kimi:
       target_base_url: https://api.kimi.com/coding/
+      api_key: "sk-kimi-xxxxx"
       model_overrides:
         claude-sonnet-4-6: kimi-for-coding
     openai:
       target_base_url: https://api.openai.com/v1
+      api_key: "sk-xxxxx"
     glm:
       target_base_url: https://open.bigmodel.cn/api/paas/v4
+      api_key: "xxxxx"
     deepseek:
       target_base_url: https://api.deepseek.com/v1
+      api_key: "sk-xxxxx"
 
 database:
   path: "./llm_calls.db"

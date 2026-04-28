@@ -50,7 +50,8 @@ def main():
     print(f"Proxy port: {config.proxy.listen_port}")
     print(f"Model mappings: {len(config.proxy.model_mappings)}")
     for key, mapping in config.proxy.model_mappings.items():
-        print(f"  {key} => {mapping.target_base_url}")
+        api_key_display = f"{mapping.api_key[:8]}..." if mapping.api_key else "(none)"
+        print(f"  {key} => {mapping.target_base_url}  [key: {api_key_display}]")
         if mapping.model_overrides:
             for src, dst in mapping.model_overrides.items():
                 print(f"    model: {src} -> {dst}")

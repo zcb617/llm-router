@@ -11,6 +11,7 @@ from pathlib import Path
 class ModelMappingConfig:
     target_base_url: str
     model_overrides: Dict[str, str] = None  # model_name -> upstream_model_name
+    api_key: str = None  # 转发时替换的 API key
 
 
 @dataclass
@@ -44,7 +45,8 @@ def load_config(config_path: str = "config.yaml") -> Config:
     for key, mapping in raw["proxy"]["model_mappings"].items():
         model_mappings[key] = ModelMappingConfig(
             target_base_url=mapping["target_base_url"],
-            model_overrides=mapping.get("model_overrides") or {}
+            model_overrides=mapping.get("model_overrides") or {},
+            api_key=mapping.get("api_key")
         )
 
     return Config(
