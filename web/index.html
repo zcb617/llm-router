@@ -249,11 +249,6 @@ function renderHeader() {
     });
     tr.appendChild(th);
   });
-  // 操作列
-  const th = document.createElement('th');
-  th.className = 'px-4 py-2 text-left font-medium';
-  th.textContent = '操作';
-  tr.appendChild(th);
 }
 
 function renderTable(data) {
@@ -267,7 +262,18 @@ function renderTable(data) {
       const td = document.createElement('td');
       td.className = 'px-4 py-2 whitespace-nowrap';
       let val = row[col.key] ?? '';
-      if (col.key === 'url' || col.key === 'original_model' || col.key === 'overridden_model' || col.key === 'call_id') {
+      // call_id 列：旧数据没有时显示 #id
+      if (col.key === 'call_id' && !val) {
+        val = row.id != null ? '#' + row.id : '';
+      }
+      // 调用ID列：可点击，鼠标指针手型
+      if (col.key === 'call_id') {
+        td.classList.add('truncate-cell', 'text-blue-500', 'cursor-pointer', 'hover:underline');
+        td.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showDetail(row);
+        });
+      } else if (col.key === 'url' || col.key === 'original_model' || col.key === 'overridden_model') {
         td.classList.add(col.key === 'url' ? 'truncate-cell-long' : 'truncate-cell');
       }
       if (col.key === 'stream_type') {
@@ -276,20 +282,6 @@ function renderTable(data) {
       td.textContent = val;
       tr.appendChild(td);
     });
-    // 操作列 - 显示ID作为链接
-    const td = document.createElement('td');
-    td.className = 'px-4 py-2';
-    const btn = document.createElement('button');
-    btn.className = 'text-blue-500 hover:text-blue-400 text-xs underline cursor-pointer';
-    const cid = row.call_id || 'N/A';
-    btn.textContent = cid.length > 8 ? cid.substring(0, 8) + '...' : cid;
-    btn.title = '查看详情';
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      showDetail(row);
-    });
-    td.appendChild(btn);
-    tr.appendChild(td);
     tbody.appendChild(tr);
   });
 }
