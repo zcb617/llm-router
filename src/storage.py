@@ -4,6 +4,7 @@ SQLite存储模块 - 异步写入调用记录
 import aiosqlite
 import json
 from pathlib import Path
+from typing import Optional
 
 
 class CallStorage:
@@ -37,7 +38,9 @@ class CallStorage:
                     duration_ms INTEGER,
                     tokens_input INTEGER,
                     tokens_output INTEGER,
-                    token_source TEXT
+                    token_source TEXT,
+                    stream_type TEXT,
+                    first_token_ms INTEGER
                 )
             """)
             await db.commit()
@@ -56,19 +59,22 @@ class CallStorage:
         duration_ms: int,
         tokens_input: int,
         tokens_output: int,
-        token_source: str
+        token_source: str,
+        stream_type: str = "non_stream",
+        first_token_ms: Optional[int] = None
     ):
         """保存一次LLM调用记录"""
         await self.initialize()
-        
+
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO llm_calls (
                     timestamp, url, method,
                     request_headers, request_body,
                     response_headers, response_body,
-                    duration_ms, tokens_input, tokens_output, token_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    duration_ms, tokens_input, tokens_output, token_source,
+                    stream_type, first_token_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp,
                 url,
@@ -80,7 +86,9 @@ class CallStorage:
                 duration_ms,
                 tokens_input,
                 tokens_output,
-                token_source
+                token_source,
+                stream_type,
+                first_token_ms
             ))
             await db.commit()
     

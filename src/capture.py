@@ -25,7 +25,8 @@ class CapturedResponse:
     status_code: int                  # HTTP状态码
     headers: dict                     # 响应头
     body: Optional[str] = None        # 响应体
-    duration_ms: int = 0              # 耗时(毫秒)
+    duration_ms: int = 0              # 总耗时(毫秒)
+    first_token_ms: Optional[int] = None  # 首字耗时(毫秒)，仅流式
     end_time: float = 0.0             # 结束时间(秒)
 
 

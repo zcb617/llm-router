@@ -1,20 +1,20 @@
 proxy:
   listen_port: 38888
   model_mappings:
-    kimi:
+    kimi-for-coding:
       target_base_url: https://api.kimi.com/coding/
-      api_key: "sk-kimi-xxxxx"
+      api_key: "sk-kimi-mgWduEtMneq20KKcgT33lhFuDA6GID3mn3dbyqRzeaFvik3BabWcmtP29pkXJxVY"
       model_overrides:
-        claude-sonnet-4-6: kimi-for-coding
-    openai:
-      target_base_url: https://api.openai.com/v1
-      api_key: "sk-xxxxx"
-    glm:
-      target_base_url: https://open.bigmodel.cn/api/paas/v4
-      api_key: "xxxxx"
-    deepseek:
-      target_base_url: https://api.deepseek.com/v1
-      api_key: "sk-xxxxx"
+        kimi-for-coding: kimi-for-coding
+    qwen3.6-plus:
+      target_base_url: https://coding.dashscope.aliyuncs.com/apps/anthropic
+      api_key: "sk-sp-e29fcd5986ac486a87a00dd6a327f643"
+    qwen3-coder-next:
+      target_base_url: https://coding.dashscope.aliyuncs.com/apps/anthropic
+      api_key: "sk-sp-e29fcd5986ac486a87a00dd6a327f643"
+    qwen3-coder-plus:
+      target_base_url: https://coding.dashscope.aliyuncs.com/apps/anthropic
+      api_key: "sk-sp-e29fcd5986ac486a87a00dd6a327f643"
 
 database:
   path: "./llm_calls.db"

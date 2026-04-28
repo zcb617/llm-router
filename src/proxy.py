@@ -91,12 +91,14 @@ class LLMRouterAddon:
         # 从请求 body 提取 model 参数
         model_name = self._extract_model(captured_req.body)
         if not model_name:
-            logger.warning("No model found in request body")
+            # 无 model 参数的请求，可能是探活
+            logger.debug(f"No model in body, returning 200 OK for probe")
             flow.response = http.Response.make(
-                400,
-                b'{"error": "Model parameter is required in request body"}',
+                200,
+                b'{"status":"ok"}',
                 {"Content-Type": "application/json"}
             )
+            flow.metadata["local_response"] = True
             return
 
         logger.info(f"Model from body: {model_name}")
@@ -132,6 +134,9 @@ class LLMRouterAddon:
         # 重写URL
         new_url = self.capturer.rewrite_url(flow, target_base_url, path)
         logger.info(f"Rewritten URL: {new_url}")
+
+        # 更新捕获请求的URL为转发后的真实地址
+        captured_req.url = new_url
 
         # 存储捕获的请求，等待响应处理
         self._pending_requests[id(flow)] = captured_req
@@ -266,25 +271,33 @@ class LLMRouterAddon:
         # 计算token
         # 尝试从请求中提取模型名称
         model = "gpt-3.5-turbo"  # 默认值
+        stream_type = "non_stream"  # 默认非流式
         try:
             import json
             if captured_req.body:
                 req_data = json.loads(captured_req.body)
                 model = req_data.get("model", "gpt-3.5-turbo")
+                # 判断流式/非流式
+                if req_data.get("stream"):
+                    stream_type = "stream"
         except:
             pass
-        
+
+        # 流式响应：首字耗时 = 响应到达时间 - 请求发送时间
+        first_token_ms = captured_resp.duration_ms if stream_type == "stream" else None
+
         tokens_input, tokens_output, token_source = calculate_tokens(
             model=model,
             request_body=captured_req.body,
             response_body=captured_resp.body
         )
-        
+
         logger.info(
             f"Token calculation: "
-            f"input={tokens_input}, output={tokens_output}, source={token_source}"
+            f"input={tokens_input}, output={tokens_output}, source={token_source}, "
+            f"stream={stream_type}"
         )
-        
+
         # 异步保存到数据库
         asyncio.create_task(
             self._save_call(
@@ -292,17 +305,21 @@ class LLMRouterAddon:
                 captured_resp=captured_resp,
                 tokens_input=tokens_input,
                 tokens_output=tokens_output,
-                token_source=token_source
+                token_source=token_source,
+                stream_type=stream_type,
+                first_token_ms=first_token_ms
             )
         )
-    
+
     async def _save_call(
         self,
         captured_req,
         captured_resp,
         tokens_input: int,
         tokens_output: int,
-        token_source: str
+        token_source: str,
+        stream_type: str = "non_stream",
+        first_token_ms: Optional[int] = None
     ):
         """保存调用记录到数据库"""
         try:
@@ -317,7 +334,9 @@ class LLMRouterAddon:
                 duration_ms=captured_resp.duration_ms,
                 tokens_input=tokens_input,
                 tokens_output=tokens_output,
-                token_source=token_source
+                token_source=token_source,
+                stream_type=stream_type,
+                first_token_ms=first_token_ms
             )
             logger.info("Call record saved to database")
         except Exception as e:
