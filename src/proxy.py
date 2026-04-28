@@ -181,6 +181,9 @@ class LLMRouterAddon:
         import json
         import sqlite3
 
+        # 标记为本地响应，response() hook 中跳过处理
+        flow.metadata["local_response"] = True
+
         path = flow.request.path
 
         try:
