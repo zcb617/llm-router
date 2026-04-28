@@ -91,7 +91,7 @@
     <!-- Table -->
     <div id="tableWrapper" class="overflow-hidden rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
       <div class="overflow-auto h-full">
-        <table class="w-full text-sm table-fixed">
+        <table class="text-sm" style="min-width: 1400px; table-layout: auto;">
           <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
             <tr id="headerRow"></tr>
           </thead>
@@ -179,17 +179,17 @@
 
 <script>
 const COLUMNS = [
-  { key: 'call_id', label: '调用ID', default: true },
-  { key: 'timestamp', label: '时间', default: true },
-  { key: 'method', label: '方法', default: true },
-  { key: 'url', label: 'URL', default: true },
-  { key: 'original_model', label: '原始模型', default: true },
-  { key: 'overridden_model', label: '映射模型', default: true },
-  { key: 'duration_ms', label: '耗时(ms)', default: true },
-  { key: 'first_token_ms', label: '首字耗时(ms)', default: true },
-  { key: 'stream_type', label: '流式类型', default: true },
-  { key: 'tokens_input', label: '输入Token', default: true },
-  { key: 'tokens_output', label: '输出Token', default: true },
+  { key: 'call_id', label: '调用ID', default: true, minWidth: '180px' },
+  { key: 'timestamp', label: '时间', default: true, minWidth: '165px' },
+  { key: 'method', label: '方法', default: true, minWidth: '60px', width: '60px' },
+  { key: 'url', label: 'URL', default: true, minWidth: '200px' },
+  { key: 'original_model', label: '原始模型', default: true, minWidth: '140px' },
+  { key: 'overridden_model', label: '映射模型', default: true, minWidth: '140px' },
+  { key: 'duration_ms', label: '耗时(ms)', default: true, minWidth: '100px' },
+  { key: 'first_token_ms', label: '首字耗时(ms)', default: true, minWidth: '120px' },
+  { key: 'stream_type', label: '流式类型', default: true, minWidth: '100px' },
+  { key: 'tokens_input', label: '输入Token', default: true, minWidth: '100px' },
+  { key: 'tokens_output', label: '输出Token', default: true, minWidth: '110px' },
 ];
 
 const STORAGE_KEY = 'llm_router_columns';
@@ -261,7 +261,21 @@ function renderTable(data) {
     visible.forEach(col => {
       const td = document.createElement('td');
       td.className = 'px-4 py-2 whitespace-nowrap';
+      if (col.width) td.style.width = col.width;
+      if (col.minWidth) td.style.minWidth = col.minWidth;
       let val = row[col.key] ?? '';
+      // 时间格式化：ISO 8601 -> yyyy-MM-dd HH:mm:ss
+      if (col.key === 'timestamp' && val) {
+        try {
+          const d = new Date(val);
+          val = d.getFullYear() + '-' +
+            String(d.getMonth()+1).padStart(2,'0') + '-' +
+            String(d.getDate()).padStart(2,'0') + ' ' +
+            String(d.getHours()).padStart(2,'0') + ':' +
+            String(d.getMinutes()).padStart(2,'0') + ':' +
+            String(d.getSeconds()).padStart(2,'0');
+        } catch(e) {}
+      }
       // call_id 列：旧数据没有时显示 #id
       if (col.key === 'call_id' && !val) {
         val = row.id != null ? '#' + row.id : '';

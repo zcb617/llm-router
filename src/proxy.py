@@ -314,9 +314,17 @@ class LLMRouterAddon:
                 json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
                 {"Content-Type": "application/json"}
             )
-    
+
+    def responseheaders(self, flow: http.HTTPFlow):
+        """响应头到达时触发（用于计算首字耗时）"""
+        import time
+        # 记录响应头到达时间，跳过本地请求
+        if not flow.metadata.get("local_response"):
+            flow.metadata["headers_time"] = time.time()
+
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
+        import time
         from src.tokenizer import calculate_tokens
 
         # 跳过本地响应的请求（探活、查询API等）
@@ -328,16 +336,16 @@ class LLMRouterAddon:
         if captured_req is None:
             logger.warning("No captured request found for this response")
             return
-        
+
         # 捕获响应数据
         captured_resp = self.capturer.capture_response(flow, captured_req)
-        
+
         logger.info(
             f"Response captured: "
             f"status={captured_resp.status_code}, "
             f"duration={captured_resp.duration_ms}ms"
         )
-        
+
         # 计算token
         # 尝试从请求中提取模型名称
         model = "gpt-3.5-turbo"  # 默认值
@@ -353,8 +361,12 @@ class LLMRouterAddon:
         except:
             pass
 
-        # 流式响应：首字耗时 = 响应到达时间 - 请求发送时间
-        first_token_ms = captured_resp.duration_ms if stream_type == "stream" else None
+        # 首字耗时 = 响应头到达时间 - 请求发送时间
+        # 对于流式响应，响应头到达时首字节数据也基本到了
+        first_token_ms = None
+        headers_time = flow.metadata.get("headers_time")
+        if headers_time and stream_type == "stream":
+            first_token_ms = int((headers_time - captured_req.start_time) * 1000)
 
         tokens_input, tokens_output, token_source = calculate_tokens(
             model=model,
@@ -365,7 +377,7 @@ class LLMRouterAddon:
         logger.info(
             f"Token calculation: "
             f"input={tokens_input}, output={tokens_output}, source={token_source}, "
-            f"stream={stream_type}"
+            f"stream={stream_type}, first_token_ms={first_token_ms}"
         )
 
         # 异步保存到数据库
