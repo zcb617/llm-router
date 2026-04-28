@@ -1,0 +1,20 @@
+proxy:
+  listen_port: 38888
+  model_mappings:
+    kimi:
+      target_base_url: https://api.kimi.com/coding/
+      api_key: "sk-kimi-your-api-key-here"
+      model_overrides:
+        claude-sonnet-4-6: kimi-for-coding
+    openai:
+      target_base_url: https://api.openai.com/v1
+      api_key: "sk-your-api-key-here"
+    glm:
+      target_base_url: https://open.bigmodel.cn/api/paas/v4
+      api_key: "your-api-key-here"
+    deepseek:
+      target_base_url: https://api.deepseek.com/v1
+      api_key: "sk-your-api-key-here"
+
+database:
+  path: "./data/llm_calls.db"

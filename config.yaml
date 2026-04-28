@@ -17,4 +17,4 @@ proxy:
       api_key: "sk-sp-e29fcd5986ac486a87a00dd6a327f643"
 
 database:
-  path: "./llm_calls.db"
+  path: "./data/llm_calls.db"

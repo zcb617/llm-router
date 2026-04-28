@@ -1,0 +1,13 @@
+services:
+  llm-router:
+    build: .
+    container_name: llm-router
+    ports:
+      - "38888:38888"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./certs:/app/certs
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
