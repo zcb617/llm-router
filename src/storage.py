@@ -40,7 +40,9 @@ class CallStorage:
                     tokens_output INTEGER,
                     token_source TEXT,
                     stream_type TEXT,
-                    first_token_ms INTEGER
+                    first_token_ms INTEGER,
+                    original_model TEXT,
+                    overridden_model TEXT
                 )
             """)
             await db.commit()
@@ -61,7 +63,9 @@ class CallStorage:
         tokens_output: int,
         token_source: str,
         stream_type: str = "non_stream",
-        first_token_ms: Optional[int] = None
+        first_token_ms: Optional[int] = None,
+        original_model: str = None,
+        overridden_model: str = None
     ):
         """保存一次LLM调用记录"""
         await self.initialize()
@@ -73,8 +77,9 @@ class CallStorage:
                     request_headers, request_body,
                     response_headers, response_body,
                     duration_ms, tokens_input, tokens_output, token_source,
-                    stream_type, first_token_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    stream_type, first_token_ms,
+                    original_model, overridden_model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp,
                 url,
@@ -88,7 +93,9 @@ class CallStorage:
                 tokens_output,
                 token_source,
                 stream_type,
-                first_token_ms
+                first_token_ms,
+                original_model,
+                overridden_model
             ))
             await db.commit()
     

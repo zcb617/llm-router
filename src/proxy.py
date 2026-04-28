@@ -130,6 +130,12 @@ class LLMRouterAddon:
             captured_req.body = new_body
             # 更新 flow 的 body
             flow.request.content = new_body.encode("utf-8")
+            # 记录原始和替换后的模型
+            captured_req.original_model = model_name
+            captured_req.overridden_model = override_model
+        else:
+            captured_req.original_model = model_name
+            captured_req.overridden_model = model_name
 
         # 重写URL
         new_url = self.capturer.rewrite_url(flow, target_base_url, path)
@@ -307,7 +313,9 @@ class LLMRouterAddon:
                 tokens_output=tokens_output,
                 token_source=token_source,
                 stream_type=stream_type,
-                first_token_ms=first_token_ms
+                first_token_ms=first_token_ms,
+                original_model=captured_req.original_model,
+                overridden_model=captured_req.overridden_model
             )
         )
 
@@ -319,7 +327,9 @@ class LLMRouterAddon:
         tokens_output: int,
         token_source: str,
         stream_type: str = "non_stream",
-        first_token_ms: Optional[int] = None
+        first_token_ms: Optional[int] = None,
+        original_model: str = None,
+        overridden_model: str = None
     ):
         """保存调用记录到数据库"""
         try:
@@ -336,7 +346,9 @@ class LLMRouterAddon:
                 tokens_output=tokens_output,
                 token_source=token_source,
                 stream_type=stream_type,
-                first_token_ms=first_token_ms
+                first_token_ms=first_token_ms,
+                original_model=original_model,
+                overridden_model=overridden_model
             )
             logger.info("Call record saved to database")
         except Exception as e:
