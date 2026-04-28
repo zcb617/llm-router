@@ -197,7 +197,7 @@ class LLMRouterAddon:
     def _handle_local_api(self, flow: http.HTTPFlow):
         """处理本地API请求（不转发）"""
         import json
-        import sqlite3
+        from urllib.parse import parse_qs, urlencode
 
         # 标记为本地响应，response() hook 中跳过处理
         flow.metadata["local_response"] = True
@@ -215,20 +215,40 @@ class LLMRouterAddon:
                     flow.response = http.Response.make(404, b"Web UI not found", {"Content-Type": "text/plain"})
                 return
 
-            # 使用同步方式查询
-            conn = sqlite3.connect(self.config.database.path)
-            conn.row_factory = sqlite3.Row
-            db = conn.cursor()
+            # 根据配置连接数据库（同步）
+            if self.config.database.postgresql:
+                import psycopg2
+                conn = psycopg2.connect(
+                    host=self.config.database.postgresql.host,
+                    port=self.config.database.postgresql.port,
+                    user=self.config.database.postgresql.user,
+                    password=self.config.database.postgresql.password,
+                    database=self.config.database.postgresql.dbname
+                )
+                cur = conn.cursor()
+                is_pg = True
+            else:
+                import sqlite3
+                conn = sqlite3.connect(self.config.database.path)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                is_pg = False
 
             if path.startswith("/api/calls/"):
-                # 获取单条记录
                 call_id = int(path.split("/")[-1])
-                db.execute("SELECT * FROM llm_calls WHERE id = ?", (call_id,))
-                call = db.fetchone()
-                if call:
+                if is_pg:
+                    cur.execute("SELECT * FROM llm_calls WHERE id = %s OR call_id = %s", (call_id, call_id))
+                else:
+                    cur.execute("SELECT * FROM llm_calls WHERE id = ? OR call_id = ?", (call_id, call_id))
+                row = cur.fetchone()
+                if row:
+                    if is_pg:
+                        row_dict = dict(zip([d.name for d in cur.description], row))
+                    else:
+                        row_dict = dict(row)
                     flow.response = http.Response.make(
                         200,
-                        json.dumps(dict(call), ensure_ascii=False).encode("utf-8"),
+                        json.dumps(row_dict, ensure_ascii=False).encode("utf-8"),
                         {"Content-Type": "application/json"}
                     )
                 else:
@@ -238,19 +258,23 @@ class LLMRouterAddon:
                         {"Content-Type": "application/json"}
                     )
             elif path.startswith("/api/calls"):
-                # 获取调用列表
-                from urllib.parse import parse_qs, urlencode
                 query_str = urlencode(list(flow.request.query.items()))
                 params = parse_qs(query_str)
                 limit = int(params.get("limit", [100])[0])
                 offset = int(params.get("offset", [0])[0])
-                db.execute("SELECT COUNT(*) FROM llm_calls")
-                total = db.fetchone()[0]
-                db.execute(
-                    "SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-                    (limit, offset)
-                )
-                calls = [dict(row) for row in db.fetchall()]
+                
+                if is_pg:
+                    cur.execute("SELECT COUNT(*) FROM llm_calls")
+                    total = cur.fetchone()[0]
+                    cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT %s OFFSET %s", (limit, offset))
+                    rows = cur.fetchall()
+                    calls = [dict(zip([d.name for d in cur.description], r)) for r in rows]
+                else:
+                    cur.execute("SELECT COUNT(*) FROM llm_calls")
+                    total = cur.fetchone()[0]
+                    cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT ? OFFSET ?", (limit, offset))
+                    calls = [dict(r) for r in cur.fetchall()]
+                
                 flow.response = http.Response.make(
                     200,
                     json.dumps({
@@ -262,16 +286,14 @@ class LLMRouterAddon:
                     {"Content-Type": "application/json"}
                 )
             elif path == "/api/stats":
-                # 获取统计信息
-                db.execute("SELECT COUNT(*) FROM llm_calls")
-                total = db.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM llm_calls")
+                total = cur.fetchone()[0]
                 flow.response = http.Response.make(
                     200,
                     json.dumps({"total_calls": total}, ensure_ascii=False).encode("utf-8"),
                     {"Content-Type": "application/json"}
                 )
             elif path == "/health":
-                # 健康检查
                 flow.response = http.Response.make(
                     200,
                     b'{"status":"ok"}',
@@ -284,6 +306,7 @@ class LLMRouterAddon:
                     {"Content-Type": "application/json"}
                 )
 
+            cur.close()
             conn.close()
         except Exception as e:
             flow.response = http.Response.make(
