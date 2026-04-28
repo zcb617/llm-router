@@ -75,8 +75,15 @@ class LLMRouterAddon:
         from src.config import match_model
         from urllib.parse import urlparse
 
+        path = flow.request.path
+
+        # 处理本地Web UI（优先级最高）
+        if path in ("/web", "/web/", "/web/index.html"):
+            self._handle_local_api(flow)
+            return
+
         # 处理本地查询API请求（不转发到上游）
-        if flow.request.path.startswith("/api/") or flow.request.path == "/health":
+        if path.startswith("/api/") or path == "/health":
             self._handle_local_api(flow)
             return
 
