@@ -26,7 +26,7 @@ class LLMRouterAddon:
             if config_file.exists():
                 with open(config_file) as f:
                     raw_config = json.load(f)
-                from src.config import Config, ProxyConfig, DatabaseConfig, ModelMappingConfig
+                from src.config import Config, ProxyConfig, DatabaseConfig, ModelMappingConfig, PostgreSQLConfig
                 model_mappings = {}
                 for key, mapping in raw_config["proxy"]["model_mappings"].items():
                     model_mappings[key] = ModelMappingConfig(
@@ -34,13 +34,28 @@ class LLMRouterAddon:
                         model_overrides=mapping.get("model_overrides") or {},
                         api_key=mapping.get("api_key")
                     )
+                
+                # 解析数据库配置
+                db_config = raw_config.get("database", {})
+                postgresql = None
+                if db_config.get("postgresql"):
+                    pg = db_config["postgresql"]
+                    postgresql = PostgreSQLConfig(
+                        host=pg.get("host", "localhost"),
+                        port=pg.get("port", 5432),
+                        user=pg.get("user", ""),
+                        password=pg.get("password", ""),
+                        dbname=pg.get("dbname", "llm_router")
+                    )
+                
                 config = Config(
                     proxy=ProxyConfig(
                         listen_port=raw_config["proxy"]["listen_port"],
                         model_mappings=model_mappings
                     ),
                     database=DatabaseConfig(
-                        path=raw_config["database"]["path"]
+                        path=db_config.get("path", "./data/llm_calls.db"),
+                        postgresql=postgresql
                     )
                 )
         
@@ -62,7 +77,10 @@ class LLMRouterAddon:
     def storage(self):
         if self._storage is None:
             from src.storage import CallStorage
-            self._storage = CallStorage(self.config.database.path)
+            self._storage = CallStorage(
+                self.config.database.path,
+                self.config.database.postgresql
+            )
         return self._storage
     
     def load(self, loader: Loader):

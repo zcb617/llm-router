@@ -18,3 +18,9 @@ proxy:
 
 database:
   path: "./data/llm_calls.db"
+  postgresql:
+    host: "192.168.1.51"
+    port: 5432
+    user: "zhangcb"
+    password: "tmdysj"
+    dbname: "llm-router"

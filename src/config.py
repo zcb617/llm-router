@@ -21,8 +21,18 @@ class ProxyConfig:
 
 
 @dataclass
+class PostgreSQLConfig:
+    host: str = "localhost"
+    port: int = 5432
+    user: str = ""
+    password: str = ""
+    dbname: str = "llm_router"
+
+
+@dataclass
 class DatabaseConfig:
-    path: str
+    path: str = "./data/llm_calls.db"  # SQLite path
+    postgresql: PostgreSQLConfig = None  # PostgreSQL config (optional)
 
 
 @dataclass
@@ -49,13 +59,27 @@ def load_config(config_path: str = "config.yaml") -> Config:
             api_key=mapping.get("api_key")
         )
 
+    # 解析数据库配置
+    db_config = raw.get("database", {})
+    postgresql = None
+    if db_config.get("postgresql"):
+        pg = db_config["postgresql"]
+        postgresql = PostgreSQLConfig(
+            host=pg.get("host", "localhost"),
+            port=pg.get("port", 5432),
+            user=pg.get("user", ""),
+            password=pg.get("password", ""),
+            dbname=pg.get("dbname", "llm_router")
+        )
+
     return Config(
         proxy=ProxyConfig(
             listen_port=raw["proxy"]["listen_port"],
             model_mappings=model_mappings
         ),
         database=DatabaseConfig(
-            path=raw["database"]["path"]
+            path=db_config.get("path", "./data/llm_calls.db"),
+            postgresql=postgresql
         )
     )
 

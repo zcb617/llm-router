@@ -11,3 +11,4 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      - DB_PATH=./data/llm_calls.db
