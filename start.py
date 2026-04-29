@@ -28,22 +28,39 @@ def init_rbac_and_data(storage):
 def migrate_upstreams(storage):
     """将已有 model_configs 的 target_base_url+api_key 迁移到 upstreams 表"""
     try:
-        configs = storage.get_all_model_configs()
+        # 直接查 model_configs 表，不依赖 upstreams JOIN（避免表不存在时报错）
+        if storage.postgresql:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=storage.postgresql.host, port=storage.postgresql.port,
+                user=storage.postgresql.user, password=storage.postgresql.password,
+                database=storage.postgresql.dbname
+            )
+            cur = conn.cursor()
+            cur.execute("SELECT id, model_key, target_base_url, api_key FROM model_configs WHERE target_base_url IS NOT NULL AND target_base_url != ''")
+            rows = cur.fetchall()
+            configs = [{"id": r[0], "model_key": r[1], "target_base_url": r[2], "api_key": r[3]} for r in rows]
+            cur.close()
+            conn.close()
+        else:
+            import sqlite3
+            conn = sqlite3.connect(storage.db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT id, model_key, target_base_url, api_key FROM model_configs WHERE target_base_url IS NOT NULL AND target_base_url != ''")
+            configs = [{"id": r[0], "model_key": r[1], "target_base_url": r[2], "api_key": r[3]} for r in cur.fetchall()]
+            cur.close()
+            conn.close()
+
         if not configs:
+            print("  [迁移] 无需迁移（没有需要迁移的模型配置）")
             return
 
         url_key_map = {}  # (url, key) -> upstream_id
         migrated_count = 0
 
         for cfg in configs:
-            # 跳过已经关联上游的
-            if cfg.get("upstream_id"):
-                continue
-
-            target_url = cfg.get("target_base_url", "")
-            api_key = cfg.get("api_key", "")
-            if not target_url:
-                continue  # 跳过没有 URL 的配置
+            target_url = cfg["target_base_url"]
+            api_key = cfg.get("api_key", "") or ""
 
             key = (target_url, api_key)
             if key not in url_key_map:
@@ -65,9 +82,11 @@ def migrate_upstreams(storage):
         if migrated_count > 0:
             print(f"  [迁移] 完成！共迁移 {migrated_count} 个模型配置，创建 {len(url_key_map)} 个上游")
         else:
-            print("  [迁移] 无需迁移（所有模型配置已关联上游或无数据）")
+            print("  [迁移] 无需迁移（所有模型配置已关联上游）")
     except Exception as e:
-        print(f"  [迁移] 警告: {e}")
+        import traceback
+        print(f"  [迁移] 失败: {e}")
+        traceback.print_exc()
 
 
 async def run_proxy(config, storage):

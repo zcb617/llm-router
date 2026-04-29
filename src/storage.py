@@ -1086,8 +1086,8 @@ class CallStorage:
                     "updated_at": r[9].isoformat() if r[9] else None,
                 }
                 # upstream 字段（LEFT JOIN 可能为 None）
-                if len(r) > 11 and r[11] is not None:
-                    d["upstream_name"] = r[11]
+                if len(r) > 10 and r[10] is not None:
+                    d["upstream_name"] = r[10]
                 return d
             else:
                 d = dict(r)
