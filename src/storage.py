@@ -1122,13 +1122,19 @@ class CallStorage:
                 return d
 
         sql = (
-            "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
+            "SELECT mc.id, mc.model_key, mc.upstream_id, "
+            "COALESCE(u.target_base_url, mc.target_base_url) as target_base_url, "
+            "COALESCE(u.api_key, mc.api_key) as api_key, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "ORDER BY mc.model_key"
         ) if self.postgresql else (
-            "SELECT mc.*, u.name as upstream_name FROM model_configs mc "
+            "SELECT mc.id, mc.model_key, mc.upstream_id, "
+            "COALESCE(u.target_base_url, mc.target_base_url) as target_base_url, "
+            "COALESCE(u.api_key, mc.api_key) as api_key, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "u.name as upstream_name FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id ORDER BY mc.model_key"
         )
         if self.postgresql:
@@ -1149,13 +1155,19 @@ class CallStorage:
     def get_model_config(self, model_key: str) -> Optional[dict]:
         """按 model_key 获取单个配置"""
         sql = (
-            "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
+            "SELECT mc.id, mc.model_key, mc.upstream_id, "
+            "COALESCE(u.target_base_url, mc.target_base_url) as target_base_url, "
+            "COALESCE(u.api_key, mc.api_key) as api_key, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.model_key = %s"
         ) if self.postgresql else (
-            "SELECT mc.*, u.name as upstream_name FROM model_configs mc "
+            "SELECT mc.id, mc.model_key, mc.upstream_id, "
+            "COALESCE(u.target_base_url, mc.target_base_url) as target_base_url, "
+            "COALESCE(u.api_key, mc.api_key) as api_key, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "u.name as upstream_name FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id WHERE mc.model_key = ?"
         )
         if self.postgresql:
@@ -1195,13 +1207,19 @@ class CallStorage:
     def get_model_config_by_id(self, config_id: int) -> Optional[dict]:
         """按 ID 获取模型配置"""
         sql = (
-            "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
+            "SELECT mc.id, mc.model_key, mc.upstream_id, "
+            "COALESCE(u.target_base_url, mc.target_base_url) as target_base_url, "
+            "COALESCE(u.api_key, mc.api_key) as api_key, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.id = %s"
         ) if self.postgresql else (
-            "SELECT mc.*, u.name as upstream_name FROM model_configs mc "
+            "SELECT mc.id, mc.model_key, mc.upstream_id, "
+            "COALESCE(u.target_base_url, mc.target_base_url) as target_base_url, "
+            "COALESCE(u.api_key, mc.api_key) as api_key, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "u.name as upstream_name FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id WHERE mc.id = ?"
         )
         if self.postgresql:
