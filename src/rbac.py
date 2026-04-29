@@ -50,6 +50,7 @@ def init_rbac(storage):
         )
         cur = conn.cursor()
         storage.init_rbac_tables(is_pg=True, cur=cur, conn=conn)
+        conn.commit()
         cur.close()
         conn.close()
     else:
