@@ -181,6 +181,7 @@
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">基础 URL</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">描述</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">Claude Code 特征</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">状态</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">更新时间</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
@@ -407,8 +408,11 @@
         </div>
         <div>
           <label class="block text-sm font-medium mb-1">API Key</label>
-          <input id="upstreamApiKey" type="password" placeholder="sk-xxxx"
-            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          <div class="flex gap-2">
+            <input id="upstreamApiKey" type="password" placeholder="sk-xxxx"
+              class="flex-1 px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+            <button id="toggleApiKeyBtn" type="button" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition whitespace-nowrap">显示</button>
+          </div>
         </div>
         <div>
           <label class="block text-sm font-medium mb-1">描述</label>
@@ -418,6 +422,10 @@
         <div class="flex items-center gap-2">
           <input id="upstreamIsActive" type="checkbox" checked class="w-4 h-4">
           <label for="upstreamIsActive" class="text-sm">启用</label>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="upstreamUseClaudeFeatures" type="checkbox" class="w-4 h-4">
+          <label for="upstreamUseClaudeFeatures" class="text-sm">启用 Claude Code 特征 <span class="text-zinc-400 text-xs">(注入 Claude Code 专用请求头)</span></label>
         </div>
         <div id="upstreamEditError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
       </div>
@@ -928,11 +936,15 @@ function renderUpstreams() {
     tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
     const statusClass = u.is_active ? 'text-green-500' : 'text-red-500';
     const statusText = u.is_active ? '启用' : '禁用';
+    const claudeBadge = u.use_claude_features
+      ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">已启用</span>'
+      : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">未启用</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-medium">${u.name}</td>
       <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${u.target_base_url}">${u.target_base_url}</td>
       <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${u.api_key_masked || '****'}</td>
       <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.description || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap">${claudeBadge}</td>
       <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
       <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.updated_at || '-'}</td>
       <td class="px-4 py-2 whitespace-nowrap">
@@ -948,17 +960,31 @@ function renderUpstreams() {
 function bindUpstreamTableEvents() {
   const tbody = document.getElementById('upstreamsTableBody');
   tbody.querySelectorAll('.edit-upstream-btn').forEach(btn => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       const u = allUpstreams.find(c => c.id == btn.dataset.id);
       if (!u) return;
       editingUpstreamId = u.id;
       document.getElementById('upstreamEditTitle').textContent = '编辑上游';
       document.getElementById('upstreamName').value = u.name;
       document.getElementById('upstreamBaseUrl').value = u.target_base_url;
-      document.getElementById('upstreamApiKey').value = u.api_key || '';
       document.getElementById('upstreamDescription').value = u.description || '';
       document.getElementById('upstreamIsActive').checked = u.is_active;
+      document.getElementById('upstreamUseClaudeFeatures').checked = u.use_claude_features || false;
       document.getElementById('upstreamEditError').classList.add('hidden');
+
+      // 获取完整 upstream 数据（含完整 api_key）
+      try {
+        const res = await fetch('/api/upstreams/' + u.id, { headers: getAuthHeaders() });
+        const full = await res.json();
+        document.getElementById('upstreamApiKey').value = full.api_key || '';
+      } catch(e) {
+        document.getElementById('upstreamApiKey').value = '';
+      }
+
+      // 重置 toggle 状态
+      document.getElementById('upstreamApiKey').type = 'password';
+      document.getElementById('toggleApiKeyBtn').textContent = '显示';
+
       document.getElementById('upstreamEditModal').classList.remove('hidden');
     };
   });
@@ -983,6 +1009,7 @@ document.getElementById('createUpstreamBtn').addEventListener('click', () => {
   document.getElementById('upstreamApiKey').value = '';
   document.getElementById('upstreamDescription').value = '';
   document.getElementById('upstreamIsActive').checked = true;
+  document.getElementById('upstreamUseClaudeFeatures').checked = false;
   document.getElementById('upstreamEditError').classList.add('hidden');
   document.getElementById('upstreamEditModal').classList.remove('hidden');
 });
@@ -990,6 +1017,19 @@ document.getElementById('createUpstreamBtn').addEventListener('click', () => {
 document.getElementById('cancelUpstreamEdit').addEventListener('click', () => {
   document.getElementById('upstreamEditModal').classList.add('hidden');
   editingUpstreamId = null;
+});
+
+// 切换 API Key 显示/隐藏
+document.getElementById('toggleApiKeyBtn').addEventListener('click', () => {
+  const input = document.getElementById('upstreamApiKey');
+  const btn = document.getElementById('toggleApiKeyBtn');
+  if (input.type === 'password') {
+    input.type = 'text';
+    btn.textContent = '隐藏';
+  } else {
+    input.type = 'password';
+    btn.textContent = '显示';
+  }
 });
 
 document.getElementById('upstreamEditModal').addEventListener('click', (e) => {
@@ -1005,6 +1045,7 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async ()
   const apiKey = document.getElementById('upstreamApiKey').value;
   const description = document.getElementById('upstreamDescription').value.trim();
   const isActive = document.getElementById('upstreamIsActive').checked;
+  const useClaudeFeatures = document.getElementById('upstreamUseClaudeFeatures').checked;
 
   if (!name || !targetBaseUrl) {
     document.getElementById('upstreamEditError').textContent = '名称和基础 URL 不能为空';
@@ -1012,7 +1053,7 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async ()
     return;
   }
 
-  const body = { name, target_base_url: targetBaseUrl, api_key: apiKey, description, is_active: isActive };
+  const body = { name, target_base_url: targetBaseUrl, api_key: apiKey, description, is_active: isActive, use_claude_features: useClaudeFeatures };
 
   try {
     let res;

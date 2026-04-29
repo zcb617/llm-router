@@ -897,7 +897,7 @@ class CallStorage:
 
     def get_all_upstreams(self) -> list:
         """获取所有上游列表"""
-        sql = "SELECT id, name, target_base_url, api_key, is_active, description, created_at, updated_at FROM upstreams ORDER BY name"
+        sql = "SELECT id, name, target_base_url, api_key, is_active, description, use_claude_features, created_at, updated_at FROM upstreams ORDER BY name"
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
@@ -906,8 +906,9 @@ class CallStorage:
                     {
                         "id": r[0], "name": r[1], "target_base_url": r[2],
                         "api_key": r[3], "is_active": r[4], "description": r[5],
-                        "created_at": r[6].isoformat() if r[6] else None,
-                        "updated_at": r[7].isoformat() if r[7] else None,
+                        "use_claude_features": r[6],
+                        "created_at": r[7].isoformat() if r[7] else None,
+                        "updated_at": r[8].isoformat() if r[8] else None,
                     }
                     for r in cur.fetchall()
                 ]
@@ -923,8 +924,8 @@ class CallStorage:
 
     def get_upstream(self, upstream_id: int) -> Optional[dict]:
         """按 ID 获取上游"""
-        sql = "SELECT id, name, target_base_url, api_key, is_active, description, created_at, updated_at FROM upstreams WHERE id = %s" if self.postgresql else \
-              "SELECT * FROM upstreams WHERE id = ?"
+        sql = "SELECT id, name, target_base_url, api_key, is_active, description, use_claude_features, created_at, updated_at FROM upstreams WHERE id = %s" if self.postgresql else \
+              "SELECT id, name, target_base_url, api_key, is_active, description, use_claude_features, created_at, updated_at FROM upstreams WHERE id = ?"
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
@@ -934,8 +935,9 @@ class CallStorage:
                     return {
                         "id": row[0], "name": row[1], "target_base_url": row[2],
                         "api_key": row[3], "is_active": row[4], "description": row[5],
-                        "created_at": row[6].isoformat() if row[6] else None,
-                        "updated_at": row[7].isoformat() if row[7] else None,
+                        "use_claude_features": row[6],
+                        "created_at": row[7].isoformat() if row[7] else None,
+                        "updated_at": row[8].isoformat() if row[8] else None,
                     }
                 return None
             finally:
@@ -998,15 +1000,16 @@ class CallStorage:
                 self._sqlite_close(conn, cur)
 
     def create_upstream(self, name: str, target_base_url: str, api_key: str = "",
-                        description: str = "", is_active: bool = True) -> int:
+                        description: str = "", is_active: bool = True,
+                        use_claude_features: bool = False) -> int:
         """创建上游，返回 ID"""
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
                 cur.execute(
-                    "INSERT INTO upstreams (name, target_base_url, api_key, description, is_active) "
-                    "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-                    (name, target_base_url, api_key, description, is_active)
+                    "INSERT INTO upstreams (name, target_base_url, api_key, description, is_active, use_claude_features) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                    (name, target_base_url, api_key, description, is_active, use_claude_features)
                 )
                 return cur.fetchone()[0]
             finally:
@@ -1015,16 +1018,17 @@ class CallStorage:
             conn, cur = self._sqlite_conn()
             try:
                 cur.execute(
-                    "INSERT INTO upstreams (name, target_base_url, api_key, description, is_active) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (name, target_base_url, api_key, description, int(is_active))
+                    "INSERT INTO upstreams (name, target_base_url, api_key, description, is_active, use_claude_features) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (name, target_base_url, api_key, description, int(is_active), int(use_claude_features))
                 )
                 return cur.lastrowid
             finally:
                 self._sqlite_close(conn, cur, commit=True)
 
     def update_upstream(self, upstream_id: int, name: str = None, target_base_url: str = None,
-                        api_key: str = None, description: str = None, is_active: bool = None) -> bool:
+                        api_key: str = None, description: str = None, is_active: bool = None,
+                        use_claude_features: bool = None) -> bool:
         """更新上游"""
         fields, params = [], []
         if name is not None:
@@ -1042,6 +1046,9 @@ class CallStorage:
         if is_active is not None:
             fields.append("is_active = %s" if self.postgresql else "is_active = ?")
             params.append(is_active)
+        if use_claude_features is not None:
+            fields.append("use_claude_features = %s" if self.postgresql else "use_claude_features = ?")
+            params.append(use_claude_features)
         if not fields:
             return False
         fields.append("updated_at = CURRENT_TIMESTAMP" if self.postgresql else "updated_at = datetime('now')")
@@ -1114,25 +1121,29 @@ class CallStorage:
                 }
                 if len(r) > 11 and r[11] is not None:
                     d["upstream_name"] = r[11]
+                if len(r) > 12 and r[12] is not None:
+                    d["use_claude_features"] = bool(r[12])
                 return d
             else:
                 d = dict(r)
                 d["is_active"] = bool(d["is_active"])
                 d["is_default"] = bool(d["is_default"])
+                if "use_claude_features" in d:
+                    d["use_claude_features"] = bool(d["use_claude_features"])
                 return d
 
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
-            "u.name as upstream_name "
+            "u.name as upstream_name, u.use_claude_features "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "ORDER BY mc.model_key"
         ) if self.postgresql else (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
-            "u.name as upstream_name FROM model_configs mc "
+            "u.name as upstream_name, u.use_claude_features FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id ORDER BY mc.model_key"
         )
         if self.postgresql:

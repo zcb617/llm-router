@@ -109,16 +109,11 @@ class DataCapturer:
         
         # 更新flow的请求
         original.url = new_url
-        
+
         # 更新Host头
         original.headers["Host"] = parsed_base.netloc
-        
-        # 如果是HTTPS，更新scheme
-        if parsed_base.scheme == "https":
-            original.scheme = "https"
-            original.port = 443
-        else:
-            original.scheme = "http"
-            original.port = 80
-        
+
+        # 更新scheme（端口由 URL 自动解析，无需手动设置）
+        original.scheme = parsed_base.scheme
+
         return new_url

@@ -107,6 +107,7 @@ class LLMRouterAddon:
                         "target_base_url": target_base_url,
                         "api_key": api_key,
                         "forward_model": forward_model,
+                        "use_claude_features": bool(cfg.get("use_claude_features", False)),
                     }
                     if cfg["is_default"]:
                         self._default_model_key = cfg["model_key"]
@@ -248,6 +249,12 @@ class LLMRouterAddon:
             captured_req.original_model = model_name
             captured_req.overridden_model = model_name
 
+        # 根据上游配置决定是否注入 Claude Code 特征 headers
+        # mapping 中应包含上游的 use_claude_features 字段
+        if mapping.get("use_claude_features"):
+            logger.info(f"Injecting Claude Code headers (upstream: {target_base_url})")
+            self._inject_claude_headers(flow)
+
         # 重写URL
         new_url = self.capturer.rewrite_url(flow, target_base_url, path)
         logger.info(f"Rewritten URL: {new_url}")
@@ -259,6 +266,33 @@ class LLMRouterAddon:
 
         # 存储捕获的请求，等待响应处理
         self._pending_requests[id(flow)] = captured_req
+
+    def _inject_claude_headers(self, flow: http.HTTPFlow):
+        """注入 Claude Code 特征 headers，让上游 LLM 认为请求来自 Claude Code 客户端
+
+        注意：只修改 flow.request.headers（转发给上游），不修改 captured_req.headers
+        （数据库记录保持原始客户端信息，用于审计）。
+        """
+        # 复用已有的 Session-Id 或生成新的
+        session_id = flow.metadata.get("claude_session_id")
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            flow.metadata["claude_session_id"] = session_id
+
+        flow.request.headers["User-Agent"] = "claude-cli/2.1.119 (external, cli)"
+        flow.request.headers["X-Claude-Code-Session-Id"] = session_id
+        flow.request.headers["X-Stainless-Arch"] = "x64"
+        flow.request.headers["X-Stainless-Lang"] = "js"
+        flow.request.headers["X-Stainless-OS"] = "Windows"
+        flow.request.headers["X-Stainless-Package-Version"] = "0.81.0"
+        flow.request.headers["X-Stainless-Retry-Count"] = "0"
+        flow.request.headers["X-Stainless-Runtime"] = "node"
+        flow.request.headers["X-Stainless-Runtime-Version"] = "v24.3.0"
+        flow.request.headers["X-Stainless-Timeout"] = "600"
+        flow.request.headers["anthropic-beta"] = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24"
+        flow.request.headers["anthropic-dangerous-direct-browser-access"] = "true"
+        flow.request.headers["anthropic-version"] = "2023-06-01"
+        flow.request.headers["x-app"] = "cli"
 
     def _extract_model(self, body: str) -> str | None:
         """从请求 body 中提取 model 参数"""

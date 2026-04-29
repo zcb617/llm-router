@@ -264,6 +264,20 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         _json_response(flow, 200, {"upstreams": upstreams})
         return True
 
+    # GET /api/upstreams/{id} - 获取单个上游（返回完整 api_key）
+    if path.startswith("/api/upstreams/") and flow.request.method == "GET":
+        try:
+            upstream_id = int(path.split("/")[-1])
+        except (ValueError, IndexError):
+            _json_response(flow, 400, {"error": "无效的上游ID"})
+            return True
+        upstream = storage.get_upstream(upstream_id)
+        if upstream:
+            _json_response(flow, 200, upstream)
+        else:
+            _json_response(flow, 404, {"error": "上游不存在"})
+        return True
+
     # POST /api/upstreams - 创建上游
     if path == "/api/upstreams" and flow.request.method == "POST":
         body = _extract_body(flow)
@@ -276,6 +290,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         api_key = body.get("api_key", "")
         description = body.get("description", "")
         is_active = body.get("is_active", True)
+        use_claude_features = body.get("use_claude_features", False)
 
         if not name or not target_base_url:
             _json_response(flow, 400, {"error": "名称和基础 URL 不能为空"})
@@ -283,8 +298,12 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
         upstream_id = storage.create_upstream(
             name=name, target_base_url=target_base_url,
-            api_key=api_key, description=description, is_active=is_active
+            api_key=api_key, description=description, is_active=is_active,
+            use_claude_features=use_claude_features
         )
+
+        if addon:
+            addon.reload_model_configs()
 
         _json_response(flow, 200, {"message": "上游创建成功", "id": upstream_id})
         return True
@@ -313,10 +332,13 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             target_base_url=body.get("target_base_url"),
             api_key=body.get("api_key"),
             description=body.get("description"),
-            is_active=body.get("is_active")
+            is_active=body.get("is_active"),
+            use_claude_features=body.get("use_claude_features")
         )
 
         if updated:
+            if addon:
+                addon.reload_model_configs()
             _json_response(flow, 200, {"message": "上游更新成功"})
         else:
             _json_response(flow, 404, {"error": "上游不存在"})
@@ -332,6 +354,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
         deleted = storage.delete_upstream(upstream_id)
         if deleted:
+            if addon:
+                addon.reload_model_configs()
             _json_response(flow, 200, {"message": "上游删除成功"})
         else:
             _json_response(flow, 404, {"error": "上游不存在"})
