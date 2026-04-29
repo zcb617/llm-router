@@ -971,6 +971,30 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur)
 
+    def get_upstream_by_url(self, target_base_url: str) -> Optional[dict]:
+        """按 URL 获取上游（用于迁移场景）"""
+        sql = "SELECT id, name, target_base_url, api_key, is_active, description FROM upstreams WHERE target_base_url = %s" if self.postgresql else \
+              "SELECT * FROM upstreams WHERE target_base_url = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (target_base_url,))
+                row = cur.fetchone()
+                if row:
+                    return {"id": row[0], "name": row[1], "target_base_url": row[2],
+                            "api_key": row[3], "is_active": row[4], "description": row[5]}
+                return None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (target_base_url,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
+
     def create_upstream(self, name: str, target_base_url: str, api_key: str = "",
                         description: str = "", is_active: bool = True) -> int:
         """创建上游，返回 ID"""

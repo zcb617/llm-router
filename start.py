@@ -63,17 +63,21 @@ def migrate_upstreams(storage):
             api_key = cfg.get("api_key", "") or ""
 
             key = (target_url, api_key)
-            if key not in url_key_map:
-                # 创建 upstream
-                name = f"upstream_{len(url_key_map) + 1}"
-                upstream_id = storage.create_upstream(
-                    name=name, target_base_url=target_url,
-                    api_key=api_key, description="自动从模型配置迁移"
-                )
-                url_key_map[key] = upstream_id
-                print(f"  [迁移] 创建上游: {name} ({target_url})")
-            else:
+            if key in url_key_map:
                 upstream_id = url_key_map[key]
+            else:
+                # 先检查是否已有相同 url 的 upstream
+                existing = storage.get_upstream_by_url(target_url)
+                if existing:
+                    upstream_id = existing["id"]
+                else:
+                    name = f"upstream_{len(url_key_map) + 1}"
+                    upstream_id = storage.create_upstream(
+                        name=name, target_base_url=target_url,
+                        api_key=api_key, description="自动从模型配置迁移"
+                    )
+                    print(f"  [迁移] 创建上游: {name} ({target_url})")
+                url_key_map[key] = upstream_id
 
             # 关联 model_config 到 upstream
             storage.link_model_to_upstream(cfg["id"], upstream_id)
