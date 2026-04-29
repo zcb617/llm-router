@@ -796,6 +796,23 @@ document.getElementById('colResetBtn').addEventListener('click', () => { logsSta
 document.getElementById('colSaveBtn').addEventListener('click', () => { document.querySelectorAll('.col-cb').forEach(cb => { const i = parseInt(cb.dataset.idx); logsState.columns[i].visible = cb.checked; }); saveColumns(); document.getElementById('colModal').classList.add('hidden'); renderHeader(); loadLogsData(); });
 
 // ============ 密钥管理 ============
+async function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    const ok = document.execCommand('copy');
+    if (!ok) throw new Error('execCommand copy failed');
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
 async function loadKeys() {
   const tbody = document.getElementById('keysTableBody');
   const empty = document.getElementById('keysEmpty');
@@ -836,14 +853,14 @@ async function loadKeys() {
           const res = await fetch(`/api/keys/${keyId}/reveal`, { headers: getAuthHeaders() });
           const data = await res.json();
           if (res.ok) {
-            navigator.clipboard.writeText(data.key);
+            await copyToClipboard(data.key);
             btn.textContent = '已复制!';
             setTimeout(() => { btn.textContent = '复制'; }, 1500);
           } else {
             alert(data.error || '获取密钥失败');
           }
         } catch(e) {
-          alert('网络错误: ' + e.message);
+          alert('复制失败: ' + e.message);
         }
       });
     });
@@ -900,10 +917,14 @@ document.getElementById('submitCreateKey').addEventListener('click', async () =>
   }
 });
 
-document.getElementById('copyNewKey').addEventListener('click', () => {
-  navigator.clipboard.writeText(document.getElementById('newKeyResult').value);
-  document.getElementById('copyNewKey').textContent = '已复制!';
-  setTimeout(() => { document.getElementById('copyNewKey').textContent = '复制'; }, 1500);
+document.getElementById('copyNewKey').addEventListener('click', async () => {
+  try {
+    await copyToClipboard(document.getElementById('newKeyResult').value);
+    document.getElementById('copyNewKey').textContent = '已复制!';
+    setTimeout(() => { document.getElementById('copyNewKey').textContent = '复制'; }, 1500);
+  } catch (e) {
+    alert('复制失败: ' + e.message);
+  }
 });
 document.getElementById('closeNewKeyResult').addEventListener('click', () => document.getElementById('newKeyResultModal').classList.add('hidden'));
 document.getElementById('newKeyResultModal').addEventListener('click', (e) => { if (e.target === document.getElementById('newKeyResultModal')) document.getElementById('newKeyResultModal').classList.add('hidden'); });
