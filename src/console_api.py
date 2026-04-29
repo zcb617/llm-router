@@ -356,7 +356,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         upstream_id = body.get("upstream_id")
         target_base_url = body.get("target_base_url", "")
         api_key = body.get("api_key", "")
-        model_overrides = body.get("model_overrides", "{}")
+        forward_model = (body.get("forward_model") or "").strip()
         is_active = body.get("is_active", True)
         is_default = body.get("is_default", False)
 
@@ -367,19 +367,11 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "请选择上游或填写目标 URL"})
             return True
 
-        try:
-            json.loads(model_overrides) if isinstance(model_overrides, str) else model_overrides
-        except (json.JSONDecodeError, TypeError):
-            _json_response(flow, 400, {"error": "model_overrides 必须是有效的 JSON"})
-            return True
-
-        overrides_str = model_overrides if isinstance(model_overrides, str) else json.dumps(model_overrides)
-
         config_id = storage.create_model_config(
             model_key=model_key,
             target_base_url=target_base_url,
             api_key=api_key,
-            model_overrides=overrides_str,
+            forward_model=forward_model,
             is_active=is_active,
             is_default=is_default,
             upstream_id=upstream_id
@@ -416,7 +408,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             upstream_id=body.get("upstream_id"),
             target_base_url=body.get("target_base_url"),
             api_key=body.get("api_key"),
-            model_overrides=body.get("model_overrides"),
+            forward_model=body.get("forward_model"),
             is_active=body.get("is_active"),
             is_default=body.get("is_default")
         )

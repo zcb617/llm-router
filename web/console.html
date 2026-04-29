@@ -457,9 +457,9 @@
           </div>
         </div>
         <div>
-          <label class="block text-sm font-medium mb-1">模型覆盖规则 (JSON)</label>
-          <textarea id="modelOverrides" rows="3" placeholder='{"claude-sonnet-4-6": "kimi-for-coding"}'
-            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-mono text-xs focus:ring-2 focus:ring-blue-500 outline-none"></textarea>
+          <label class="block text-sm font-medium mb-1">转发模型名称</label>
+          <input id="modelForwardModel" type="text" placeholder="如：claude-sonnet-4-5（留空则不替换）"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
         </div>
         <div class="flex items-center gap-2">
           <input id="modelIsActive" type="checkbox" checked class="w-4 h-4">
@@ -1153,7 +1153,7 @@ function renderModels() {
       // 设置上游选择
       document.getElementById('modelUpstreamSelect').value = cfg.upstream_id || '';
       onUpstreamChange();  // 触发 url/key 填充
-      document.getElementById('modelOverrides').value = cfg.model_overrides || '{}';
+      document.getElementById('modelForwardModel').value = cfg.forward_model || '';
       document.getElementById('modelIsActive').checked = cfg.is_active;
       document.getElementById('modelIsDefault').checked = cfg.is_default;
       document.getElementById('modelEditError').classList.add('hidden');
@@ -1209,7 +1209,7 @@ document.getElementById('createModelBtn').addEventListener('click', () => {
   document.getElementById('modelKey').value = '';
   document.getElementById('modelUpstreamSelect').value = '';
   onUpstreamChange();
-  document.getElementById('modelOverrides').value = '{}';
+  document.getElementById('modelForwardModel').value = '';
   document.getElementById('modelIsActive').checked = true;
   document.getElementById('modelIsDefault').checked = false;
   document.getElementById('modelEditError').classList.add('hidden');
@@ -1233,7 +1233,7 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
   const upstreamId = document.getElementById('modelUpstreamSelect').value;
   const targetBaseUrl = document.getElementById('modelBaseUrl').value.trim();
   const apiKey = document.getElementById('modelApiKey').value;
-  const overrides = document.getElementById('modelOverrides').value.trim() || '{}';
+  const forwardModel = document.getElementById('modelForwardModel').value.trim();
   const isActive = document.getElementById('modelIsActive').checked;
   const isDefault = document.getElementById('modelIsDefault').checked;
 
@@ -1248,19 +1248,12 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
     return;
   }
 
-  // 验证 JSON
-  try { JSON.parse(overrides); } catch(e) {
-    document.getElementById('modelEditError').textContent = '模型覆盖规则必须是有效的 JSON';
-    document.getElementById('modelEditError').classList.remove('hidden');
-    return;
-  }
-
   const body = {
     model_key: modelKey,
     upstream_id: upstreamId ? parseInt(upstreamId) : null,
     target_base_url: targetBaseUrl,
     api_key: apiKey,
-    model_overrides: overrides,
+    forward_model: forwardModel,
     is_active: isActive,
     is_default: isDefault
   };

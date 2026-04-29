@@ -58,7 +58,7 @@ class LLMRouterAddon:
         self.config = config
 
         # 模型配置缓存（从数据库加载）
-        self._model_cache = {}  # model_key -> {target_base_url, api_key, model_overrides}
+        self._model_cache = {}  # model_key -> {target_base_url, api_key, forward_model}
         self._default_model_key = None  # 默认模型的 key
 
         # 延迟初始化组件
@@ -95,32 +95,27 @@ class LLMRouterAddon:
             self._default_model_key = None
             for cfg in configs:
                 if cfg["is_active"]:
-                    try:
-                        overrides = json.loads(cfg["model_overrides"]) if cfg["model_overrides"] else {}
-                    except (json.JSONDecodeError, TypeError):
-                        overrides = {}
-                    
                     # 优先使用上游的 url+key，回退到直接配置
                     target_base_url = cfg.get("target_base_url", "")
                     api_key = cfg.get("api_key", "")
                     upstream_id = cfg.get("upstream_id")
-                    
+                    forward_model = (cfg.get("forward_model") or "").strip()
+
                     # 如果有关联的上游，从上游获取 url+key
                     if upstream_id:
                         upstream = self.storage.get_upstream(upstream_id)
                         if upstream:
                             target_base_url = upstream["target_base_url"]
                             api_key = upstream["api_key"]
-                    
+
                     # 跳过没有 url 的配置（无效模型）
                     if not target_base_url:
                         continue
-                    
+
                     self._model_cache[cfg["model_key"]] = {
                         "target_base_url": target_base_url,
                         "api_key": api_key,
-                        "model_overrides": overrides,
-                        "upstream_name": cfg.get("upstream_name"),
+                        "forward_model": forward_model,
                     }
                     if cfg["is_default"]:
                         self._default_model_key = cfg["model_key"]
@@ -247,17 +242,17 @@ class LLMRouterAddon:
             logger.info("Replacing API key")
             flow.request.headers["Authorization"] = f"Bearer {mapping['api_key']}"
 
-        # 如果有 model override，替换 body 中的 model 值
-        override_model = mapping["model_overrides"].get(model_name)
-        if override_model:
-            logger.info(f"Model override: {model_name} -> {override_model}")
-            new_body = self._replace_model_in_body(captured_req.body, override_model)
+        # 如果有转发模型名称，替换 body 中的 model 值
+        forward_model = mapping.get("forward_model", "")
+        if forward_model:
+            logger.info(f"Model override: {model_name} -> {forward_model}")
+            new_body = self._replace_model_in_body(captured_req.body, forward_model)
             captured_req.body = new_body
             # 更新 flow 的 body
             flow.request.content = new_body.encode("utf-8")
             # 记录原始和替换后的模型
             captured_req.original_model = model_name
-            captured_req.overridden_model = override_model
+            captured_req.overridden_model = forward_model
         else:
             captured_req.original_model = model_name
             captured_req.overridden_model = model_name

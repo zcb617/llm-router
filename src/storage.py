@@ -591,6 +591,7 @@ class CallStorage:
                     target_base_url VARCHAR(500),
                     api_key VARCHAR(500),
                     model_overrides TEXT,
+                    forward_model VARCHAR(200),
                     is_active BOOLEAN DEFAULT true,
                     is_default BOOLEAN DEFAULT false,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -683,6 +684,7 @@ class CallStorage:
                     target_base_url TEXT,
                     api_key TEXT,
                     model_overrides TEXT,
+                    forward_model TEXT,
                     is_active INTEGER DEFAULT 1,
                     is_default INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1105,13 +1107,13 @@ class CallStorage:
                 d = {
                     "id": r[0], "model_key": r[1], "upstream_id": r[2],
                     "target_base_url": r[3], "api_key": r[4], "model_overrides": r[5],
-                    "is_active": r[6], "is_default": r[7],
-                    "created_at": r[8].isoformat() if r[8] else None,
-                    "updated_at": r[9].isoformat() if r[9] else None,
+                    "forward_model": r[6],
+                    "is_active": r[7], "is_default": r[8],
+                    "created_at": r[9].isoformat() if r[9] else None,
+                    "updated_at": r[10].isoformat() if r[10] else None,
                 }
-                # upstream 字段（LEFT JOIN 可能为 None）
-                if len(r) > 10 and r[10] is not None:
-                    d["upstream_name"] = r[10]
+                if len(r) > 11 and r[11] is not None:
+                    d["upstream_name"] = r[11]
                 return d
             else:
                 d = dict(r)
@@ -1121,7 +1123,7 @@ class CallStorage:
 
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
-            "mc.model_overrides, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "ORDER BY mc.model_key"
@@ -1148,7 +1150,7 @@ class CallStorage:
         """按 model_key 获取单个配置"""
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
-            "mc.model_overrides, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.model_key = %s"
@@ -1165,12 +1167,13 @@ class CallStorage:
                     d = {
                         "id": row[0], "model_key": row[1], "upstream_id": row[2],
                         "target_base_url": row[3], "api_key": row[4], "model_overrides": row[5],
-                        "is_active": row[6], "is_default": row[7],
-                        "created_at": row[8].isoformat() if row[8] else None,
-                        "updated_at": row[9].isoformat() if row[9] else None,
+                        "forward_model": row[6],
+                        "is_active": row[7], "is_default": row[8],
+                        "created_at": row[9].isoformat() if row[9] else None,
+                        "updated_at": row[10].isoformat() if row[10] else None,
                     }
-                    if row[10] is not None:
-                        d["upstream_name"] = row[10]
+                    if row[11] is not None:
+                        d["upstream_name"] = row[11]
                     return d
                 return None
             finally:
@@ -1193,7 +1196,7 @@ class CallStorage:
         """按 ID 获取模型配置"""
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
-            "mc.model_overrides, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.id = %s"
@@ -1210,12 +1213,13 @@ class CallStorage:
                     d = {
                         "id": row[0], "model_key": row[1], "upstream_id": row[2],
                         "target_base_url": row[3], "api_key": row[4], "model_overrides": row[5],
-                        "is_active": row[6], "is_default": row[7],
-                        "created_at": row[8].isoformat() if row[8] else None,
-                        "updated_at": row[9].isoformat() if row[9] else None,
+                        "forward_model": row[6],
+                        "is_active": row[7], "is_default": row[8],
+                        "created_at": row[9].isoformat() if row[9] else None,
+                        "updated_at": row[10].isoformat() if row[10] else None,
                     }
-                    if row[10] is not None:
-                        d["upstream_name"] = row[10]
+                    if row[11] is not None:
+                        d["upstream_name"] = row[11]
                     return d
                 return None
             finally:
@@ -1236,7 +1240,7 @@ class CallStorage:
 
     def create_model_config(
         self, model_key: str, target_base_url: str = "", api_key: str = "",
-        model_overrides: str = "{}", is_active: bool = True, is_default: bool = False,
+        model_overrides: str = "{}", forward_model: str = "", is_active: bool = True, is_default: bool = False,
         upstream_id: int = None
     ) -> int:
         """创建模型配置，返回 ID"""
@@ -1246,9 +1250,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = false")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, is_active, is_default) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                    (model_key, upstream_id, target_base_url, api_key, model_overrides, is_active, is_default)
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default)
                 )
                 return cur.fetchone()[0]
             finally:
@@ -1259,9 +1263,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = 0")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, is_active, is_default) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (model_key, upstream_id, target_base_url, api_key, model_overrides, int(is_active), int(is_default))
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, int(is_active), int(is_default))
                 )
                 return cur.lastrowid
             finally:
@@ -1269,7 +1273,7 @@ class CallStorage:
 
     def update_model_config(
         self, config_id: int, model_key: str = None, target_base_url: str = None,
-        api_key: str = None, model_overrides: str = None, is_active: bool = None,
+        api_key: str = None, model_overrides: str = None, forward_model: str = None, is_active: bool = None,
         is_default: bool = None, upstream_id: int = None
     ) -> bool:
         """更新模型配置"""
@@ -1280,6 +1284,7 @@ class CallStorage:
             ("target_base_url = %s", "target_base_url = ?", target_base_url),
             ("api_key = %s", "api_key = ?", api_key),
             ("model_overrides = %s", "model_overrides = ?", model_overrides),
+            ("forward_model = %s", "forward_model = ?", forward_model),
             ("is_active = %s", "is_active = ?", is_active),
         ]:
             if v is not None:
