@@ -1,6 +1,9 @@
 """
 LLM Router 启动脚本
 启动代理服务器
+
+前置条件：首次运行前需执行数据库初始化
+    python scripts/init_database.py [config.yaml]
 """
 import sys
 import asyncio
@@ -12,14 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.config import load_config
 from src.proxy import create_addon
 
-
-def init_rbac_and_data(storage):
-    """初始化 RBAC 系统（表、角色、菜单、默认管理员）"""
-    try:
-        from src.rbac import init_rbac
-        init_rbac(storage)
-    except Exception as e:
-        print(f"  [RBAC] 初始化警告: {e}")
 
 async def run_proxy(config, storage):
     """运行代理服务器"""
@@ -60,16 +55,15 @@ def main():
     print(f"Database: {config.database.path}")
     print(f"Query API: http://localhost:{config.proxy.listen_port}/api/calls")
 
-    # 初始化 RBAC 系统
-    print("\nInitializing RBAC system...")
+    # 初始化数据库连接
+    print("\nConnecting to database...")
     from src.storage import CallStorage
     storage = CallStorage(
         config.database.path,
         config.database.postgresql
     )
-    init_rbac_and_data(storage)
 
-    # 使用mitmproxy Python API启动代理
+    # 启动代理
     print(f"\nStarting proxy on port {config.proxy.listen_port}...")
     print("Press Ctrl+C to stop\n")
 
