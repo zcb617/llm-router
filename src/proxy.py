@@ -94,10 +94,28 @@ class LLMRouterAddon:
                         overrides = json.loads(cfg["model_overrides"]) if cfg["model_overrides"] else {}
                     except (json.JSONDecodeError, TypeError):
                         overrides = {}
+                    
+                    # 优先使用上游的 url+key，回退到直接配置
+                    target_base_url = cfg.get("target_base_url", "")
+                    api_key = cfg.get("api_key", "")
+                    upstream_id = cfg.get("upstream_id")
+                    
+                    # 如果有关联的上游，从上游获取 url+key
+                    if upstream_id:
+                        upstream = self.storage.get_upstream(upstream_id)
+                        if upstream:
+                            target_base_url = upstream["target_base_url"]
+                            api_key = upstream["api_key"]
+                    
+                    # 跳过没有 url 的配置（无效模型）
+                    if not target_base_url:
+                        continue
+                    
                     self._model_cache[cfg["model_key"]] = {
-                        "target_base_url": cfg["target_base_url"],
-                        "api_key": cfg["api_key"],
+                        "target_base_url": target_base_url,
+                        "api_key": api_key,
                         "model_overrides": overrides,
+                        "upstream_name": cfg.get("upstream_name"),
                     }
                     if cfg["is_default"]:
                         self._default_model_key = cfg["model_key"]

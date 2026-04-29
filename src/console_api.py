@@ -252,6 +252,91 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 404, {"error": "密钥不存在或无权删除"})
         return True
 
+    # ========== 上游管理 API ==========
+
+    # GET /api/upstreams - 获取所有上游
+    if path == "/api/upstreams" and flow.request.method == "GET":
+        upstreams = storage.get_all_upstreams()
+        # 返回列表时隐藏完整 api_key
+        for u in upstreams:
+            key_val = u.pop("api_key", "")
+            u["api_key_masked"] = key_val[:8] + "****" if len(key_val) > 8 else key_val
+        _json_response(flow, 200, {"upstreams": upstreams})
+        return True
+
+    # POST /api/upstreams - 创建上游
+    if path == "/api/upstreams" and flow.request.method == "POST":
+        body = _extract_body(flow)
+        if not body:
+            _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+
+        name = body.get("name", "").strip()
+        target_base_url = body.get("target_base_url", "").strip()
+        api_key = body.get("api_key", "")
+        description = body.get("description", "")
+        is_active = body.get("is_active", True)
+
+        if not name or not target_base_url:
+            _json_response(flow, 400, {"error": "名称和基础 URL 不能为空"})
+            return True
+
+        upstream_id = storage.create_upstream(
+            name=name, target_base_url=target_base_url,
+            api_key=api_key, description=description, is_active=is_active
+        )
+
+        _json_response(flow, 200, {"message": "上游创建成功", "id": upstream_id})
+        return True
+
+    # PUT /api/upstreams/{id} - 更新上游
+    if path.startswith("/api/upstreams/") and flow.request.method == "PUT":
+        try:
+            upstream_id = int(path.split("/")[-1])
+        except (ValueError, IndexError):
+            _json_response(flow, 400, {"error": "无效的上游ID"})
+            return True
+
+        existing = storage.get_upstream(upstream_id)
+        if not existing:
+            _json_response(flow, 404, {"error": "上游不存在"})
+            return True
+
+        body = _extract_body(flow)
+        if not body:
+            _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+
+        updated = storage.update_upstream(
+            upstream_id=upstream_id,
+            name=body.get("name"),
+            target_base_url=body.get("target_base_url"),
+            api_key=body.get("api_key"),
+            description=body.get("description"),
+            is_active=body.get("is_active")
+        )
+
+        if updated:
+            _json_response(flow, 200, {"message": "上游更新成功"})
+        else:
+            _json_response(flow, 404, {"error": "上游不存在"})
+        return True
+
+    # DELETE /api/upstreams/{id} - 删除上游
+    if path.startswith("/api/upstreams/") and flow.request.method == "DELETE":
+        try:
+            upstream_id = int(path.split("/")[-1])
+        except (ValueError, IndexError):
+            _json_response(flow, 400, {"error": "无效的上游ID"})
+            return True
+
+        deleted = storage.delete_upstream(upstream_id)
+        if deleted:
+            _json_response(flow, 200, {"message": "上游删除成功"})
+        else:
+            _json_response(flow, 404, {"error": "上游不存在"})
+        return True
+
     # ========== 模型配置 API ==========
 
     # GET /api/models - 获取所有模型配置
@@ -268,14 +353,18 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
 
         model_key = body.get("model_key", "").strip()
-        target_base_url = body.get("target_base_url", "").strip()
+        upstream_id = body.get("upstream_id")
+        target_base_url = body.get("target_base_url", "")
         api_key = body.get("api_key", "")
         model_overrides = body.get("model_overrides", "{}")
         is_active = body.get("is_active", True)
         is_default = body.get("is_default", False)
 
-        if not model_key or not target_base_url:
-            _json_response(flow, 400, {"error": "model_key 和 target_base_url 不能为空"})
+        if not model_key:
+            _json_response(flow, 400, {"error": "model_key 不能为空"})
+            return True
+        if not upstream_id and not target_base_url:
+            _json_response(flow, 400, {"error": "请选择上游或填写目标 URL"})
             return True
 
         try:
@@ -292,7 +381,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             api_key=api_key,
             model_overrides=overrides_str,
             is_active=is_active,
-            is_default=is_default
+            is_default=is_default,
+            upstream_id=upstream_id
         )
 
         # 自动刷新 proxy 缓存
@@ -323,6 +413,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         updated = storage.update_model_config(
             config_id=config_id,
             model_key=body.get("model_key"),
+            upstream_id=body.get("upstream_id"),
             target_base_url=body.get("target_base_url"),
             api_key=body.get("api_key"),
             model_overrides=body.get("model_overrides"),

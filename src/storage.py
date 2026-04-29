@@ -544,7 +544,7 @@ class CallStorage:
     # ========== RBAC 相关方法（同步） ==========
 
     def init_rbac_tables(self, is_pg: bool = False, cur=None, conn=None):
-        """初始化 RBAC 表（roles, menus, role_menus），并给 users 表加 role_id 字段"""
+        """初始化 RBAC 表（roles, menus, role_menus, upstreams），并给 users 表加 role_id 字段"""
         if is_pg:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS roles (
@@ -572,10 +572,23 @@ class CallStorage:
                 )
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS upstreams (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100) UNIQUE NOT NULL,
+                    target_base_url VARCHAR(500) NOT NULL,
+                    api_key VARCHAR(500),
+                    is_active BOOLEAN DEFAULT true,
+                    description VARCHAR(200),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS model_configs (
                     id SERIAL PRIMARY KEY,
                     model_key VARCHAR(100) UNIQUE NOT NULL,
-                    target_base_url VARCHAR(500) NOT NULL,
+                    upstream_id INTEGER REFERENCES upstreams(id),
+                    target_base_url VARCHAR(500),
                     api_key VARCHAR(500),
                     model_overrides TEXT,
                     is_active BOOLEAN DEFAULT true,
@@ -626,10 +639,23 @@ class CallStorage:
                 )
             """)
             db_cur.execute("""
+                CREATE TABLE IF NOT EXISTS upstreams (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    target_base_url TEXT NOT NULL,
+                    api_key TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            db_cur.execute("""
                 CREATE TABLE IF NOT EXISTS model_configs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     model_key TEXT UNIQUE NOT NULL,
-                    target_base_url TEXT NOT NULL,
+                    upstream_id INTEGER REFERENCES upstreams(id),
+                    target_base_url TEXT,
                     api_key TEXT,
                     model_overrides TEXT,
                     is_active INTEGER DEFAULT 1,
@@ -834,26 +860,220 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur)
 
+    # ========== 上游管理 CRUD（同步） ==========
+
+    def get_all_upstreams(self) -> list:
+        """获取所有上游列表"""
+        sql = "SELECT id, name, target_base_url, api_key, is_active, description, created_at, updated_at FROM upstreams ORDER BY name"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql)
+                return [
+                    {
+                        "id": r[0], "name": r[1], "target_base_url": r[2],
+                        "api_key": r[3], "is_active": r[4], "description": r[5],
+                        "created_at": r[6].isoformat() if r[6] else None,
+                        "updated_at": r[7].isoformat() if r[7] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql)
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def get_upstream(self, upstream_id: int) -> Optional[dict]:
+        """按 ID 获取上游"""
+        sql = "SELECT id, name, target_base_url, api_key, is_active, description, created_at, updated_at FROM upstreams WHERE id = %s" if self.postgresql else \
+              "SELECT * FROM upstreams WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (upstream_id,))
+                row = cur.fetchone()
+                if row:
+                    return {
+                        "id": row[0], "name": row[1], "target_base_url": row[2],
+                        "api_key": row[3], "is_active": row[4], "description": row[5],
+                        "created_at": row[6].isoformat() if row[6] else None,
+                        "updated_at": row[7].isoformat() if row[7] else None,
+                    }
+                return None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (upstream_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def get_upstream_by_name(self, name: str) -> Optional[dict]:
+        """按名称获取上游"""
+        sql = "SELECT id, name, target_base_url, api_key, is_active, description FROM upstreams WHERE name = %s" if self.postgresql else \
+              "SELECT * FROM upstreams WHERE name = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (name,))
+                row = cur.fetchone()
+                if row:
+                    return {"id": row[0], "name": row[1], "target_base_url": row[2],
+                            "api_key": row[3], "is_active": row[4], "description": row[5]}
+                return None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (name,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def create_upstream(self, name: str, target_base_url: str, api_key: str = "",
+                        description: str = "", is_active: bool = True) -> int:
+        """创建上游，返回 ID"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO upstreams (name, target_base_url, api_key, description, is_active) "
+                    "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                    (name, target_base_url, api_key, description, is_active)
+                )
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO upstreams (name, target_base_url, api_key, description, is_active) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (name, target_base_url, api_key, description, int(is_active))
+                )
+                return cur.lastrowid
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def update_upstream(self, upstream_id: int, name: str = None, target_base_url: str = None,
+                        api_key: str = None, description: str = None, is_active: bool = None) -> bool:
+        """更新上游"""
+        fields, params = [], []
+        if name is not None:
+            fields.append("name = %s" if self.postgresql else "name = ?")
+            params.append(name)
+        if target_base_url is not None:
+            fields.append("target_base_url = %s" if self.postgresql else "target_base_url = ?")
+            params.append(target_base_url)
+        if api_key is not None:
+            fields.append("api_key = %s" if self.postgresql else "api_key = ?")
+            params.append(api_key)
+        if description is not None:
+            fields.append("description = %s" if self.postgresql else "description = ?")
+            params.append(description)
+        if is_active is not None:
+            fields.append("is_active = %s" if self.postgresql else "is_active = ?")
+            params.append(is_active)
+        if not fields:
+            return False
+        fields.append("updated_at = CURRENT_TIMESTAMP" if self.postgresql else "updated_at = datetime('now')")
+        params.append(upstream_id)
+        sql = f"UPDATE upstreams SET {', '.join(fields)} WHERE id = %s" if self.postgresql else \
+              f"UPDATE upstreams SET {', '.join(fields)} WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, params)
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, params)
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def delete_upstream(self, upstream_id: int) -> bool:
+        """删除上游"""
+        sql = "DELETE FROM upstreams WHERE id = %s" if self.postgresql else "DELETE FROM upstreams WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (upstream_id,))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, (upstream_id,))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def link_model_to_upstream(self, model_id: int, upstream_id: int):
+        """将模型配置关联到上游"""
+        sql = "UPDATE model_configs SET upstream_id = %s WHERE id = %s" if self.postgresql else \
+              "UPDATE model_configs SET upstream_id = ? WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (upstream_id, model_id))
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, (upstream_id, model_id))
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
     # ========== 模型配置 CRUD（同步） ==========
 
     def get_all_model_configs(self) -> list:
-        """获取所有模型配置"""
+        """获取所有模型配置（JOIN upstreams 获取上游信息）"""
         def _parse_row(r, is_pg):
             if is_pg:
-                return {
-                    "id": r[0], "model_key": r[1], "target_base_url": r[2],
-                    "api_key": r[3], "model_overrides": r[4],
-                    "is_active": r[5], "is_default": r[6],
-                    "created_at": r[7].isoformat() if r[7] else None,
-                    "updated_at": r[8].isoformat() if r[8] else None,
+                d = {
+                    "id": r[0], "model_key": r[1], "upstream_id": r[2],
+                    "target_base_url": r[3], "api_key": r[4], "model_overrides": r[5],
+                    "is_active": r[6], "is_default": r[7],
+                    "created_at": r[8].isoformat() if r[8] else None,
+                    "updated_at": r[9].isoformat() if r[9] else None,
                 }
+                # upstream 字段（LEFT JOIN 可能为 None）
+                if len(r) > 11 and r[11] is not None:
+                    d["upstream_name"] = r[11]
+                return d
             else:
                 d = dict(r)
                 d["is_active"] = bool(d["is_active"])
                 d["is_default"] = bool(d["is_default"])
                 return d
 
-        sql = "SELECT id, model_key, target_base_url, api_key, model_overrides, is_active, is_default, created_at, updated_at FROM model_configs ORDER BY model_key"
+        sql = (
+            "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
+            "mc.model_overrides, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "u.name as upstream_name "
+            "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
+            "ORDER BY mc.model_key"
+        ) if self.postgresql else (
+            "SELECT mc.*, u.name as upstream_name FROM model_configs mc "
+            "LEFT JOIN upstreams u ON mc.upstream_id = u.id ORDER BY mc.model_key"
+        )
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
@@ -871,21 +1091,32 @@ class CallStorage:
 
     def get_model_config(self, model_key: str) -> Optional[dict]:
         """按 model_key 获取单个配置"""
-        sql = "SELECT id, model_key, target_base_url, api_key, model_overrides, is_active, is_default, created_at, updated_at FROM model_configs WHERE model_key = %s" if self.postgresql else \
-              "SELECT * FROM model_configs WHERE model_key = ?"
+        sql = (
+            "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
+            "mc.model_overrides, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "u.name as upstream_name "
+            "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
+            "WHERE mc.model_key = %s"
+        ) if self.postgresql else (
+            "SELECT mc.*, u.name as upstream_name FROM model_configs mc "
+            "LEFT JOIN upstreams u ON mc.upstream_id = u.id WHERE mc.model_key = ?"
+        )
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
                 cur.execute(sql, (model_key,))
                 row = cur.fetchone()
                 if row:
-                    return {
-                        "id": row[0], "model_key": row[1], "target_base_url": row[2],
-                        "api_key": row[3], "model_overrides": row[4],
-                        "is_active": row[5], "is_default": row[6],
-                        "created_at": row[7].isoformat() if row[7] else None,
-                        "updated_at": row[8].isoformat() if row[8] else None,
+                    d = {
+                        "id": row[0], "model_key": row[1], "upstream_id": row[2],
+                        "target_base_url": row[3], "api_key": row[4], "model_overrides": row[5],
+                        "is_active": row[6], "is_default": row[7],
+                        "created_at": row[8].isoformat() if row[8] else None,
+                        "updated_at": row[9].isoformat() if row[9] else None,
                     }
+                    if row[10] is not None:
+                        d["upstream_name"] = row[10]
+                    return d
                 return None
             finally:
                 self._pg_close(conn, cur)
@@ -905,21 +1136,32 @@ class CallStorage:
 
     def get_model_config_by_id(self, config_id: int) -> Optional[dict]:
         """按 ID 获取模型配置"""
-        sql = "SELECT id, model_key, target_base_url, api_key, model_overrides, is_active, is_default, created_at, updated_at FROM model_configs WHERE id = %s" if self.postgresql else \
-              "SELECT * FROM model_configs WHERE id = ?"
+        sql = (
+            "SELECT mc.id, mc.model_key, mc.upstream_id, mc.target_base_url, mc.api_key, "
+            "mc.model_overrides, mc.is_active, mc.is_default, mc.created_at, mc.updated_at, "
+            "u.name as upstream_name "
+            "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
+            "WHERE mc.id = %s"
+        ) if self.postgresql else (
+            "SELECT mc.*, u.name as upstream_name FROM model_configs mc "
+            "LEFT JOIN upstreams u ON mc.upstream_id = u.id WHERE mc.id = ?"
+        )
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
                 cur.execute(sql, (config_id,))
                 row = cur.fetchone()
                 if row:
-                    return {
-                        "id": row[0], "model_key": row[1], "target_base_url": row[2],
-                        "api_key": row[3], "model_overrides": row[4],
-                        "is_active": row[5], "is_default": row[6],
-                        "created_at": row[7].isoformat() if row[7] else None,
-                        "updated_at": row[8].isoformat() if row[8] else None,
+                    d = {
+                        "id": row[0], "model_key": row[1], "upstream_id": row[2],
+                        "target_base_url": row[3], "api_key": row[4], "model_overrides": row[5],
+                        "is_active": row[6], "is_default": row[7],
+                        "created_at": row[8].isoformat() if row[8] else None,
+                        "updated_at": row[9].isoformat() if row[9] else None,
                     }
+                    if row[10] is not None:
+                        d["upstream_name"] = row[10]
+                    return d
                 return None
             finally:
                 self._pg_close(conn, cur)
@@ -938,8 +1180,9 @@ class CallStorage:
                 self._sqlite_close(conn, cur)
 
     def create_model_config(
-        self, model_key: str, target_base_url: str, api_key: str = "",
-        model_overrides: str = "{}", is_active: bool = True, is_default: bool = False
+        self, model_key: str, target_base_url: str = "", api_key: str = "",
+        model_overrides: str = "{}", is_active: bool = True, is_default: bool = False,
+        upstream_id: int = None
     ) -> int:
         """创建模型配置，返回 ID"""
         if self.postgresql:
@@ -948,9 +1191,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = false")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, target_base_url, api_key, model_overrides, is_active, is_default) "
-                    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                    (model_key, target_base_url, api_key, model_overrides, is_active, is_default)
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, is_active, is_default) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, is_active, is_default)
                 )
                 return cur.fetchone()[0]
             finally:
@@ -961,9 +1204,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = 0")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, target_base_url, api_key, model_overrides, is_active, is_default) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (model_key, target_base_url, api_key, model_overrides, int(is_active), int(is_default))
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, is_active, is_default) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, int(is_active), int(is_default))
                 )
                 return cur.lastrowid
             finally:
@@ -972,16 +1215,17 @@ class CallStorage:
     def update_model_config(
         self, config_id: int, model_key: str = None, target_base_url: str = None,
         api_key: str = None, model_overrides: str = None, is_active: bool = None,
-        is_default: bool = None
+        is_default: bool = None, upstream_id: int = None
     ) -> bool:
         """更新模型配置"""
         fields, params = [], []
-        for k, v, fmt_pg, fmt_sqlite in [
-            ("model_key", model_key, "model_key = %s", "model_key = ?"),
-            ("target_base_url", target_base_url, "target_base_url = %s", "target_base_url = ?"),
-            ("api_key", api_key, "api_key = %s", "api_key = ?"),
-            ("model_overrides", model_overrides, "model_overrides = %s", "model_overrides = ?"),
-            ("is_active", is_active, "is_active = %s", "is_active = ?"),
+        for fmt_pg, fmt_sqlite, v in [
+            ("model_key = %s", "model_key = ?", model_key),
+            ("upstream_id = %s", "upstream_id = ?", upstream_id),
+            ("target_base_url = %s", "target_base_url = ?", target_base_url),
+            ("api_key = %s", "api_key = ?", api_key),
+            ("model_overrides = %s", "model_overrides = ?", model_overrides),
+            ("is_active = %s", "is_active = ?", is_active),
         ]:
             if v is not None:
                 fields.append(fmt_pg if self.postgresql else fmt_sqlite)

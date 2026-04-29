@@ -6,9 +6,10 @@ RBAC 权限管理 — 角色、菜单、用户关联初始化
 PRESET_MENUS = [
     {"code": "logs", "name": "调用日志", "icon": "📋", "sort_order": 1},
     {"code": "keys", "name": "密钥管理", "icon": "🔑", "sort_order": 2},
-    {"code": "models", "name": "模型配置", "icon": "⚙️", "sort_order": 3},
-    {"code": "users", "name": "用户管理", "icon": "👤", "sort_order": 4},
-    {"code": "roles", "name": "角色管理", "icon": "🛡️", "sort_order": 5},
+    {"code": "upstreams", "name": "上游管理", "icon": "🔗", "sort_order": 3},
+    {"code": "models", "name": "模型配置", "icon": "⚙️", "sort_order": 4},
+    {"code": "users", "name": "用户管理", "icon": "👤", "sort_order": 5},
+    {"code": "roles", "name": "角色管理", "icon": "🛡️", "sort_order": 6},
 ]
 
 # 预置角色及其菜单权限
@@ -16,7 +17,7 @@ PRESET_ROLES = [
     {
         "name": "admin",
         "description": "管理员，拥有所有菜单权限",
-        "menus": ["logs", "keys", "models", "users", "roles"],
+        "menus": ["logs", "keys", "upstreams", "models", "users", "roles"],
     },
     {
         "name": "viewer",

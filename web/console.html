@@ -151,10 +151,62 @@
         </div>
       </div>
 
+      <!-- ==================== 上游管理面板 ==================== -->
+      <div id="upstreamsPanel" class="hidden flex flex-col flex-1 min-h-0">
+        <!-- 查询条件 -->
+        <div class="flex flex-wrap gap-3 mb-4">
+          <div class="flex-1 min-w-[200px]">
+            <input id="upstreamSearchName" type="text" placeholder="搜索上游名称..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div class="flex-1 min-w-[200px]">
+            <select id="upstreamFilterActive" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="">全部状态</option>
+              <option value="1">启用</option>
+              <option value="0">禁用</option>
+            </select>
+          </div>
+          <button id="upstreamSearchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
+          <button id="upstreamResetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
+          <div class="flex-1"></div>
+          <button id="createUpstreamBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center gap-1">
+            <span>+</span> 新增上游
+          </button>
+        </div>
+
+        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <table class="text-sm w-full" style="table-layout: auto;">
+            <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">上游名称</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">基础 URL</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">描述</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">状态</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">更新时间</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
+              </tr>
+            </thead>
+            <tbody id="upstreamsTableBody"></tbody>
+          </table>
+        </div>
+        <div id="upstreamsEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无上游，请点击上方「+ 新增上游」创建</div>
+      </div>
+
       <!-- ==================== 模型配置面板 ==================== -->
       <div id="modelsPanel" class="hidden flex flex-col flex-1 min-h-0">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-xl font-bold">模型配置</h2>
+        <!-- 查询条件 -->
+        <div class="flex flex-wrap gap-3 mb-4">
+          <div class="flex-1 min-w-[200px]">
+            <input id="modelSearchKey" type="text" placeholder="搜索模型标识..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div class="flex-1 min-w-[200px]">
+            <select id="modelFilterUpstream" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="">全部上游</option>
+            </select>
+          </div>
+          <button id="modelSearchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
+          <button id="modelResetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
+          <div class="flex-1"></div>
           <button id="createModelBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center gap-1">
             <span>+</span> 新增配置
           </button>
@@ -165,6 +217,7 @@
             <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
               <tr>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">模型标识</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">所属上游</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">目标 URL</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">默认</th>
@@ -337,6 +390,44 @@
     </div>
   </div>
 
+  <!-- ==================== 上游管理编辑弹窗 ==================== -->
+  <div id="upstreamEditModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[550px] shadow-2xl">
+      <h2 id="upstreamEditTitle" class="text-lg font-semibold mb-4">新增上游</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">上游名称 <span class="text-red-500">*</span></label>
+          <input id="upstreamName" type="text" required placeholder="如：Moonshot"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">基础 URL <span class="text-red-500">*</span></label>
+          <input id="upstreamBaseUrl" type="text" required placeholder="https://api.moonshot.cn/v1"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">API Key</label>
+          <input id="upstreamApiKey" type="password" placeholder="sk-xxxx"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">描述</label>
+          <input id="upstreamDescription" type="text" placeholder="备注说明"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="upstreamIsActive" type="checkbox" checked class="w-4 h-4">
+          <label for="upstreamIsActive" class="text-sm">启用</label>
+        </div>
+        <div id="upstreamEditError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelUpstreamEdit" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitUpstreamEdit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ==================== 模型配置编辑弹窗 ==================== -->
   <div id="modelEditModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
     <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[550px] shadow-2xl">
@@ -348,14 +439,22 @@
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
         </div>
         <div>
-          <label class="block text-sm font-medium mb-1">目标 URL <span class="text-red-500">*</span></label>
-          <input id="modelBaseUrl" type="text" required placeholder="https://api.example.com/v1"
-            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          <label class="block text-sm font-medium mb-1">选择上游</label>
+          <select id="modelUpstreamSelect" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+            <option value="">-- 不使用上游（手动填写 URL）--</option>
+          </select>
         </div>
-        <div>
-          <label class="block text-sm font-medium mb-1">API Key</label>
-          <input id="modelApiKey" type="password" placeholder="sk-xxxx"
-            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        <div id="modelDirectFields">
+          <div>
+            <label class="block text-sm font-medium mb-1">目标 URL</label>
+            <input id="modelBaseUrl" type="text" placeholder="https://api.example.com/v1"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div class="mt-3">
+            <label class="block text-sm font-medium mb-1">API Key</label>
+            <input id="modelApiKey" type="password" placeholder="sk-xxxx"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
         </div>
         <div>
           <label class="block text-sm font-medium mb-1">模型覆盖规则 (JSON)</label>
@@ -484,7 +583,7 @@ function switchPage(page) {
     }
   });
   // 显示/隐藏面板
-  ['logsPanel', 'keysPanel', 'modelsPanel', 'usersPanel', 'rolesPanel'].forEach(id => {
+  ['logsPanel', 'keysPanel', 'upstreamsPanel', 'modelsPanel', 'usersPanel', 'rolesPanel'].forEach(id => {
     const panel = document.getElementById(id);
     if (panel) {
       if (id === page + 'Panel') {
@@ -498,6 +597,7 @@ function switchPage(page) {
   });
   // 按需加载数据
   if (page === 'keys') loadKeys();
+  if (page === 'upstreams') loadUpstreams();
   if (page === 'models') loadModels();
   if (page === 'users') loadUsers();
   if (page === 'roles') loadRoles();
@@ -795,6 +895,164 @@ document.getElementById('copyNewKey').addEventListener('click', () => {
 document.getElementById('closeNewKeyResult').addEventListener('click', () => document.getElementById('newKeyResultModal').classList.add('hidden'));
 document.getElementById('newKeyResultModal').addEventListener('click', (e) => { if (e.target === document.getElementById('newKeyResultModal')) document.getElementById('newKeyResultModal').classList.add('hidden'); });
 
+// ============ 上游管理 ============
+let allUpstreams = [];
+let editingUpstreamId = null;
+
+async function loadUpstreams() {
+  const tbody = document.getElementById('upstreamsTableBody');
+  const empty = document.getElementById('upstreamsEmpty');
+  try {
+    const res = await fetch('/api/upstreams', { headers: getAuthHeaders() });
+    const data = await res.json();
+    allUpstreams = data.upstreams || [];
+    renderUpstreams();
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+}
+
+function renderUpstreams() {
+  const tbody = document.getElementById('upstreamsTableBody');
+  const empty = document.getElementById('upstreamsEmpty');
+  const searchName = (document.getElementById('upstreamSearchName')?.value || '').toLowerCase();
+  const filterActive = document.getElementById('upstreamFilterActive')?.value || '';
+
+  let filtered = allUpstreams;
+  if (searchName) filtered = filtered.filter(u => u.name.toLowerCase().includes(searchName));
+  if (filterActive !== '') filtered = filtered.filter(u => (u.is_active ? '1' : '0') === filterActive);
+
+  tbody.innerHTML = '';
+  if (filtered.length === 0) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  filtered.forEach(u => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    const statusClass = u.is_active ? 'text-green-500' : 'text-red-500';
+    const statusText = u.is_active ? '启用' : '禁用';
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap font-medium">${u.name}</td>
+      <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${u.target_base_url}">${u.target_base_url}</td>
+      <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${u.api_key_masked || '****'}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.description || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.updated_at || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap">
+        <button class="edit-upstream-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${u.id}">编辑</button>
+        <button class="delete-upstream-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${u.id}">删除</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  bindUpstreamTableEvents();
+}
+
+function bindUpstreamTableEvents() {
+  const tbody = document.getElementById('upstreamsTableBody');
+  tbody.querySelectorAll('.edit-upstream-btn').forEach(btn => {
+    btn.onclick = () => {
+      const u = allUpstreams.find(c => c.id == btn.dataset.id);
+      if (!u) return;
+      editingUpstreamId = u.id;
+      document.getElementById('upstreamEditTitle').textContent = '编辑上游';
+      document.getElementById('upstreamName').value = u.name;
+      document.getElementById('upstreamBaseUrl').value = u.target_base_url;
+      document.getElementById('upstreamApiKey').value = u.api_key || '';
+      document.getElementById('upstreamDescription').value = u.description || '';
+      document.getElementById('upstreamIsActive').checked = u.is_active;
+      document.getElementById('upstreamEditError').classList.add('hidden');
+      document.getElementById('upstreamEditModal').classList.remove('hidden');
+    };
+  });
+  tbody.querySelectorAll('.delete-upstream-btn').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('确定删除此上游？关联的模型配置将失去 url 和 key。')) return;
+      const id = btn.dataset.id;
+      try {
+        const res = await fetch('/api/upstreams/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+        if (res.ok) { loadUpstreams(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
+      } catch(e) { alert('网络错误: ' + e.message); }
+    };
+  });
+}
+
+// 新增上游
+document.getElementById('createUpstreamBtn').addEventListener('click', () => {
+  editingUpstreamId = null;
+  document.getElementById('upstreamEditTitle').textContent = '新增上游';
+  document.getElementById('upstreamName').value = '';
+  document.getElementById('upstreamBaseUrl').value = '';
+  document.getElementById('upstreamApiKey').value = '';
+  document.getElementById('upstreamDescription').value = '';
+  document.getElementById('upstreamIsActive').checked = true;
+  document.getElementById('upstreamEditError').classList.add('hidden');
+  document.getElementById('upstreamEditModal').classList.remove('hidden');
+});
+
+document.getElementById('cancelUpstreamEdit').addEventListener('click', () => {
+  document.getElementById('upstreamEditModal').classList.add('hidden');
+  editingUpstreamId = null;
+});
+
+document.getElementById('upstreamEditModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('upstreamEditModal')) {
+    document.getElementById('upstreamEditModal').classList.add('hidden');
+    editingUpstreamId = null;
+  }
+});
+
+document.getElementById('submitUpstreamEdit').addEventListener('click', async () => {
+  const name = document.getElementById('upstreamName').value.trim();
+  const targetBaseUrl = document.getElementById('upstreamBaseUrl').value.trim();
+  const apiKey = document.getElementById('upstreamApiKey').value;
+  const description = document.getElementById('upstreamDescription').value.trim();
+  const isActive = document.getElementById('upstreamIsActive').checked;
+
+  if (!name || !targetBaseUrl) {
+    document.getElementById('upstreamEditError').textContent = '名称和基础 URL 不能为空';
+    document.getElementById('upstreamEditError').classList.remove('hidden');
+    return;
+  }
+
+  const body = { name, target_base_url: targetBaseUrl, api_key: apiKey, description, is_active: isActive };
+
+  try {
+    let res;
+    if (editingUpstreamId) {
+      res = await fetch('/api/upstreams/' + editingUpstreamId, {
+        method: 'PUT',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } else {
+      res = await fetch('/api/upstreams', {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    }
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('upstreamEditModal').classList.add('hidden');
+      editingUpstreamId = null;
+      loadUpstreams();
+    } else {
+      document.getElementById('upstreamEditError').textContent = data.error || '保存失败';
+      document.getElementById('upstreamEditError').classList.remove('hidden');
+    }
+  } catch(e) {
+    document.getElementById('upstreamEditError').textContent = '网络错误: ' + e.message;
+    document.getElementById('upstreamEditError').classList.remove('hidden');
+  }
+});
+
+// 上游搜索/重置
+document.getElementById('upstreamSearchBtn').addEventListener('click', renderUpstreams);
+document.getElementById('upstreamResetBtn').addEventListener('click', () => {
+  document.getElementById('upstreamSearchName').value = '';
+  document.getElementById('upstreamFilterActive').value = '';
+  renderUpstreams();
+});
+document.getElementById('upstreamSearchName').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderUpstreams(); });
+
 // ============ 初始化 ============
 function calcTableHeight() {
   const wrapper = document.getElementById('tableWrapper');
@@ -813,76 +1071,144 @@ loadMenus();
 
 // ============ 模型配置管理 ============
 let editingModelId = null;
+let allModelConfigs = [];
+
+// 加载上游列表填充下拉框
+async function loadUpstreamOptions() {
+  const select = document.getElementById('modelUpstreamSelect');
+  const filter = document.getElementById('modelFilterUpstream');
+  try {
+    const res = await fetch('/api/upstreams', { headers: getAuthHeaders() });
+    const data = await res.json();
+    const upstreams = data.upstreams || [];
+    // 填充表单下拉
+    select.innerHTML = '<option value="">-- 不使用上游（手动填写 URL）--</option>';
+    upstreams.forEach(u => {
+      select.innerHTML += `<option value="${u.id}" data-url="${u.target_base_url}" data-key="${u.api_key || ''}">${u.name} (${u.target_base_url})</option>`;
+    });
+    // 填充筛选下拉
+    filter.innerHTML = '<option value="">全部上游</option>';
+    upstreams.forEach(u => {
+      filter.innerHTML += `<option value="${u.id}">${u.name}</option>`;
+    });
+  } catch(e) { console.error('Failed to load upstreams:', e); }
+}
 
 async function loadModels() {
+  await loadUpstreamOptions();
   const tbody = document.getElementById('modelsTableBody');
   const empty = document.getElementById('modelsEmpty');
   try {
     const res = await fetch('/api/models', { headers: getAuthHeaders() });
     const data = await res.json();
-    const configs = data.configs || [];
-    tbody.innerHTML = '';
-    if (configs.length === 0) { empty.classList.remove('hidden'); return; }
-    empty.classList.add('hidden');
-    configs.forEach(cfg => {
-      const tr = document.createElement('tr');
-      tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
-      const statusClass = cfg.is_active ? 'text-green-500' : 'text-red-500';
-      const statusText = cfg.is_active ? '启用' : '禁用';
-      const keyDisplay = cfg.api_key ? cfg.api_key.substring(0, 8) + '****' : '(无)';
-      const defaultText = cfg.is_default ? '<span class="text-blue-500 font-medium">是</span>' : '<span class="text-zinc-500">否</span>';
-      tr.innerHTML = `
-        <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${cfg.model_key}</td>
-        <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${cfg.target_base_url}">${cfg.target_base_url}</td>
-        <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${keyDisplay}</td>
-        <td class="px-4 py-2 whitespace-nowrap">${defaultText}</td>
-        <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
-        <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${cfg.updated_at || '-'}</td>
-        <td class="px-4 py-2 whitespace-nowrap">
-          <button class="edit-model-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${cfg.id}">编辑</button>
-          <button class="delete-model-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${cfg.id}">删除</button>
-        </td>
-      `;
-      tbody.appendChild(tr);
-    });
-    // 编辑
-    tbody.querySelectorAll('.edit-model-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const cfg = configs.find(c => c.id == btn.dataset.id);
-        if (!cfg) return;
-        editingModelId = cfg.id;
-        document.getElementById('modelEditTitle').textContent = '编辑模型配置';
-        document.getElementById('modelKey').value = cfg.model_key;
-        document.getElementById('modelBaseUrl').value = cfg.target_base_url;
-        document.getElementById('modelApiKey').value = cfg.api_key || '';
-        document.getElementById('modelOverrides').value = cfg.model_overrides || '{}';
-        document.getElementById('modelIsActive').checked = cfg.is_active;
-        document.getElementById('modelIsDefault').checked = cfg.is_default;
-        document.getElementById('modelEditError').classList.add('hidden');
-        document.getElementById('modelEditModal').classList.remove('hidden');
-      });
-    });
-    // 删除
-    tbody.querySelectorAll('.delete-model-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('确定删除此模型配置？此操作不可恢复。')) return;
-        const id = btn.dataset.id;
-        try {
-          const res = await fetch('/api/models/' + id, { method: 'DELETE', headers: getAuthHeaders() });
-          if (res.ok) { loadModels(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
-        } catch(e) { alert('网络错误: ' + e.message); }
-      });
-    });
-  } catch(e) { tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+    allModelConfigs = data.configs || [];
+    renderModels();
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
 }
+
+function renderModels() {
+  const tbody = document.getElementById('modelsTableBody');
+  const empty = document.getElementById('modelsEmpty');
+  const searchKey = (document.getElementById('modelSearchKey')?.value || '').toLowerCase();
+  const filterUpstream = document.getElementById('modelFilterUpstream')?.value || '';
+
+  let filtered = allModelConfigs;
+  if (searchKey) filtered = filtered.filter(c => c.model_key.toLowerCase().includes(searchKey));
+  if (filterUpstream) filtered = filtered.filter(c => c.upstream_id == filterUpstream);
+
+  tbody.innerHTML = '';
+  if (filtered.length === 0) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  filtered.forEach(cfg => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    const statusClass = cfg.is_active ? 'text-green-500' : 'text-red-500';
+    const statusText = cfg.is_active ? '启用' : '禁用';
+    const keyDisplay = cfg.api_key ? cfg.api_key.substring(0, 8) + '****' : '(无)';
+    const defaultText = cfg.is_default ? '<span class="text-blue-500 font-medium">是</span>' : '<span class="text-zinc-500">否</span>';
+    const upstreamName = cfg.upstream_name || '<span class="text-zinc-400">-</span>';
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${cfg.model_key}</td>
+      <td class="px-4 py-2 whitespace-nowrap">${upstreamName}</td>
+      <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${cfg.target_base_url || ''}">${cfg.target_base_url || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${keyDisplay}</td>
+      <td class="px-4 py-2 whitespace-nowrap">${defaultText}</td>
+      <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${cfg.updated_at || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap">
+        <button class="edit-model-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${cfg.id}">编辑</button>
+        <button class="delete-model-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${cfg.id}">删除</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  // 编辑
+  tbody.querySelectorAll('.edit-model-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cfg = allModelConfigs.find(c => c.id == btn.dataset.id);
+      if (!cfg) return;
+      editingModelId = cfg.id;
+      document.getElementById('modelEditTitle').textContent = '编辑模型配置';
+      document.getElementById('modelKey').value = cfg.model_key;
+      // 设置上游选择
+      document.getElementById('modelUpstreamSelect').value = cfg.upstream_id || '';
+      onUpstreamChange();  // 触发 url/key 填充
+      document.getElementById('modelOverrides').value = cfg.model_overrides || '{}';
+      document.getElementById('modelIsActive').checked = cfg.is_active;
+      document.getElementById('modelIsDefault').checked = cfg.is_default;
+      document.getElementById('modelEditError').classList.add('hidden');
+      document.getElementById('modelEditModal').classList.remove('hidden');
+    });
+  });
+  // 删除
+  tbody.querySelectorAll('.delete-model-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('确定删除此模型配置？此操作不可恢复。')) return;
+      const id = btn.dataset.id;
+      try {
+        const res = await fetch('/api/models/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+        if (res.ok) { loadModels(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
+      } catch(e) { alert('网络错误: ' + e.message); }
+    });
+  });
+}
+
+// 上游选择改变时自动填充 URL 和 Key
+function onUpstreamChange() {
+  const select = document.getElementById('modelUpstreamSelect');
+  const option = select.options[select.selectedIndex];
+  const directFields = document.getElementById('modelDirectFields');
+  if (select.value) {
+    // 选择了上游，自动填充 URL 和 Key，禁用直接输入
+    document.getElementById('modelBaseUrl').value = option.dataset.url || '';
+    document.getElementById('modelApiKey').value = option.dataset.key || '';
+    directFields.style.display = 'none';
+  } else {
+    // 不使用上游，显示直接输入字段
+    document.getElementById('modelBaseUrl').value = '';
+    document.getElementById('modelApiKey').value = '';
+    directFields.style.display = 'block';
+  }
+}
+
+document.getElementById('modelUpstreamSelect').addEventListener('change', onUpstreamChange);
+
+// 模型搜索/重置
+document.getElementById('modelSearchBtn').addEventListener('click', renderModels);
+document.getElementById('modelResetBtn').addEventListener('click', () => {
+  document.getElementById('modelSearchKey').value = '';
+  document.getElementById('modelFilterUpstream').value = '';
+  renderModels();
+});
+document.getElementById('modelSearchKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderModels(); });
 
 // 新增配置
 document.getElementById('createModelBtn').addEventListener('click', () => {
   editingModelId = null;
   document.getElementById('modelEditTitle').textContent = '新增模型配置';
   document.getElementById('modelKey').value = '';
-  document.getElementById('modelBaseUrl').value = '';
-  document.getElementById('modelApiKey').value = '';
+  document.getElementById('modelUpstreamSelect').value = '';
+  onUpstreamChange();
   document.getElementById('modelOverrides').value = '{}';
   document.getElementById('modelIsActive').checked = true;
   document.getElementById('modelIsDefault').checked = false;
@@ -904,14 +1230,20 @@ document.getElementById('modelEditModal').addEventListener('click', (e) => {
 
 document.getElementById('submitModelEdit').addEventListener('click', async () => {
   const modelKey = document.getElementById('modelKey').value.trim();
+  const upstreamId = document.getElementById('modelUpstreamSelect').value;
   const targetBaseUrl = document.getElementById('modelBaseUrl').value.trim();
   const apiKey = document.getElementById('modelApiKey').value;
   const overrides = document.getElementById('modelOverrides').value.trim() || '{}';
   const isActive = document.getElementById('modelIsActive').checked;
   const isDefault = document.getElementById('modelIsDefault').checked;
 
-  if (!modelKey || !targetBaseUrl) {
-    document.getElementById('modelEditError').textContent = '模型标识和目标 URL 不能为空';
+  if (!modelKey) {
+    document.getElementById('modelEditError').textContent = '模型标识不能为空';
+    document.getElementById('modelEditError').classList.remove('hidden');
+    return;
+  }
+  if (!upstreamId && !targetBaseUrl) {
+    document.getElementById('modelEditError').textContent = '请选择上游或填写目标 URL';
     document.getElementById('modelEditError').classList.remove('hidden');
     return;
   }
@@ -923,7 +1255,15 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
     return;
   }
 
-  const body = { model_key: modelKey, target_base_url: targetBaseUrl, api_key: apiKey, model_overrides: overrides, is_active: isActive, is_default: isDefault };
+  const body = {
+    model_key: modelKey,
+    upstream_id: upstreamId ? parseInt(upstreamId) : null,
+    target_base_url: targetBaseUrl,
+    api_key: apiKey,
+    model_overrides: overrides,
+    is_active: isActive,
+    is_default: isDefault
+  };
 
   try {
     let res;
