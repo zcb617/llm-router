@@ -1,20 +1,6 @@
 proxy:
   listen_port: 38888
-  model_mappings:
-    kimi-for-coding:
-      target_base_url: https://api.kimi.com/coding/
-      api_key: "sk-kimi-mgWduEtMneq20KKcgT33lhFuDA6GID3mn3dbyqRzeaFvik3BabWcmtP29pkXJxVY"
-      model_overrides:
-        kimi-for-coding: kimi-for-coding
-    qwen3.6-plus:
-      target_base_url: https://coding.dashscope.aliyuncs.com/apps/anthropic
-      api_key: "sk-sp-e29fcd5986ac486a87a00dd6a327f643"
-    qwen3-coder-next:
-      target_base_url: https://coding.dashscope.aliyuncs.com/apps/anthropic
-      api_key: "sk-sp-e29fcd5986ac486a87a00dd6a327f643"
-    qwen3-coder-plus:
-      target_base_url: https://coding.dashscope.aliyuncs.com/apps/anthropic
-      api_key: "sk-sp-e29fcd5986ac486a87a00dd6a327f643"
+  default_model: "kimi-for-coding"  # 指向 model_configs 表中的 model_key，模型配置请在控制台「模型配置」菜单中管理
 
 database:
   path: "./data/llm_calls.db"

@@ -60,15 +60,8 @@
   <div class="flex flex-1 min-h-0">
     <!-- Sidebar -->
     <aside class="w-52 bg-zinc-900 text-zinc-300 flex-shrink-0 flex flex-col">
-      <nav class="py-4">
-        <a href="#" data-page="logs" id="menuLogs" class="menu-item active flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-800 transition text-sm">
-          <span class="text-lg">📋</span>
-          <span>调用日志</span>
-        </a>
-        <a href="#" data-page="keys" id="menuKeys" class="menu-item flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-800 transition text-sm">
-          <span class="text-lg">🔑</span>
-          <span>密钥管理</span>
-        </a>
+      <nav id="sidebarNav" class="py-4">
+        <!-- 动态渲染菜单 -->
       </nav>
     </aside>
 
@@ -156,6 +149,98 @@
         <div id="keysEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">
           暂无密钥，请点击上方「+ 新建密钥」创建
         </div>
+      </div>
+
+      <!-- ==================== 模型配置面板 ==================== -->
+      <div id="modelsPanel" class="hidden flex flex-col flex-1 min-h-0">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-bold">模型配置</h2>
+          <button id="createModelBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center gap-1">
+            <span>+</span> 新增配置
+          </button>
+        </div>
+
+        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <table class="text-sm w-full" style="table-layout: auto;">
+            <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">模型标识</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">目标 URL</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">默认</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">状态</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">更新时间</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
+              </tr>
+            </thead>
+            <tbody id="modelsTableBody"></tbody>
+          </table>
+        </div>
+        <div id="modelsEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">
+          暂无模型配置，请点击上方「+ 新增配置」创建
+        </div>
+      </div>
+
+      <!-- ==================== 用户管理面板 ==================== -->
+      <div id="usersPanel" class="hidden flex flex-col flex-1 min-h-0">
+        <!-- 查询条件 -->
+        <div class="flex flex-wrap gap-3 mb-4">
+          <div class="flex-1 min-w-[200px]">
+            <input id="userSearchEmail" type="text" placeholder="搜索邮箱..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div class="flex-1 min-w-[200px]">
+            <select id="userFilterRole" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="">全部角色</option>
+            </select>
+          </div>
+          <button id="userSearchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
+          <button id="userResetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
+        </div>
+        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <table class="text-sm w-full" style="table-layout: auto;">
+            <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">邮箱</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">角色</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">创建时间</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">最后登录</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
+              </tr>
+            </thead>
+            <tbody id="usersTableBody"></tbody>
+          </table>
+        </div>
+        <div id="usersEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无用户</div>
+      </div>
+
+      <!-- ==================== 角色管理面板 ==================== -->
+      <div id="rolesPanel" class="hidden flex flex-col flex-1 min-h-0">
+        <!-- 查询条件 -->
+        <div class="flex flex-wrap gap-3 mb-4">
+          <div class="flex-1 min-w-[200px]">
+            <input id="roleSearchName" type="text" placeholder="搜索角色名称..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <button id="roleSearchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
+          <button id="roleResetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
+          <div class="flex-1"></div>
+          <button id="createRoleBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center gap-1">
+            <span>+</span> 新增角色
+          </button>
+        </div>
+        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <table class="text-sm w-full" style="table-layout: auto;">
+            <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">角色名称</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">描述</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">创建时间</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
+              </tr>
+            </thead>
+            <tbody id="rolesTableBody"></tbody>
+          </table>
+        </div>
+        <div id="rolesEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无角色</div>
       </div>
     </main>
   </div>
@@ -252,6 +337,85 @@
     </div>
   </div>
 
+  <!-- ==================== 模型配置编辑弹窗 ==================== -->
+  <div id="modelEditModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[550px] shadow-2xl">
+      <h2 id="modelEditTitle" class="text-lg font-semibold mb-4">新增模型配置</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">模型标识 <span class="text-red-500">*</span></label>
+          <input id="modelKey" type="text" required placeholder="如：kimi-for-coding"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">目标 URL <span class="text-red-500">*</span></label>
+          <input id="modelBaseUrl" type="text" required placeholder="https://api.example.com/v1"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">API Key</label>
+          <input id="modelApiKey" type="password" placeholder="sk-xxxx"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">模型覆盖规则 (JSON)</label>
+          <textarea id="modelOverrides" rows="3" placeholder='{"claude-sonnet-4-6": "kimi-for-coding"}'
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-mono text-xs focus:ring-2 focus:ring-blue-500 outline-none"></textarea>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="modelIsActive" type="checkbox" checked class="w-4 h-4">
+          <label for="modelIsActive" class="text-sm">启用</label>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="modelIsDefault" type="checkbox" class="w-4 h-4">
+          <label for="modelIsDefault" class="text-sm">设为默认模型</label>
+        </div>
+        <div id="modelEditError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelModelEdit" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitModelEdit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 角色编辑弹窗 ==================== -->
+  <div id="roleEditModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-96 shadow-2xl">
+      <h2 id="roleEditTitle" class="text-lg font-semibold mb-4">新增角色</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">角色名称 <span class="text-red-500">*</span></label>
+          <input id="roleName" type="text" required placeholder="如：editor"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">描述</label>
+          <input id="roleDescription" type="text" placeholder="角色描述"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div id="roleEditError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelRoleEdit" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitRoleEdit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 角色菜单配置弹窗 ==================== -->
+  <div id="roleMenusModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-96 shadow-2xl">
+      <h2 class="text-lg font-semibold mb-4">配置菜单权限</h2>
+      <div id="roleMenusList" class="space-y-2 max-h-60 overflow-y-auto"></div>
+      <div id="roleMenusError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2 mt-2"></div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelRoleMenus" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitRoleMenus" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 // ============ 认证检查 ============
 const token = localStorage.getItem('llm_token');
@@ -269,31 +433,75 @@ document.getElementById('logoutBtn').addEventListener('click', () => {
   window.location.href = '/web/login.html';
 });
 
-// ============ 菜单切换 ============
-const menuLogs = document.getElementById('menuLogs');
-const menuKeys = document.getElementById('menuKeys');
-const logsPanel = document.getElementById('logsPanel');
-const keysPanel = document.getElementById('keysPanel');
+// ============ 动态菜单渲染 ============
+let userMenus = [];  // 从 API 获取的菜单列表
+let currentPage = 'logs';  // 当前页面
 
-function switchPage(page) {
-  if (page === 'logs') {
-    menuLogs.classList.add('active');
-    menuKeys.classList.remove('active');
-    logsPanel.classList.remove('hidden');
-    keysPanel.classList.add('hidden');
-    keysPanel.classList.remove('flex');
-  } else {
-    menuKeys.classList.add('active');
-    menuLogs.classList.remove('active');
-    keysPanel.classList.remove('hidden');
-    keysPanel.classList.add('flex');
-    logsPanel.classList.add('hidden');
-    loadKeys();
+function getAuthHeaders() { return { 'Authorization': 'Bearer ' + token }; }
+
+async function loadMenus() {
+  try {
+    const res = await fetch('/api/auth/me', { headers: getAuthHeaders() });
+    const data = await res.json();
+    if (res.ok && data.menus) {
+      userMenus = data.menus;
+      document.getElementById('userEmail').textContent = data.email || '';
+      renderSidebar();
+      // 默认跳转到第一个菜单
+      if (userMenus.length > 0) {
+        switchPage(userMenus[0].code);
+      }
+    }
+  } catch(e) {
+    console.error('Failed to load menus:', e);
   }
 }
 
-menuLogs.addEventListener('click', (e) => { e.preventDefault(); switchPage('logs'); });
-menuKeys.addEventListener('click', (e) => { e.preventDefault(); switchPage('keys'); });
+function renderSidebar() {
+  const nav = document.getElementById('sidebarNav');
+  nav.innerHTML = '';
+  userMenus.forEach(menu => {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.dataset.page = menu.code;
+    a.id = 'menu' + menu.code.charAt(0).toUpperCase() + menu.code.slice(1);
+    a.className = 'menu-item flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-800 transition text-sm' +
+                  (menu.code === 'logs' ? ' active' : '');
+    a.innerHTML = `<span class="text-lg">${menu.icon}</span><span>${menu.name}</span>`;
+    a.addEventListener('click', (e) => { e.preventDefault(); switchPage(menu.code); });
+    nav.appendChild(a);
+  });
+}
+
+function switchPage(page) {
+  currentPage = page;
+  // 更新菜单激活状态
+  userMenus.forEach(menu => {
+    const el = document.getElementById('menu' + menu.code.charAt(0).toUpperCase() + menu.code.slice(1));
+    if (el) {
+      if (menu.code === page) el.classList.add('active');
+      else el.classList.remove('active');
+    }
+  });
+  // 显示/隐藏面板
+  ['logsPanel', 'keysPanel', 'modelsPanel', 'usersPanel', 'rolesPanel'].forEach(id => {
+    const panel = document.getElementById(id);
+    if (panel) {
+      if (id === page + 'Panel') {
+        panel.classList.remove('hidden');
+        panel.classList.add('flex');
+      } else {
+        panel.classList.add('hidden');
+        panel.classList.remove('flex');
+      }
+    }
+  });
+  // 按需加载数据
+  if (page === 'keys') loadKeys();
+  if (page === 'models') loadModels();
+  if (page === 'users') loadUsers();
+  if (page === 'roles') loadRoles();
+}
 
 // ============ 调用日志（复用 index.html 逻辑） ============
 const COLUMNS = [
@@ -599,6 +807,473 @@ window.addEventListener('resize', calcTableHeight);
 calcTableHeight();
 loadColumns();
 loadLogsData();
+
+// 加载菜单（取代直接加载日志）
+loadMenus();
+
+// ============ 模型配置管理 ============
+let editingModelId = null;
+
+async function loadModels() {
+  const tbody = document.getElementById('modelsTableBody');
+  const empty = document.getElementById('modelsEmpty');
+  try {
+    const res = await fetch('/api/models', { headers: getAuthHeaders() });
+    const data = await res.json();
+    const configs = data.configs || [];
+    tbody.innerHTML = '';
+    if (configs.length === 0) { empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    configs.forEach(cfg => {
+      const tr = document.createElement('tr');
+      tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+      const statusClass = cfg.is_active ? 'text-green-500' : 'text-red-500';
+      const statusText = cfg.is_active ? '启用' : '禁用';
+      const keyDisplay = cfg.api_key ? cfg.api_key.substring(0, 8) + '****' : '(无)';
+      const defaultText = cfg.is_default ? '<span class="text-blue-500 font-medium">是</span>' : '<span class="text-zinc-500">否</span>';
+      tr.innerHTML = `
+        <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${cfg.model_key}</td>
+        <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${cfg.target_base_url}">${cfg.target_base_url}</td>
+        <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${keyDisplay}</td>
+        <td class="px-4 py-2 whitespace-nowrap">${defaultText}</td>
+        <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${cfg.updated_at || '-'}</td>
+        <td class="px-4 py-2 whitespace-nowrap">
+          <button class="edit-model-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${cfg.id}">编辑</button>
+          <button class="delete-model-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${cfg.id}">删除</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+    // 编辑
+    tbody.querySelectorAll('.edit-model-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const cfg = configs.find(c => c.id == btn.dataset.id);
+        if (!cfg) return;
+        editingModelId = cfg.id;
+        document.getElementById('modelEditTitle').textContent = '编辑模型配置';
+        document.getElementById('modelKey').value = cfg.model_key;
+        document.getElementById('modelBaseUrl').value = cfg.target_base_url;
+        document.getElementById('modelApiKey').value = cfg.api_key || '';
+        document.getElementById('modelOverrides').value = cfg.model_overrides || '{}';
+        document.getElementById('modelIsActive').checked = cfg.is_active;
+        document.getElementById('modelIsDefault').checked = cfg.is_default;
+        document.getElementById('modelEditError').classList.add('hidden');
+        document.getElementById('modelEditModal').classList.remove('hidden');
+      });
+    });
+    // 删除
+    tbody.querySelectorAll('.delete-model-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('确定删除此模型配置？此操作不可恢复。')) return;
+        const id = btn.dataset.id;
+        try {
+          const res = await fetch('/api/models/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+          if (res.ok) { loadModels(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
+    });
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+}
+
+// 新增配置
+document.getElementById('createModelBtn').addEventListener('click', () => {
+  editingModelId = null;
+  document.getElementById('modelEditTitle').textContent = '新增模型配置';
+  document.getElementById('modelKey').value = '';
+  document.getElementById('modelBaseUrl').value = '';
+  document.getElementById('modelApiKey').value = '';
+  document.getElementById('modelOverrides').value = '{}';
+  document.getElementById('modelIsActive').checked = true;
+  document.getElementById('modelIsDefault').checked = false;
+  document.getElementById('modelEditError').classList.add('hidden');
+  document.getElementById('modelEditModal').classList.remove('hidden');
+});
+
+document.getElementById('cancelModelEdit').addEventListener('click', () => {
+  document.getElementById('modelEditModal').classList.add('hidden');
+  editingModelId = null;
+});
+
+document.getElementById('modelEditModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('modelEditModal')) {
+    document.getElementById('modelEditModal').classList.add('hidden');
+    editingModelId = null;
+  }
+});
+
+document.getElementById('submitModelEdit').addEventListener('click', async () => {
+  const modelKey = document.getElementById('modelKey').value.trim();
+  const targetBaseUrl = document.getElementById('modelBaseUrl').value.trim();
+  const apiKey = document.getElementById('modelApiKey').value;
+  const overrides = document.getElementById('modelOverrides').value.trim() || '{}';
+  const isActive = document.getElementById('modelIsActive').checked;
+  const isDefault = document.getElementById('modelIsDefault').checked;
+
+  if (!modelKey || !targetBaseUrl) {
+    document.getElementById('modelEditError').textContent = '模型标识和目标 URL 不能为空';
+    document.getElementById('modelEditError').classList.remove('hidden');
+    return;
+  }
+
+  // 验证 JSON
+  try { JSON.parse(overrides); } catch(e) {
+    document.getElementById('modelEditError').textContent = '模型覆盖规则必须是有效的 JSON';
+    document.getElementById('modelEditError').classList.remove('hidden');
+    return;
+  }
+
+  const body = { model_key: modelKey, target_base_url: targetBaseUrl, api_key: apiKey, model_overrides: overrides, is_active: isActive, is_default: isDefault };
+
+  try {
+    let res;
+    if (editingModelId) {
+      res = await fetch('/api/models/' + editingModelId, {
+        method: 'PUT',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } else {
+      res = await fetch('/api/models', {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    }
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('modelEditModal').classList.add('hidden');
+      editingModelId = null;
+      loadModels();
+    } else {
+      document.getElementById('modelEditError').textContent = data.error || '保存失败';
+      document.getElementById('modelEditError').classList.remove('hidden');
+    }
+  } catch(e) {
+    document.getElementById('modelEditError').textContent = '网络错误: ' + e.message;
+    document.getElementById('modelEditError').classList.remove('hidden');
+  }
+});
+
+// ============ 用户管理 ============
+let allRoles = [];  // 缓存角色列表用于下拉框
+let allUsers = [];  // 缓存所有用户用于前端过滤
+
+// 格式化时间：yyyy-mm-dd hh:mm:ss
+function formatDateTime(val) {
+  if (!val) return '-';
+  try {
+    const d = new Date(val);
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+  } catch(e) { return val; }
+}
+
+// 过滤并渲染用户列表
+function renderUsers() {
+  const tbody = document.getElementById('usersTableBody');
+  const empty = document.getElementById('usersEmpty');
+  const searchEmail = (document.getElementById('userSearchEmail')?.value || '').toLowerCase();
+  const filterRole = document.getElementById('userFilterRole')?.value || '';
+
+  let filtered = allUsers;
+  if (searchEmail) filtered = filtered.filter(u => u.email.toLowerCase().includes(searchEmail));
+  if (filterRole) filtered = filtered.filter(u => u.role_id == filterRole);
+
+  tbody.innerHTML = '';
+  if (filtered.length === 0) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  filtered.forEach(u => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    let roleOptions = '<option value="">-- 无角色 --</option>';
+    allRoles.forEach(r => {
+      roleOptions += `<option value="${r.id}" ${u.role_id == r.id ? 'selected' : ''}>${r.name}</option>`;
+    });
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${u.email}</td>
+      <td class="px-4 py-2 whitespace-nowrap">
+        <select class="user-role-select px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900" data-user-id="${u.id}">
+          ${roleOptions}
+        </select>
+      </td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${formatDateTime(u.created_at)}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${formatDateTime(u.last_login_at)}</td>
+      <td class="px-4 py-2 whitespace-nowrap">
+        <button class="delete-user-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${u.id}">删除</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  // 重新绑定事件
+  bindUserTableEvents();
+}
+
+function bindUserTableEvents() {
+  const tbody = document.getElementById('usersTableBody');
+  // 修改角色
+  tbody.querySelectorAll('.user-role-select').forEach(sel => {
+    sel.onchange = async () => {
+      const userId = sel.dataset.userId;
+      const roleId = sel.value || null;
+      try {
+        const res = await fetch('/api/users/' + userId, {
+          method: 'PUT',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role_id: roleId })
+        });
+        if (!res.ok) { const d = await res.json(); alert(d.error || '修改失败'); }
+        else { loadUsers(); }  // 重新加载以更新角色名称
+      } catch(e) { alert('网络错误: ' + e.message); }
+    };
+  });
+  // 删除用户
+  tbody.querySelectorAll('.delete-user-btn').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('确定删除此用户？此操作不可恢复。')) return;
+      const id = btn.dataset.id;
+      try {
+        const res = await fetch('/api/users/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+        if (res.ok) { loadUsers(); }
+        else { const d = await res.json(); alert(d.error || '删除失败'); }
+      } catch(e) { alert('网络错误: ' + e.message); }
+    };
+  });
+}
+
+async function loadUsers() {
+  const tbody = document.getElementById('usersTableBody');
+  const empty = document.getElementById('usersEmpty');
+  try {
+    const [usersRes, rolesRes] = await Promise.all([
+      fetch('/api/users', { headers: getAuthHeaders() }),
+      fetch('/api/roles', { headers: getAuthHeaders() })
+    ]);
+    const usersData = await usersRes.json();
+    const rolesData = await rolesRes.json();
+    allRoles = rolesData.roles || [];
+    allUsers = usersData.users || [];
+
+    // 填充角色筛选下拉框
+    const filterSelect = document.getElementById('userFilterRole');
+    if (filterSelect) {
+      filterSelect.innerHTML = '<option value="">全部角色</option>';
+      allRoles.forEach(r => {
+        filterSelect.innerHTML += `<option value="${r.id}">${r.name}</option>`;
+      });
+    }
+
+    renderUsers();
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+}
+
+// ============ 角色管理 ============
+let editingRoleId = null;
+let editingRoleMenusId = null;
+let allMenusForRole = [];
+let allRolesData = [];  // 缓存所有角色用于前端过滤
+
+// 过滤并渲染角色列表
+function renderRoles() {
+  const tbody = document.getElementById('rolesTableBody');
+  const empty = document.getElementById('rolesEmpty');
+  const searchName = (document.getElementById('roleSearchName')?.value || '').toLowerCase();
+
+  let filtered = allRolesData;
+  if (searchName) filtered = filtered.filter(r => r.name.toLowerCase().includes(searchName));
+
+  tbody.innerHTML = '';
+  if (filtered.length === 0) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  filtered.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap font-medium">${r.name}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${r.description || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${formatDateTime(r.created_at)}</td>
+      <td class="px-4 py-2 whitespace-nowrap">
+        <button class="edit-role-menus-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${r.id}">菜单</button>
+        <button class="edit-role-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${r.id}" data-name="${r.name}" data-desc="${r.description || ''}">编辑</button>
+        <button class="delete-role-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${r.id}">删除</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  bindRoleTableEvents();
+}
+
+function bindRoleTableEvents() {
+  const tbody = document.getElementById('rolesTableBody');
+  // 编辑角色
+  tbody.querySelectorAll('.edit-role-btn').forEach(btn => {
+    btn.onclick = () => {
+      editingRoleId = parseInt(btn.dataset.id);
+      document.getElementById('roleEditTitle').textContent = '编辑角色';
+      document.getElementById('roleName').value = btn.dataset.name;
+      document.getElementById('roleDescription').value = btn.dataset.desc;
+      document.getElementById('roleEditError').classList.add('hidden');
+      document.getElementById('roleEditModal').classList.remove('hidden');
+    };
+  });
+  // 配置菜单
+  tbody.querySelectorAll('.edit-role-menus-btn').forEach(btn => {
+    btn.onclick = async () => {
+      editingRoleMenusId = parseInt(btn.dataset.id);
+      try {
+        const res = await fetch('/api/roles/' + editingRoleMenusId + '/menus', { headers: getAuthHeaders() });
+        const data = await res.json();
+        allMenusForRole = data.all_menus || [];
+        const roleMenuIds = data.role_menus || [];
+        const list = document.getElementById('roleMenusList');
+        list.innerHTML = '';
+        allMenusForRole.forEach(m => {
+          const div = document.createElement('div');
+          div.className = 'flex items-center gap-2 p-2 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800';
+          div.innerHTML = `<input type="checkbox" value="${m.id}" ${roleMenuIds.includes(m.id) ? 'checked' : ''} class="role-menu-cb"><span class="flex-1 text-sm">${m.icon} ${m.name}</span>`;
+          list.appendChild(div);
+        });
+        document.getElementById('roleMenusError').classList.add('hidden');
+        document.getElementById('roleMenusModal').classList.remove('hidden');
+      } catch(e) { alert('加载失败: ' + e.message); }
+    };
+  });
+  // 删除角色
+  tbody.querySelectorAll('.delete-role-btn').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('确定删除此角色？关联的用户将失去该角色权限。')) return;
+      const id = btn.dataset.id;
+      try {
+        const res = await fetch('/api/roles/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+        if (res.ok) { loadRoles(); }
+        else { const d = await res.json(); alert(d.error || '删除失败'); }
+      } catch(e) { alert('网络错误: ' + e.message); }
+    };
+  });
+}
+
+async function loadRoles() {
+  const tbody = document.getElementById('rolesTableBody');
+  const empty = document.getElementById('rolesEmpty');
+  try {
+    const res = await fetch('/api/roles', { headers: getAuthHeaders() });
+    const data = await res.json();
+    allRolesData = data.roles || [];
+    renderRoles();
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+}
+
+// 新增角色
+document.getElementById('createRoleBtn').addEventListener('click', () => {
+  editingRoleId = null;
+  document.getElementById('roleEditTitle').textContent = '新增角色';
+  document.getElementById('roleName').value = '';
+  document.getElementById('roleDescription').value = '';
+  document.getElementById('roleEditError').classList.add('hidden');
+  document.getElementById('roleEditModal').classList.remove('hidden');
+});
+
+document.getElementById('cancelRoleEdit').addEventListener('click', () => {
+  document.getElementById('roleEditModal').classList.add('hidden');
+  editingRoleId = null;
+});
+
+document.getElementById('roleEditModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('roleEditModal')) {
+    document.getElementById('roleEditModal').classList.add('hidden');
+    editingRoleId = null;
+  }
+});
+
+document.getElementById('submitRoleEdit').addEventListener('click', async () => {
+  const name = document.getElementById('roleName').value.trim();
+  const description = document.getElementById('roleDescription').value.trim();
+  if (!name) {
+    document.getElementById('roleEditError').textContent = '角色名称不能为空';
+    document.getElementById('roleEditError').classList.remove('hidden');
+    return;
+  }
+  try {
+    let res;
+    if (editingRoleId) {
+      res = await fetch('/api/roles/' + editingRoleId, {
+        method: 'PUT',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description })
+      });
+    } else {
+      res = await fetch('/api/roles', {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description })
+      });
+    }
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('roleEditModal').classList.add('hidden');
+      editingRoleId = null;
+      loadRoles();
+    } else {
+      document.getElementById('roleEditError').textContent = data.error || '保存失败';
+      document.getElementById('roleEditError').classList.remove('hidden');
+    }
+  } catch(e) {
+    document.getElementById('roleEditError').textContent = '网络错误: ' + e.message;
+    document.getElementById('roleEditError').classList.remove('hidden');
+  }
+});
+
+// 角色菜单配置
+document.getElementById('cancelRoleMenus').addEventListener('click', () => {
+  document.getElementById('roleMenusModal').classList.add('hidden');
+  editingRoleMenusId = null;
+});
+
+document.getElementById('roleMenusModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('roleMenusModal')) {
+    document.getElementById('roleMenusModal').classList.add('hidden');
+    editingRoleMenusId = null;
+  }
+});
+
+document.getElementById('submitRoleMenus').addEventListener('click', async () => {
+  const menuIds = Array.from(document.querySelectorAll('.role-menu-cb:checked')).map(cb => parseInt(cb.value));
+  try {
+    const res = await fetch('/api/roles/' + editingRoleMenusId + '/menus', {
+      method: 'PUT',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ menu_ids: menuIds })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('roleMenusModal').classList.add('hidden');
+      editingRoleMenusId = null;
+    } else {
+      document.getElementById('roleMenusError').textContent = data.error || '保存失败';
+      document.getElementById('roleMenusError').classList.remove('hidden');
+    }
+  } catch(e) {
+    document.getElementById('roleMenusError').textContent = '网络错误: ' + e.message;
+    document.getElementById('roleMenusError').classList.remove('hidden');
+  }
+});
+
+// 用户管理搜索/重置
+document.getElementById('userSearchBtn').addEventListener('click', renderUsers);
+document.getElementById('userResetBtn').addEventListener('click', () => {
+  document.getElementById('userSearchEmail').value = '';
+  document.getElementById('userFilterRole').value = '';
+  renderUsers();
+});
+document.getElementById('userSearchEmail').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderUsers(); });
+document.getElementById('userFilterRole').addEventListener('change', renderUsers);
+
+// 角色管理搜索/重置
+document.getElementById('roleSearchBtn').addEventListener('click', renderRoles);
+document.getElementById('roleResetBtn').addEventListener('click', () => {
+  document.getElementById('roleSearchName').value = '';
+  renderRoles();
+});
+document.getElementById('roleSearchName').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderRoles(); });
 </script>
 </body>
 </html>

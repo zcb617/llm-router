@@ -8,16 +8,10 @@ from pathlib import Path
 
 
 @dataclass
-class ModelMappingConfig:
-    target_base_url: str
-    model_overrides: Dict[str, str] = None  # model_name -> upstream_model_name
-    api_key: str = None  # 转发时替换的 API key
-
-
-@dataclass
 class ProxyConfig:
     listen_port: int
-    model_mappings: Dict[str, ModelMappingConfig]  # model_key -> mapping config
+    model_mappings: Dict | None = None  # 保留为空，模型配置改从数据库读取
+    default_model: str | None = None  # fallback model when no exact match
 
 
 @dataclass
@@ -50,15 +44,6 @@ def load_config(config_path: str = "config.yaml") -> Config:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
-    # 解析 model_mappings
-    model_mappings = {}
-    for key, mapping in raw["proxy"]["model_mappings"].items():
-        model_mappings[key] = ModelMappingConfig(
-            target_base_url=mapping["target_base_url"],
-            model_overrides=mapping.get("model_overrides") or {},
-            api_key=mapping.get("api_key")
-        )
-
     # 解析数据库配置
     db_config = raw.get("database", {})
     postgresql = None
@@ -75,17 +60,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
     return Config(
         proxy=ProxyConfig(
             listen_port=raw["proxy"]["listen_port"],
-            model_mappings=model_mappings
+            default_model=raw["proxy"].get("default_model")
         ),
         database=DatabaseConfig(
             path=db_config.get("path", "./data/llm_calls.db"),
             postgresql=postgresql
         )
     )
-
-
-def match_model(model_name: str, model_mappings: Dict[str, ModelMappingConfig]) -> ModelMappingConfig | None:
-    """匹配 model 名称到映射配置"""
-    if model_name in model_mappings:
-        return model_mappings[model_name]
-    return None

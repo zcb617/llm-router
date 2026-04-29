@@ -27,15 +27,8 @@ class LLMRouterAddon:
             if config_file.exists():
                 with open(config_file) as f:
                     raw_config = json.load(f)
-                from src.config import Config, ProxyConfig, DatabaseConfig, ModelMappingConfig, PostgreSQLConfig
-                model_mappings = {}
-                for key, mapping in raw_config["proxy"]["model_mappings"].items():
-                    model_mappings[key] = ModelMappingConfig(
-                        target_base_url=mapping["target_base_url"],
-                        model_overrides=mapping.get("model_overrides") or {},
-                        api_key=mapping.get("api_key")
-                    )
-                
+                from src.config import Config, ProxyConfig, DatabaseConfig, PostgreSQLConfig
+
                 # 解析数据库配置
                 db_config = raw_config.get("database", {})
                 postgresql = None
@@ -48,20 +41,25 @@ class LLMRouterAddon:
                         password=pg.get("password", ""),
                         dbname=pg.get("dbname", "llm_router")
                     )
-                
+
                 config = Config(
                     proxy=ProxyConfig(
                         listen_port=raw_config["proxy"]["listen_port"],
-                        model_mappings=model_mappings
+                        model_mappings={},  # 不再从配置文件读取
+                        default_model=raw_config["proxy"].get("default_model")
                     ),
                     database=DatabaseConfig(
                         path=db_config.get("path", "./data/llm_calls.db"),
                         postgresql=postgresql
                     )
                 )
-        
+
         self.config = config
-        
+
+        # 模型配置缓存（从数据库加载）
+        self._model_cache = {}  # model_key -> {target_base_url, api_key, model_overrides}
+        self._default_model_key = None  # 默认模型的 key
+
         # 延迟初始化组件
         self._capturer = None
         self._storage = None
@@ -73,7 +71,7 @@ class LLMRouterAddon:
             from src.capture import DataCapturer
             self._capturer = DataCapturer()
         return self._capturer
-    
+
     @property
     def storage(self):
         if self._storage is None:
@@ -83,15 +81,66 @@ class LLMRouterAddon:
                 self.config.database.postgresql
             )
         return self._storage
+
+    def _load_model_configs(self):
+        """从数据库加载模型配置到内存缓存"""
+        try:
+            configs = self.storage.get_all_model_configs()
+            self._model_cache = {}
+            self._default_model_key = None
+            for cfg in configs:
+                if cfg["is_active"]:
+                    try:
+                        overrides = json.loads(cfg["model_overrides"]) if cfg["model_overrides"] else {}
+                    except (json.JSONDecodeError, TypeError):
+                        overrides = {}
+                    self._model_cache[cfg["model_key"]] = {
+                        "target_base_url": cfg["target_base_url"],
+                        "api_key": cfg["api_key"],
+                        "model_overrides": overrides,
+                    }
+                    if cfg["is_default"]:
+                        self._default_model_key = cfg["model_key"]
+            logger.info(f"Loaded {len(self._model_cache)} model configs from database")
+            if self._default_model_key:
+                logger.info(f"Default model: {self._default_model_key}")
+        except Exception as e:
+            logger.error(f"Failed to load model configs from database: {e}")
+            self._model_cache = {}
+            self._default_model_key = None
+
+    def reload_model_configs(self):
+        """重新加载模型配置（供 API 调用）"""
+        self._load_model_configs()
+        logger.info("Model configs reloaded from database")
+
+    def _match_model(self, model_name: str) -> tuple[dict | None, bool]:
+        """匹配模型名称到数据库缓存配置
+        
+        Returns:
+            tuple: (config_dict, is_default)
+                - config_dict: 匹配的模型配置，无匹配且无默认时返回 None
+                - is_default: 是否使用了默认模型
+        """
+        # 精确匹配
+        if model_name in self._model_cache:
+            return self._model_cache[model_name], False
+        
+        # 精确匹配失败，尝试使用默认模型
+        if self._default_model_key and self._default_model_key in self._model_cache:
+            return self._model_cache[self._default_model_key], True
+        
+        return None, False
     
     def load(self, loader: Loader):
         """加载addon"""
         logger.info(f"LLM Router addon loaded, listening on port {self.config.proxy.listen_port}")
-        logger.info(f"Loaded {len(self.config.proxy.model_mappings)} model mappings")
+
+        # 从数据库加载模型配置到内存缓存
+        self._load_model_configs()
     
     def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
-        from src.config import match_model
         from urllib.parse import urlparse
 
         path = flow.request.path
@@ -153,8 +202,8 @@ class LLMRouterAddon:
 
         logger.info(f"Model from body: {model_name}")
 
-        # 匹配 model 映射
-        mapping = match_model(model_name, self.config.proxy.model_mappings)
+        # 匹配 model 映射（从数据库缓存）
+        mapping, is_default = self._match_model(model_name)
         if mapping is None:
             logger.warning(f"No model mapping matched for: {model_name}")
             flow.response = http.Response.make(
@@ -164,16 +213,19 @@ class LLMRouterAddon:
             )
             return
 
-        target_base_url = mapping.target_base_url
+        if is_default:
+            logger.info(f"No exact match for '{model_name}', using default model: {self.config.proxy.default_model}")
+
+        target_base_url = mapping["target_base_url"]
         logger.info(f"Model mapping: {model_name} -> {target_base_url}")
 
         # 替换 API key
-        if mapping.api_key:
+        if mapping["api_key"]:
             logger.info("Replacing API key")
-            flow.request.headers["Authorization"] = f"Bearer {mapping.api_key}"
+            flow.request.headers["Authorization"] = f"Bearer {mapping['api_key']}"
 
         # 如果有 model override，替换 body 中的 model 值
-        override_model = mapping.model_overrides.get(model_name)
+        override_model = mapping["model_overrides"].get(model_name)
         if override_model:
             logger.info(f"Model override: {model_name} -> {override_model}")
             new_body = self._replace_model_in_body(captured_req.body, override_model)
@@ -231,8 +283,8 @@ class LLMRouterAddon:
         try:
             # === 控制台 API 路由（优先处理） ===
             from src.console_api import handle_console_api
-            if path.startswith("/api/auth") or path.startswith("/api/keys"):
-                handled = handle_console_api(flow, self.storage, path, self.config)
+            if path.startswith("/api/auth") or path.startswith("/api/keys") or path.startswith("/api/models") or path.startswith("/api/users") or path.startswith("/api/roles"):
+                handled = handle_console_api(flow, self.storage, path, self.config, self)
                 if handled:
                     return
 

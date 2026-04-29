@@ -18,6 +18,41 @@ class CallStorage:
         self._initialized = False
         self._use_postgres = postgresql is not None
 
+    # ========== PostgreSQL 辅助方法 ==========
+
+    def _pg_conn(self):
+        """获取 PostgreSQL 连接，返回 (conn, cur)"""
+        import psycopg2
+        conn = psycopg2.connect(
+            host=self.postgresql.host, port=self.postgresql.port,
+            user=self.postgresql.user, password=self.postgresql.password,
+            database=self.postgresql.dbname
+        )
+        return conn, conn.cursor()
+
+    def _pg_close(self, conn, cur, commit: bool = False):
+        """关闭 PostgreSQL 连接"""
+        if commit:
+            conn.commit()
+        cur.close()
+        conn.close()
+
+    def _sqlite_conn(self, row_factory: bool = False):
+        """获取 SQLite 连接，返回 (conn, cur)"""
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        if row_factory:
+            conn.row_factory = sqlite3.Row
+        return conn, conn.cursor()
+
+    def _sqlite_close(self, conn, cur, commit: bool = False):
+        """关闭 SQLite 连接"""
+        if commit:
+            conn.commit()
+        conn.close()
+
+    # ========== 异步方法 ==========
+
     async def _get_pg_conn(self):
         """获取PostgreSQL连接"""
         import asyncpg
@@ -281,328 +316,885 @@ class CallStorage:
     def create_user(self, email: str, password_hash: str) -> int:
         """创建用户，返回用户ID"""
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute("INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id",
-                       (email, password_hash))
-            user_id = cur.fetchone()[0]
-            conn.commit()
-            cur.close()
-            conn.close()
-            return user_id
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id",
+                           (email, password_hash))
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur, commit=True)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("INSERT INTO users (email, password_hash) VALUES (?, ?)",
-                       (email, password_hash))
-            user_id = cur.lastrowid
-            conn.commit()
-            conn.close()
-            return user_id
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("INSERT INTO users (email, password_hash) VALUES (?, ?)",
+                           (email, password_hash))
+                return cur.lastrowid
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
 
     def find_user_by_email(self, email: str) -> Optional[dict]:
         """根据邮箱查找用户"""
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute("SELECT id, email, password_hash, created_at, last_login_at FROM users WHERE email = %s",
-                       (email,))
-            row = cur.fetchone()
-            cur.close()
-            conn.close()
-            if row:
-                return {"id": row[0], "email": row[1], "password_hash": row[2],
-                        "created_at": row[3], "last_login_at": row[4]}
-            return None
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("SELECT id, email, password_hash, created_at, last_login_at FROM users WHERE email = %s", (email,))
+                row = cur.fetchone()
+                if row:
+                    return {"id": row[0], "email": row[1], "password_hash": row[2],
+                            "created_at": row[3], "last_login_at": row[4]}
+                return None
+            finally:
+                self._pg_close(conn, cur)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM users WHERE email = ?", (email,))
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                return dict(row)
-            return None
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute("SELECT * FROM users WHERE email = ?", (email,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
 
     def update_last_login(self, user_id: int):
         """更新最后登录时间"""
         from datetime import datetime
         now = datetime.now()
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET last_login_at = %s WHERE id = %s", (now, user_id))
-            conn.commit()
-            cur.close()
-            conn.close()
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("UPDATE users SET last_login_at = %s WHERE id = %s", (now, user_id))
+            finally:
+                self._pg_close(conn, cur, commit=True)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now.isoformat(), user_id))
-            conn.commit()
-            conn.close()
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now.isoformat(), user_id))
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
 
     def get_user_count(self) -> int:
         """获取用户总数"""
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM users")
-            count = cur.fetchone()[0]
-            cur.close()
-            conn.close()
-            return count
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("SELECT COUNT(*) FROM users")
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM users")
-            count = cur.fetchone()[0]
-            conn.close()
-            return count
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("SELECT COUNT(*) FROM users")
+                return cur.fetchone()[0]
+            finally:
+                self._sqlite_close(conn, cur)
 
     def create_api_key(self, user_id: int, name: str, key: str, expires_at: date) -> int:
         """创建 API Key，返回 Key ID"""
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO api_keys (user_id, name, key, expires_at) VALUES (%s, %s, %s, %s) RETURNING id",
-                (user_id, name, key, expires_at)
-            )
-            key_id = cur.fetchone()[0]
-            conn.commit()
-            cur.close()
-            conn.close()
-            return key_id
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO api_keys (user_id, name, key, expires_at) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (user_id, name, key, expires_at)
+                )
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur, commit=True)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO api_keys (user_id, name, key, expires_at) VALUES (?, ?, ?, ?)",
-                (user_id, name, key, expires_at.isoformat())
-            )
-            key_id = cur.lastrowid
-            conn.commit()
-            conn.close()
-            return key_id
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO api_keys (user_id, name, key, expires_at) VALUES (?, ?, ?, ?)",
+                    (user_id, name, key, expires_at.isoformat())
+                )
+                return cur.lastrowid
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
 
     def get_api_keys_by_user(self, user_id: int) -> list:
         """获取用户的 API Key 列表"""
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT id, name, key, expires_at, created_at, is_active "
-                "FROM api_keys WHERE user_id = %s ORDER BY created_at DESC",
-                (user_id,)
-            )
-            rows = cur.fetchall()
-            result = []
-            for row in rows:
-                result.append({
-                    "id": row[0], "name": row[1], "key": row[2],
-                    "expires_at": row[3].isoformat() if row[3] else None,
-                    "created_at": row[4].isoformat() if row[4] else None,
-                    "is_active": row[5]
-                })
-            cur.close()
-            conn.close()
-            return result
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "SELECT id, name, key, expires_at, created_at, is_active "
+                    "FROM api_keys WHERE user_id = %s ORDER BY created_at DESC",
+                    (user_id,)
+                )
+                rows = cur.fetchall()
+                return [
+                    {"id": r[0], "name": r[1], "key": r[2],
+                     "expires_at": r[3].isoformat() if r[3] else None,
+                     "created_at": r[4].isoformat() if r[4] else None,
+                     "is_active": r[5]}
+                    for r in rows
+                ]
+            finally:
+                self._pg_close(conn, cur)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT id, name, key, expires_at, created_at, is_active "
-                "FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
-                (user_id,)
-            )
-            rows = cur.fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(
+                    "SELECT id, name, key, expires_at, created_at, is_active "
+                    "FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
+                    (user_id,)
+                )
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
 
     def verify_api_key(self, key: str) -> Optional[dict]:
         """验证 API Key，返回 {id, user_id} 或 None"""
         from datetime import date
         today = date.today().isoformat()
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT id, user_id FROM api_keys "
-                "WHERE key = %s AND is_active = true AND expires_at >= %s",
-                (key, today)
-            )
-            row = cur.fetchone()
-            cur.close()
-            conn.close()
-            if row:
-                return {"id": row[0], "user_id": row[1]}
-            return None
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "SELECT id, user_id FROM api_keys "
+                    "WHERE key = %s AND is_active = true AND expires_at >= %s",
+                    (key, today)
+                )
+                row = cur.fetchone()
+                return {"id": row[0], "user_id": row[1]} if row else None
+            finally:
+                self._pg_close(conn, cur)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT id, user_id FROM api_keys "
-                "WHERE key = ? AND is_active = 1 AND expires_at >= ?",
-                (key, today)
-            )
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                return {"id": row[0], "user_id": row[1]}
-            return None
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "SELECT id, user_id FROM api_keys "
+                    "WHERE key = ? AND is_active = 1 AND expires_at >= ?",
+                    (key, today)
+                )
+                row = cur.fetchone()
+                return {"id": row[0], "user_id": row[1]} if row else None
+            finally:
+                self._sqlite_close(conn, cur)
 
     def delete_api_key(self, user_id: int, key_id: int) -> bool:
         """删除 API Key"""
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
-            cur.execute(
-                "DELETE FROM api_keys WHERE id = %s AND user_id = %s",
-                (key_id, user_id)
-            )
-            deleted = cur.rowcount > 0
-            conn.commit()
-            cur.close()
-            conn.close()
-            return deleted
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("DELETE FROM api_keys WHERE id = %s AND user_id = %s", (key_id, user_id))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
         else:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("DELETE FROM api_keys WHERE id = ? AND user_id = ?", (key_id, user_id))
-            deleted = cur.rowcount > 0
-            conn.commit()
-            conn.close()
-            return deleted
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("DELETE FROM api_keys WHERE id = ? AND user_id = ?", (key_id, user_id))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
 
     def save_call_with_user(
         self,
-        call_id: str,
-        timestamp: str,
-        url: str,
-        method: str,
-        request_headers: dict,
-        request_body: str,
-        response_headers: dict,
-        response_body: str,
-        duration_ms: int,
-        tokens_input: int,
-        tokens_output: int,
-        token_source: str,
-        stream_type: str = "non_stream",
-        first_token_ms: Optional[int] = None,
-        original_model: str = None,
-        overridden_model: str = None,
-        user_id: Optional[int] = None,
-        api_key_id: Optional[int] = None
+        call_id: str, timestamp: str, url: str, method: str,
+        request_headers: dict, request_body: str,
+        response_headers: dict, response_body: str,
+        duration_ms: int, tokens_input: int, tokens_output: int, token_source: str,
+        stream_type: str = "non_stream", first_token_ms: Optional[int] = None,
+        original_model: str = None, overridden_model: str = None,
+        user_id: Optional[int] = None, api_key_id: Optional[int] = None
     ):
         """保存调用记录（带用户和 API Key 关联）"""
+        args = (
+            call_id, timestamp, url, method,
+            json.dumps(request_headers, ensure_ascii=False),
+            request_body,
+            json.dumps(response_headers, ensure_ascii=False),
+            response_body,
+            duration_ms, tokens_input, tokens_output, token_source,
+            stream_type, first_token_ms,
+            original_model, overridden_model, user_id, api_key_id
+        )
         if self.postgresql:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=self.postgresql.host, port=self.postgresql.port,
-                user=self.postgresql.user, password=self.postgresql.password,
-                database=self.postgresql.dbname
-            )
-            cur = conn.cursor()
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("""
+                    INSERT INTO llm_calls (
+                        call_id, timestamp, url, method,
+                        request_headers, request_body,
+                        response_headers, response_body,
+                        duration_ms, tokens_input, tokens_output, token_source,
+                        stream_type, first_token_ms,
+                        original_model, overridden_model, user_id, api_key_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, args)
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("""
+                    INSERT INTO llm_calls (
+                        call_id, timestamp, url, method,
+                        request_headers, request_body,
+                        response_headers, response_body,
+                        duration_ms, tokens_input, tokens_output, token_source,
+                        stream_type, first_token_ms,
+                        original_model, overridden_model, user_id, api_key_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, args)
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    # ========== RBAC 相关方法（同步） ==========
+
+    def init_rbac_tables(self, is_pg: bool = False, cur=None, conn=None):
+        """初始化 RBAC 表（roles, menus, role_menus），并给 users 表加 role_id 字段"""
+        if is_pg:
             cur.execute("""
-                INSERT INTO llm_calls (
-                    call_id, timestamp, url, method,
-                    request_headers, request_body,
-                    response_headers, response_body,
-                    duration_ms, tokens_input, tokens_output, token_source,
-                    stream_type, first_token_ms,
-                    original_model, overridden_model,
-                    user_id, api_key_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                call_id, timestamp, url, method,
-                json.dumps(request_headers, ensure_ascii=False),
-                request_body,
-                json.dumps(response_headers, ensure_ascii=False),
-                response_body,
-                duration_ms, tokens_input, tokens_output, token_source,
-                stream_type, first_token_ms,
-                original_model, overridden_model,
-                user_id, api_key_id
-            ))
+                CREATE TABLE IF NOT EXISTS roles (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(50) UNIQUE NOT NULL,
+                    description VARCHAR(200),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS menus (
+                    id SERIAL PRIMARY KEY,
+                    code VARCHAR(50) UNIQUE NOT NULL,
+                    name VARCHAR(50) NOT NULL,
+                    icon VARCHAR(20),
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS role_menus (
+                    role_id INTEGER NOT NULL REFERENCES roles(id),
+                    menu_id INTEGER NOT NULL REFERENCES menus(id),
+                    PRIMARY KEY (role_id, menu_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS model_configs (
+                    id SERIAL PRIMARY KEY,
+                    model_key VARCHAR(100) UNIQUE NOT NULL,
+                    target_base_url VARCHAR(500) NOT NULL,
+                    api_key VARCHAR(500),
+                    model_overrides TEXT,
+                    is_active BOOLEAN DEFAULT true,
+                    is_default BOOLEAN DEFAULT false,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # 兼容旧表：追加 is_default 字段
+            try:
+                cur.execute("ALTER TABLE model_configs ADD COLUMN is_default BOOLEAN DEFAULT false")
+                conn.commit()
+            except Exception:
+                conn.rollback()  # 字段已存在，回滚事务
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN role_id INTEGER")
+                conn.commit()
+            except Exception:
+                conn.rollback()
             conn.commit()
-            cur.close()
-            conn.close()
         else:
             import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO llm_calls (
-                    call_id, timestamp, url, method,
-                    request_headers, request_body,
-                    response_headers, response_body,
-                    duration_ms, tokens_input, tokens_output, token_source,
-                    stream_type, first_token_ms,
-                    original_model, overridden_model,
-                    user_id, api_key_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                call_id, timestamp, url, method,
-                json.dumps(request_headers, ensure_ascii=False),
-                request_body,
-                json.dumps(response_headers, ensure_ascii=False),
-                response_body,
-                duration_ms, tokens_input, tokens_output, token_source,
-                stream_type, first_token_ms,
-                original_model, overridden_model,
-                user_id, api_key_id
-            ))
-            conn.commit()
-            conn.close()
+            db_conn = sqlite3.connect(self.db_path)
+            db_cur = db_conn.cursor()
+            db_cur.execute("""
+                CREATE TABLE IF NOT EXISTS roles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            db_cur.execute("""
+                CREATE TABLE IF NOT EXISTS menus (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    icon TEXT,
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            db_cur.execute("""
+                CREATE TABLE IF NOT EXISTS role_menus (
+                    role_id INTEGER NOT NULL REFERENCES roles(id),
+                    menu_id INTEGER NOT NULL REFERENCES menus(id),
+                    PRIMARY KEY (role_id, menu_id)
+                )
+            """)
+            db_cur.execute("""
+                CREATE TABLE IF NOT EXISTS model_configs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_key TEXT UNIQUE NOT NULL,
+                    target_base_url TEXT NOT NULL,
+                    api_key TEXT,
+                    model_overrides TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    is_default INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            try:
+                db_cur.execute("ALTER TABLE users ADD COLUMN role_id INTEGER")
+            except Exception:
+                pass
+            db_conn.commit()
+            db_conn.close()
+
+    def create_role(self, name: str, description: str = "") -> int:
+        """创建角色，返回角色 ID"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("INSERT INTO roles (name, description) VALUES (%s, %s) RETURNING id", (name, description))
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("INSERT INTO roles (name, description) VALUES (?, ?)", (name, description))
+                return cur.lastrowid
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def find_role_by_name(self, name: str) -> Optional[dict]:
+        """按名称查找角色"""
+        sql = "SELECT id, name, description FROM roles WHERE name = %s" if self.postgresql else "SELECT * FROM roles WHERE name = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (name,))
+                row = cur.fetchone()
+                return {"id": row[0], "name": row[1], "description": row[2]} if row else None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (name,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def create_menu(self, code: str, name: str, icon: str = "", sort_order: int = 0) -> int:
+        """创建菜单，返回菜单 ID"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO menus (code, name, icon, sort_order) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (code, name, icon, sort_order)
+                )
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO menus (code, name, icon, sort_order) VALUES (?, ?, ?, ?)",
+                    (code, name, icon, sort_order)
+                )
+                return cur.lastrowid
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def find_menu_by_code(self, code: str) -> Optional[dict]:
+        """按标识查找菜单"""
+        sql = "SELECT id, code, name, icon, sort_order FROM menus WHERE code = %s" if self.postgresql else "SELECT * FROM menus WHERE code = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (code,))
+                row = cur.fetchone()
+                return {"id": row[0], "code": row[1], "name": row[2], "icon": row[3], "sort_order": row[4]} if row else None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (code,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def assign_menu_to_role(self, role_id: int, menu_id: int):
+        """为角色分配菜单权限"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO role_menus (role_id, menu_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (role_id, menu_id)
+                )
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "INSERT OR IGNORE INTO role_menus (role_id, menu_id) VALUES (?, ?)",
+                    (role_id, menu_id)
+                )
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def get_user_role(self, user_id: int) -> Optional[dict]:
+        """获取用户的角色信息"""
+        sql = ("SELECT r.id, r.name, r.description FROM roles r "
+               "JOIN users u ON u.role_id = r.id WHERE u.id = %s") if self.postgresql else \
+              ("SELECT r.id, r.name, r.description FROM roles r "
+               "JOIN users u ON u.role_id = r.id WHERE u.id = ?")
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (user_id,))
+                row = cur.fetchone()
+                return {"id": row[0], "name": row[1], "description": row[2]} if row else None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (user_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def get_user_menus(self, user_id: int) -> list:
+        """获取用户有权访问的菜单列表，按 sort_order 排序"""
+        sql = ("SELECT m.id, m.code, m.name, m.icon, m.sort_order FROM menus m "
+               "JOIN role_menus rm ON rm.menu_id = m.id "
+               "JOIN users u ON u.role_id = rm.role_id "
+               "WHERE u.id = %s ORDER BY m.sort_order") if self.postgresql else \
+              ("SELECT m.id, m.code, m.name, m.icon, m.sort_order FROM menus m "
+               "JOIN role_menus rm ON rm.menu_id = m.id "
+               "JOIN users u ON u.role_id = rm.role_id "
+               "WHERE u.id = ? ORDER BY m.sort_order")
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (user_id,))
+                rows = cur.fetchall()
+                return [
+                    {"id": r[0], "code": r[1], "name": r[2], "icon": r[3], "sort_order": r[4]}
+                    for r in rows
+                ]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (user_id,))
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def set_user_role(self, user_id: int, role_id: int):
+        """设置用户的角色"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("UPDATE users SET role_id = %s WHERE id = %s", (role_id, user_id))
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("UPDATE users SET role_id = ? WHERE id = ?", (role_id, user_id))
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def get_all_menus(self) -> list:
+        """获取所有菜单"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("SELECT id, code, name, icon, sort_order FROM menus ORDER BY sort_order")
+                rows = cur.fetchall()
+                return [
+                    {"id": r[0], "code": r[1], "name": r[2], "icon": r[3], "sort_order": r[4]}
+                    for r in rows
+                ]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute("SELECT * FROM menus ORDER BY sort_order")
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    # ========== 模型配置 CRUD（同步） ==========
+
+    def get_all_model_configs(self) -> list:
+        """获取所有模型配置"""
+        def _parse_row(r, is_pg):
+            if is_pg:
+                return {
+                    "id": r[0], "model_key": r[1], "target_base_url": r[2],
+                    "api_key": r[3], "model_overrides": r[4],
+                    "is_active": r[5], "is_default": r[6],
+                    "created_at": r[7].isoformat() if r[7] else None,
+                    "updated_at": r[8].isoformat() if r[8] else None,
+                }
+            else:
+                d = dict(r)
+                d["is_active"] = bool(d["is_active"])
+                d["is_default"] = bool(d["is_default"])
+                return d
+
+        sql = "SELECT id, model_key, target_base_url, api_key, model_overrides, is_active, is_default, created_at, updated_at FROM model_configs ORDER BY model_key"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql)
+                return [_parse_row(r, True) for r in cur.fetchall()]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql)
+                return [_parse_row(r, False) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def get_model_config(self, model_key: str) -> Optional[dict]:
+        """按 model_key 获取单个配置"""
+        sql = "SELECT id, model_key, target_base_url, api_key, model_overrides, is_active, is_default, created_at, updated_at FROM model_configs WHERE model_key = %s" if self.postgresql else \
+              "SELECT * FROM model_configs WHERE model_key = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (model_key,))
+                row = cur.fetchone()
+                if row:
+                    return {
+                        "id": row[0], "model_key": row[1], "target_base_url": row[2],
+                        "api_key": row[3], "model_overrides": row[4],
+                        "is_active": row[5], "is_default": row[6],
+                        "created_at": row[7].isoformat() if row[7] else None,
+                        "updated_at": row[8].isoformat() if row[8] else None,
+                    }
+                return None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (model_key,))
+                row = cur.fetchone()
+                if row:
+                    d = dict(row)
+                    d["is_active"] = bool(d["is_active"])
+                    d["is_default"] = bool(d["is_default"])
+                    return d
+                return None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def get_model_config_by_id(self, config_id: int) -> Optional[dict]:
+        """按 ID 获取模型配置"""
+        sql = "SELECT id, model_key, target_base_url, api_key, model_overrides, is_active, is_default, created_at, updated_at FROM model_configs WHERE id = %s" if self.postgresql else \
+              "SELECT * FROM model_configs WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (config_id,))
+                row = cur.fetchone()
+                if row:
+                    return {
+                        "id": row[0], "model_key": row[1], "target_base_url": row[2],
+                        "api_key": row[3], "model_overrides": row[4],
+                        "is_active": row[5], "is_default": row[6],
+                        "created_at": row[7].isoformat() if row[7] else None,
+                        "updated_at": row[8].isoformat() if row[8] else None,
+                    }
+                return None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (config_id,))
+                row = cur.fetchone()
+                if row:
+                    d = dict(row)
+                    d["is_active"] = bool(d["is_active"])
+                    d["is_default"] = bool(d["is_default"])
+                    return d
+                return None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def create_model_config(
+        self, model_key: str, target_base_url: str, api_key: str = "",
+        model_overrides: str = "{}", is_active: bool = True, is_default: bool = False
+    ) -> int:
+        """创建模型配置，返回 ID"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                if is_default:
+                    cur.execute("UPDATE model_configs SET is_default = false")
+                cur.execute(
+                    "INSERT INTO model_configs (model_key, target_base_url, api_key, model_overrides, is_active, is_default) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                    (model_key, target_base_url, api_key, model_overrides, is_active, is_default)
+                )
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                if is_default:
+                    cur.execute("UPDATE model_configs SET is_default = 0")
+                cur.execute(
+                    "INSERT INTO model_configs (model_key, target_base_url, api_key, model_overrides, is_active, is_default) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (model_key, target_base_url, api_key, model_overrides, int(is_active), int(is_default))
+                )
+                return cur.lastrowid
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def update_model_config(
+        self, config_id: int, model_key: str = None, target_base_url: str = None,
+        api_key: str = None, model_overrides: str = None, is_active: bool = None,
+        is_default: bool = None
+    ) -> bool:
+        """更新模型配置"""
+        fields, params = [], []
+        for k, v, fmt_pg, fmt_sqlite in [
+            ("model_key", model_key, "model_key = %s", "model_key = ?"),
+            ("target_base_url", target_base_url, "target_base_url = %s", "target_base_url = ?"),
+            ("api_key", api_key, "api_key = %s", "api_key = ?"),
+            ("model_overrides", model_overrides, "model_overrides = %s", "model_overrides = ?"),
+            ("is_active", is_active, "is_active = %s", "is_active = ?"),
+        ]:
+            if v is not None:
+                fields.append(fmt_pg if self.postgresql else fmt_sqlite)
+                params.append(v)
+        if is_default is not None:
+            if is_default:
+                if self.postgresql:
+                    conn, cur = self._pg_conn()
+                    try:
+                        cur.execute("UPDATE model_configs SET is_default = false")
+                    finally:
+                        self._pg_close(conn, cur, commit=True)
+                else:
+                    conn, cur = self._sqlite_conn()
+                    try:
+                        cur.execute("UPDATE model_configs SET is_default = 0")
+                    finally:
+                        self._sqlite_close(conn, cur, commit=True)
+            fields.append("is_default = %s" if self.postgresql else "is_default = ?")
+            params.append(is_default)
+        fields.append("updated_at = CURRENT_TIMESTAMP" if self.postgresql else "updated_at = datetime('now')")
+        params.append(config_id)
+        sql = f"UPDATE model_configs SET {', '.join(fields)} WHERE id = %s" if self.postgresql else \
+              f"UPDATE model_configs SET {', '.join(fields)} WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, params)
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, params)
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def delete_model_config(self, config_id: int) -> bool:
+        """删除模型配置"""
+        sql = "DELETE FROM model_configs WHERE id = %s" if self.postgresql else "DELETE FROM model_configs WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (config_id,))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, (config_id,))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    # ========== 用户管理 CRUD（同步） ==========
+
+    def get_all_users(self) -> list:
+        """获取所有用户列表"""
+        sql = ("SELECT u.id, u.email, u.created_at, u.last_login_at, r.id as role_id, r.name as role_name "
+               "FROM users u LEFT JOIN roles r ON u.role_id = r.id ORDER BY u.created_at DESC")
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql)
+                return [
+                    {"id": r[0], "email": r[1],
+                     "created_at": r[2].isoformat() if r[2] else None,
+                     "last_login_at": r[3].isoformat() if r[3] else None,
+                     "role_id": r[4], "role_name": r[5]}
+                    for r in cur.fetchall()
+                ]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql)
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def delete_user(self, user_id: int) -> bool:
+        """删除用户"""
+        sql = "DELETE FROM users WHERE id = %s" if self.postgresql else "DELETE FROM users WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (user_id,))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, (user_id,))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    # ========== 角色管理 CRUD（同步） ==========
+
+    def get_role_menus(self, role_id: int) -> list:
+        """获取角色已关联的菜单 ID 列表"""
+        sql = "SELECT menu_id FROM role_menus WHERE role_id = %s" if self.postgresql else "SELECT menu_id FROM role_menus WHERE role_id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (role_id,))
+                return [r[0] for r in cur.fetchall()]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, (role_id,))
+                return [r[0] for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def update_role_menus(self, role_id: int, menu_ids: list):
+        """更新角色的菜单（先清空再批量插入）"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("DELETE FROM role_menus WHERE role_id = %s", (role_id,))
+                for menu_id in menu_ids:
+                    cur.execute(
+                        "INSERT INTO role_menus (role_id, menu_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (role_id, menu_id)
+                    )
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("DELETE FROM role_menus WHERE role_id = ?", (role_id,))
+                for menu_id in menu_ids:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO role_menus (role_id, menu_id) VALUES (?, ?)",
+                        (role_id, menu_id)
+                    )
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def get_all_roles(self) -> list:
+        """获取所有角色列表"""
+        sql = "SELECT id, name, description, created_at FROM roles ORDER BY id" if self.postgresql else "SELECT * FROM roles ORDER BY id"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql)
+                return [
+                    {"id": r[0], "name": r[1], "description": r[2],
+                     "created_at": r[3].isoformat() if r[3] else None}
+                    for r in cur.fetchall()
+                ]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql)
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def update_role(self, role_id: int, name: str = None, description: str = None) -> bool:
+        """更新角色"""
+        fields, params = [], []
+        if name is not None:
+            fields.append("name = %s" if self.postgresql else "name = ?")
+            params.append(name)
+        if description is not None:
+            fields.append("description = %s" if self.postgresql else "description = ?")
+            params.append(description)
+        if not fields:
+            return False
+        params.append(role_id)
+        sql = f"UPDATE roles SET {', '.join(fields)} WHERE id = %s" if self.postgresql else \
+              f"UPDATE roles SET {', '.join(fields)} WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, params)
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, params)
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def delete_role(self, role_id: int) -> bool:
+        """删除角色（同时删除 role_menus 关联）"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("DELETE FROM role_menus WHERE role_id = %s", (role_id,))
+                cur.execute("DELETE FROM roles WHERE id = %s", (role_id,))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("DELETE FROM role_menus WHERE role_id = ?", (role_id,))
+                cur.execute("DELETE FROM roles WHERE id = ?", (role_id,))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
