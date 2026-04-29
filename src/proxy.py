@@ -95,18 +95,9 @@ class LLMRouterAddon:
             self._default_model_key = None
             for cfg in configs:
                 if cfg["is_active"]:
-                    # 优先使用上游的 url+key，回退到直接配置
                     target_base_url = cfg.get("target_base_url", "")
                     api_key = cfg.get("api_key", "")
-                    upstream_id = cfg.get("upstream_id")
                     forward_model = (cfg.get("forward_model") or "").strip()
-
-                    # 如果有关联的上游，从上游获取 url+key
-                    if upstream_id:
-                        upstream = self.storage.get_upstream(upstream_id)
-                        if upstream:
-                            target_base_url = upstream["target_base_url"]
-                            api_key = upstream["api_key"]
 
                     # 跳过没有 url 的配置（无效模型）
                     if not target_base_url:
