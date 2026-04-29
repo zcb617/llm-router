@@ -402,6 +402,10 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "请求体格式错误"})
             return True
 
+        upstream_id = body.get("upstream_id")
+        target_base_url = body.get("target_base_url")
+        api_key = body.get("api_key")
+
         # 如果选择了上游，不更新 url/key（以上游为准）
         if upstream_id:
             target_base_url = None
@@ -410,7 +414,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         updated = storage.update_model_config(
             config_id=config_id,
             model_key=body.get("model_key"),
-            upstream_id=body.get("upstream_id"),
+            upstream_id=upstream_id,
             target_base_url=target_base_url,
             api_key=api_key,
             forward_model=body.get("forward_model"),
