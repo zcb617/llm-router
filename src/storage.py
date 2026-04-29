@@ -609,17 +609,30 @@ class CallStorage:
                     END IF;
                 END $$;
             """)
-            # 兼容旧表：追加 is_default 字段
-            try:
-                cur.execute("ALTER TABLE model_configs ADD COLUMN is_default BOOLEAN DEFAULT false")
-                conn.commit()
-            except Exception:
-                conn.rollback()  # 字段已存在，回滚事务
-            try:
-                cur.execute("ALTER TABLE users ADD COLUMN role_id INTEGER")
-                conn.commit()
-            except Exception:
-                conn.rollback()
+            # 兼容旧表：追加缺失列（幂等，用 DO block 避免回滚前面 CREATE TABLE）
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'model_configs' AND column_name = 'is_default'
+                    ) THEN
+                        ALTER TABLE model_configs ADD COLUMN is_default BOOLEAN DEFAULT false;
+                    END IF;
+                END $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'users' AND column_name = 'role_id'
+                    ) THEN
+                        ALTER TABLE users ADD COLUMN role_id INTEGER;
+                    END IF;
+                END $$;
+            """)
+            # 最后统一提交
             conn.commit()
         else:
             import sqlite3
