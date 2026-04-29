@@ -108,6 +108,7 @@ class LLMRouterAddon:
                         "api_key": api_key,
                         "forward_model": forward_model,
                         "use_claude_features": bool(cfg.get("use_claude_features", False)),
+                        "use_roo_features": bool(cfg.get("use_roo_features", False)),
                     }
                     if cfg["is_default"]:
                         self._default_model_key = cfg["model_key"]
@@ -254,6 +255,9 @@ class LLMRouterAddon:
         if mapping.get("use_claude_features"):
             logger.info(f"Injecting Claude Code headers (upstream: {target_base_url})")
             self._inject_claude_headers(flow)
+        elif mapping.get("use_roo_features"):
+            logger.info(f"Injecting Roo Code headers (upstream: {target_base_url})")
+            self._inject_roo_headers(flow)
 
         # 重写URL
         new_url = self.capturer.rewrite_url(flow, target_base_url, path)
@@ -293,6 +297,28 @@ class LLMRouterAddon:
         flow.request.headers["anthropic-dangerous-direct-browser-access"] = "true"
         flow.request.headers["anthropic-version"] = "2023-06-01"
         flow.request.headers["x-app"] = "cli"
+
+    def _inject_roo_headers(self, flow: http.HTTPFlow):
+        """注入 Roo Code 特征 headers，让上游 LLM 认为请求来自 Roo Code 客户端
+
+        删除 Claude Code 特有的 headers，替换为 Roo Code 的全套特征。
+        """
+        # 删除 Claude Code 特有 headers
+        for h in ["X-Claude-Code-Session-Id", "anthropic-beta",
+                  "anthropic-dangerous-direct-browser-access",
+                  "anthropic-version", "x-app", "X-Stainless-Timeout"]:
+            flow.request.headers.pop(h, None)
+
+        # 设置 Roo Code 特征 headers
+        flow.request.headers["User-Agent"] = "RooCode/3.53.0"
+        flow.request.headers["HTTP-Referer"] = "https://github.com/RooVetGit/Roo-Cline"
+        flow.request.headers["X-Title"] = "Roo Code"
+        flow.request.headers["accept-language"] = "*"
+        flow.request.headers["sec-fetch-mode"] = "cors"
+
+        # 更新共有的 X-Stainless-* 版本号为 Roo Code 的
+        flow.request.headers["X-Stainless-Package-Version"] = "5.12.2"
+        flow.request.headers["X-Stainless-Runtime-Version"] = "v22.22.1"
 
     def _extract_model(self, body: str) -> str | None:
         """从请求 body 中提取 model 参数"""

@@ -182,6 +182,7 @@
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">描述</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">Claude Code 特征</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">Roo Code 特征</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">状态</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">更新时间</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
@@ -426,6 +427,10 @@
         <div class="flex items-center gap-2">
           <input id="upstreamUseClaudeFeatures" type="checkbox" class="w-4 h-4">
           <label for="upstreamUseClaudeFeatures" class="text-sm">启用 Claude Code 特征 <span class="text-zinc-400 text-xs">(注入 Claude Code 专用请求头)</span></label>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="upstreamUseRooFeatures" type="checkbox" class="w-4 h-4">
+          <label for="upstreamUseRooFeatures" class="text-sm">启用 Roo Code 特征 <span class="text-zinc-400 text-xs">(注入 Roo Code 专用请求头)</span></label>
         </div>
         <div id="upstreamEditError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
       </div>
@@ -939,12 +944,16 @@ function renderUpstreams() {
     const claudeBadge = u.use_claude_features
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">已启用</span>'
       : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">未启用</span>';
+    const rooBadge = u.use_roo_features
+      ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300">已启用</span>'
+      : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">未启用</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-medium">${u.name}</td>
       <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${u.target_base_url}">${u.target_base_url}</td>
       <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${u.api_key_masked || '****'}</td>
       <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.description || '-'}</td>
       <td class="px-4 py-2 whitespace-nowrap">${claudeBadge}</td>
+      <td class="px-4 py-2 whitespace-nowrap">${rooBadge}</td>
       <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
       <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.updated_at || '-'}</td>
       <td class="px-4 py-2 whitespace-nowrap">
@@ -970,6 +979,7 @@ function bindUpstreamTableEvents() {
       document.getElementById('upstreamDescription').value = u.description || '';
       document.getElementById('upstreamIsActive').checked = u.is_active;
       document.getElementById('upstreamUseClaudeFeatures').checked = u.use_claude_features || false;
+      document.getElementById('upstreamUseRooFeatures').checked = u.use_roo_features || false;
       document.getElementById('upstreamEditError').classList.add('hidden');
 
       // 获取完整 upstream 数据（含完整 api_key）
@@ -1010,6 +1020,7 @@ document.getElementById('createUpstreamBtn').addEventListener('click', () => {
   document.getElementById('upstreamDescription').value = '';
   document.getElementById('upstreamIsActive').checked = true;
   document.getElementById('upstreamUseClaudeFeatures').checked = false;
+  document.getElementById('upstreamUseRooFeatures').checked = false;
   document.getElementById('upstreamEditError').classList.add('hidden');
   document.getElementById('upstreamEditModal').classList.remove('hidden');
 });
@@ -1046,6 +1057,7 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async ()
   const description = document.getElementById('upstreamDescription').value.trim();
   const isActive = document.getElementById('upstreamIsActive').checked;
   const useClaudeFeatures = document.getElementById('upstreamUseClaudeFeatures').checked;
+  const useRooFeatures = document.getElementById('upstreamUseRooFeatures').checked;
 
   if (!name || !targetBaseUrl) {
     document.getElementById('upstreamEditError').textContent = '名称和基础 URL 不能为空';
@@ -1053,7 +1065,7 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async ()
     return;
   }
 
-  const body = { name, target_base_url: targetBaseUrl, api_key: apiKey, description, is_active: isActive, use_claude_features: useClaudeFeatures };
+  const body = { name, target_base_url: targetBaseUrl, api_key: apiKey, description, is_active: isActive, use_claude_features: useClaudeFeatures, use_roo_features: useRooFeatures };
 
   try {
     let res;

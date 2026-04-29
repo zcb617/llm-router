@@ -291,6 +291,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         description = body.get("description", "")
         is_active = body.get("is_active", True)
         use_claude_features = body.get("use_claude_features", False)
+        use_roo_features = body.get("use_roo_features", False)
 
         if not name or not target_base_url:
             _json_response(flow, 400, {"error": "名称和基础 URL 不能为空"})
@@ -299,7 +300,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         upstream_id = storage.create_upstream(
             name=name, target_base_url=target_base_url,
             api_key=api_key, description=description, is_active=is_active,
-            use_claude_features=use_claude_features
+            use_claude_features=use_claude_features, use_roo_features=use_roo_features
         )
 
         if addon:
@@ -333,7 +334,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             api_key=body.get("api_key"),
             description=body.get("description"),
             is_active=body.get("is_active"),
-            use_claude_features=body.get("use_claude_features")
+            use_claude_features=body.get("use_claude_features"),
+            use_roo_features=body.get("use_roo_features")
         )
 
         if updated:
