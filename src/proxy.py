@@ -306,7 +306,7 @@ class LLMRouterAddon:
         try:
             # === 控制台 API 路由（优先处理） ===
             from src.console_api import handle_console_api
-            if path.startswith("/api/auth") or path.startswith("/api/keys") or path.startswith("/api/models") or path.startswith("/api/users") or path.startswith("/api/roles"):
+            if path.startswith("/api/auth") or path.startswith("/api/keys") or path.startswith("/api/upstreams") or path.startswith("/api/models") or path.startswith("/api/users") or path.startswith("/api/roles"):
                 handled = handle_console_api(flow, self.storage, path, self.config, self)
                 if handled:
                     return

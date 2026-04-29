@@ -161,8 +161,8 @@
           <div class="flex-1 min-w-[200px]">
             <select id="upstreamFilterActive" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
               <option value="">全部状态</option>
-              <option value="1">启用</option>
-              <option value="0">禁用</option>
+              <option value="true">启用</option>
+              <option value="false">禁用</option>
             </select>
           </div>
           <button id="upstreamSearchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
@@ -905,7 +905,9 @@ async function loadUpstreams() {
   try {
     const res = await fetch('/api/upstreams', { headers: getAuthHeaders() });
     const data = await res.json();
+    console.log('[upstreams] API status:', res.status, 'data:', data);
     allUpstreams = data.upstreams || [];
+    console.log('[upstreams] allUpstreams count:', allUpstreams.length);
     renderUpstreams();
   } catch(e) { tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
 }
@@ -916,9 +918,13 @@ function renderUpstreams() {
   const searchName = (document.getElementById('upstreamSearchName')?.value || '').toLowerCase();
   const filterActive = document.getElementById('upstreamFilterActive')?.value || '';
 
+  console.log('[upstreams] render called, allUpstreams:', allUpstreams);
+
   let filtered = allUpstreams;
   if (searchName) filtered = filtered.filter(u => u.name.toLowerCase().includes(searchName));
-  if (filterActive !== '') filtered = filtered.filter(u => (u.is_active ? '1' : '0') === filterActive);
+  if (filterActive !== '') filtered = filtered.filter(u => String(u.is_active).toLowerCase() === filterActive);
+
+  console.log('[upstreams] filtered count:', filtered.length);
 
   tbody.innerHTML = '';
   if (filtered.length === 0) { empty.classList.remove('hidden'); return; }
