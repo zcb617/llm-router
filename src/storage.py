@@ -597,6 +597,18 @@ class CallStorage:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # 对已存在的表添加缺失列（幂等）
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'model_configs' AND column_name = 'upstream_id'
+                    ) THEN
+                        ALTER TABLE model_configs ADD COLUMN upstream_id INTEGER REFERENCES upstreams(id);
+                    END IF;
+                END $$;
+            """)
             # 兼容旧表：追加 is_default 字段
             try:
                 cur.execute("ALTER TABLE model_configs ADD COLUMN is_default BOOLEAN DEFAULT false")
@@ -664,6 +676,12 @@ class CallStorage:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # 对已存在的 SQLite 表添加 upstream_id 列（幂等，忽略已存在错误）
+            try:
+                db_cur.execute("ALTER TABLE model_configs ADD COLUMN upstream_id INTEGER REFERENCES upstreams(id)")
+                conn.commit()
+            except Exception:
+                pass  # 列已存在
             try:
                 db_cur.execute("ALTER TABLE users ADD COLUMN role_id INTEGER")
             except Exception:

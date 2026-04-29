@@ -70,7 +70,7 @@ def migrate_upstreams(storage):
         print(f"  [迁移] 警告: {e}")
 
 
-async def run_proxy(config):
+async def run_proxy(config, storage):
     """运行代理服务器"""
     from mitmproxy.options import Options
     from mitmproxy.tools.dump import DumpMaster
@@ -80,7 +80,7 @@ async def run_proxy(config):
 
     master = DumpMaster(options)
 
-    addon = create_addon(config)
+    addon = create_addon(config, storage)
     master.addons.add(addon)
 
     try:
@@ -122,7 +122,7 @@ def main():
     print(f"\nStarting proxy on port {config.proxy.listen_port}...")
     print("Press Ctrl+C to stop\n")
 
-    asyncio.run(run_proxy(config))
+    asyncio.run(run_proxy(config, storage))
 
 
 if __name__ == "__main__":

@@ -19,7 +19,8 @@ class LLMRouterAddon:
     mitmproxy addon，实现LLM路由和记录
     """
     
-    def __init__(self, config=None):
+    def __init__(self, config=None, storage=None):
+        self._external_storage = storage  # 从外部传入的 storage（已初始化数据库表）
         # 延迟导入避免循环依赖
         if config is None:
             # 从配置文件加载
@@ -75,11 +76,15 @@ class LLMRouterAddon:
     @property
     def storage(self):
         if self._storage is None:
-            from src.storage import CallStorage
-            self._storage = CallStorage(
-                self.config.database.path,
-                self.config.database.postgresql
-            )
+            if self._external_storage is not None:
+                # 使用从外部传入的 storage（已由 start.py 完成表初始化）
+                self._storage = self._external_storage
+            else:
+                from src.storage import CallStorage
+                self._storage = CallStorage(
+                    self.config.database.path,
+                    self.config.database.postgresql
+                )
         return self._storage
 
     def _load_model_configs(self):
@@ -604,6 +609,6 @@ class LLMRouterAddon:
 addons = [LLMRouterAddon()]
 
 
-def create_addon(config) -> LLMRouterAddon:
+def create_addon(config, storage=None) -> LLMRouterAddon:
     """创建addon实例（供start.py调用）"""
-    return LLMRouterAddon(config)
+    return LLMRouterAddon(config, storage)
