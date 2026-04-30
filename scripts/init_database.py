@@ -159,6 +159,10 @@ PG_TABLES = [
             api_key VARCHAR(500),
             is_active BOOLEAN DEFAULT true,
             description VARCHAR(200),
+            use_claude_features BOOLEAN DEFAULT false,
+            use_roo_features BOOLEAN DEFAULT false,
+            health_status VARCHAR(20) DEFAULT 'healthy',
+            consecutive_failures INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -174,6 +178,19 @@ PG_TABLES = [
             forward_model VARCHAR(200),
             is_active BOOLEAN DEFAULT true,
             is_default BOOLEAN DEFAULT false,
+            use_multi_upstream BOOLEAN DEFAULT false,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """),
+    ("model_upstream_routes", """
+        CREATE TABLE IF NOT EXISTS model_upstream_routes (
+            id SERIAL PRIMARY KEY,
+            model_config_id INTEGER NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE,
+            upstream_id INTEGER NOT NULL REFERENCES upstreams(id),
+            forward_model VARCHAR(200),
+            sort_order INTEGER DEFAULT 0,
+            is_active BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -258,6 +275,10 @@ SQLITE_TABLES = [
             api_key TEXT,
             is_active INTEGER DEFAULT 1,
             description TEXT,
+            use_claude_features INTEGER DEFAULT 0,
+            use_roo_features INTEGER DEFAULT 0,
+            health_status TEXT DEFAULT 'healthy',
+            consecutive_failures INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -273,6 +294,19 @@ SQLITE_TABLES = [
             forward_model TEXT,
             is_active INTEGER DEFAULT 1,
             is_default INTEGER DEFAULT 0,
+            use_multi_upstream INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """),
+    ("model_upstream_routes", """
+        CREATE TABLE IF NOT EXISTS model_upstream_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_config_id INTEGER NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE,
+            upstream_id INTEGER NOT NULL REFERENCES upstreams(id),
+            forward_model TEXT,
+            sort_order INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -306,7 +340,7 @@ def run_v100_pg(config):
     cur = conn.cursor()
 
     # 1. 建表（先建 roles 等被引用的表）
-    table_order = ["roles", "menus", "upstreams", "llm_calls", "users", "api_keys", "role_menus", "model_configs"]
+    table_order = ["roles", "menus", "upstreams", "llm_calls", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in PG_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")
@@ -375,7 +409,7 @@ def run_v100_sqlite(config):
     cur = conn.cursor()
 
     # 1. 建表
-    table_order = ["roles", "menus", "upstreams", "llm_calls", "users", "api_keys", "role_menus", "model_configs"]
+    table_order = ["roles", "menus", "upstreams", "llm_calls", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in SQLITE_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")

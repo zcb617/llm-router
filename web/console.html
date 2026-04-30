@@ -181,6 +181,7 @@
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">基础 URL</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">描述</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">健康</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">Claude Code 特征</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">Roo Code 特征</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">状态</th>
@@ -219,6 +220,7 @@
             <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
               <tr>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">模型标识</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">模式</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">所属上游</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">目标 URL</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
@@ -443,7 +445,7 @@
 
   <!-- ==================== 模型配置编辑弹窗 ==================== -->
   <div id="modelEditModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
-    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[550px] shadow-2xl">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[650px] max-h-[90vh] overflow-y-auto shadow-2xl">
       <h2 id="modelEditTitle" class="text-lg font-semibold mb-4">新增模型配置</h2>
       <div class="space-y-4">
         <div>
@@ -451,28 +453,43 @@
           <input id="modelKey" type="text" required placeholder="如：kimi-for-coding"
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
         </div>
-        <div>
-          <label class="block text-sm font-medium mb-1">选择上游</label>
-          <select id="modelUpstreamSelect" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
-            <option value="">-- 不使用上游（手动填写 URL）--</option>
-          </select>
+        <div class="flex items-center gap-2">
+          <input id="modelUseMultiUpstream" type="checkbox" class="w-4 h-4">
+          <label for="modelUseMultiUpstream" class="text-sm font-medium">多上游模式 <span class="text-zinc-400 text-xs">(启用后可添加多个上游，自动故障转移)</span></label>
         </div>
-        <div id="modelDirectFields">
+        <!-- 单上游模式 -->
+        <div id="modelSingleFields">
           <div>
-            <label class="block text-sm font-medium mb-1">目标 URL</label>
-            <input id="modelBaseUrl" type="text" placeholder="https://api.example.com/v1"
-              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+            <label class="block text-sm font-medium mb-1">选择上游</label>
+            <select id="modelUpstreamSelect" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="">-- 不使用上游（手动填写 URL）--</option>
+            </select>
+          </div>
+          <div id="modelDirectFields">
+            <div>
+              <label class="block text-sm font-medium mb-1">目标 URL</label>
+              <input id="modelBaseUrl" type="text" placeholder="https://api.example.com/v1"
+                class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium mb-1">API Key</label>
+              <input id="modelApiKey" type="password" placeholder="sk-xxxx"
+                class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+            </div>
           </div>
           <div class="mt-3">
-            <label class="block text-sm font-medium mb-1">API Key</label>
-            <input id="modelApiKey" type="password" placeholder="sk-xxxx"
+            <label class="block text-sm font-medium mb-1">转发模型名称</label>
+            <input id="modelForwardModel" type="text" placeholder="如：claude-sonnet-4-5（留空则不替换）"
               class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
           </div>
         </div>
-        <div>
-          <label class="block text-sm font-medium mb-1">转发模型名称</label>
-          <input id="modelForwardModel" type="text" placeholder="如：claude-sonnet-4-5（留空则不替换）"
-            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        <!-- 多上游模式 -->
+        <div id="modelMultiFields" class="hidden">
+          <div class="flex items-center justify-between mb-2">
+            <label class="block text-sm font-medium">上游路由列表 <span class="text-zinc-400 text-xs">(按序号升序尝试)</span></label>
+            <button id="addRouteBtn" class="px-3 py-1 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">+ 添加路由</button>
+          </div>
+          <div id="routesList" class="space-y-2 max-h-[300px] overflow-y-auto"></div>
         </div>
         <div class="flex items-center gap-2">
           <input id="modelIsActive" type="checkbox" checked class="w-4 h-4">
@@ -968,11 +985,15 @@ function renderUpstreams() {
     const rooBadge = u.use_roo_features
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300">已启用</span>'
       : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">未启用</span>';
+    const healthBadge = u.health_status === 'unhealthy'
+      ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300" title="连续失败次数: ' + (u.consecutive_failures || 0) + '">异常</span>'
+      : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300">正常</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-medium">${u.name}</td>
       <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${u.target_base_url}">${u.target_base_url}</td>
       <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${u.api_key_masked || '****'}</td>
       <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.description || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap">${healthBadge}</td>
       <td class="px-4 py-2 whitespace-nowrap">${claudeBadge}</td>
       <td class="px-4 py-2 whitespace-nowrap">${rooBadge}</td>
       <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
@@ -1146,6 +1167,8 @@ loadMenus();
 // ============ 模型配置管理 ============
 let editingModelId = null;
 let allModelConfigs = [];
+let editingRoutes = []; // 多上游路由临时列表
+let allUpstreamsCache = []; // 缓存上游列表供路由行使用
 
 // 加载上游列表填充下拉框
 async function loadUpstreamOptions() {
@@ -1154,18 +1177,66 @@ async function loadUpstreamOptions() {
   try {
     const res = await fetch('/api/upstreams', { headers: getAuthHeaders() });
     const data = await res.json();
-    const upstreams = data.upstreams || [];
+    allUpstreamsCache = data.upstreams || [];
     // 填充表单下拉
     select.innerHTML = '<option value="">-- 不使用上游（手动填写 URL）--</option>';
-    upstreams.forEach(u => {
+    allUpstreamsCache.forEach(u => {
       select.innerHTML += `<option value="${u.id}" data-url="${u.target_base_url}" data-key="${u.api_key || ''}">${u.name} (${u.target_base_url})</option>`;
     });
     // 填充筛选下拉
     filter.innerHTML = '<option value="">全部上游</option>';
-    upstreams.forEach(u => {
+    allUpstreamsCache.forEach(u => {
       filter.innerHTML += `<option value="${u.id}">${u.name}</option>`;
     });
   } catch(e) { console.error('Failed to load upstreams:', e); }
+}
+
+function makeUpstreamOption(u, selectedId) {
+  const sel = selectedId == u.id ? ' selected' : '';
+  return `<option value="${u.id}"${sel}>${u.name} (${u.target_base_url})</option>`;
+}
+
+function renderRoutesList() {
+  const container = document.getElementById('routesList');
+  if (editingRoutes.length === 0) {
+    container.innerHTML = '<div class="text-sm text-zinc-500 py-3 text-center">暂无路由，请点击「+ 添加路由」</div>';
+    return;
+  }
+  container.innerHTML = editingRoutes.map((r, idx) => `
+    <div class="flex items-center gap-2 p-2 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
+      <span class="text-xs text-zinc-400 w-6">#${idx + 1}</span>
+      <select class="route-upstream flex-1 px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800" data-idx="${idx}">
+        <option value="">-- 选择上游 --</option>
+        ${allUpstreamsCache.map(u => makeUpstreamOption(u, r.upstream_id)).join('')}
+      </select>
+      <input type="text" class="route-fw px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-40" placeholder="转发模型名" value="${r.forward_model || ''}" data-idx="${idx}">
+      <input type="number" class="route-sort px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-16" placeholder="序号" value="${r.sort_order || idx}" data-idx="${idx}" min="0">
+      <button class="route-del-btn px-2 py-1 text-xs text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-idx="${idx}">&times;</button>
+    </div>
+  `).join('');
+
+  // bind events
+  container.querySelectorAll('.route-upstream').forEach(sel => {
+    sel.addEventListener('change', () => {
+      editingRoutes[sel.dataset.idx].upstream_id = parseInt(sel.value) || null;
+    });
+  });
+  container.querySelectorAll('.route-fw').forEach(inp => {
+    inp.addEventListener('input', () => {
+      editingRoutes[inp.dataset.idx].forward_model = inp.value.trim();
+    });
+  });
+  container.querySelectorAll('.route-sort').forEach(inp => {
+    inp.addEventListener('input', () => {
+      editingRoutes[inp.dataset.idx].sort_order = parseInt(inp.value) || 0;
+    });
+  });
+  container.querySelectorAll('.route-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      editingRoutes.splice(parseInt(btn.dataset.idx), 1);
+      renderRoutesList();
+    });
+  });
 }
 
 async function loadModels() {
@@ -1201,8 +1272,10 @@ function renderModels() {
     const keyDisplay = cfg.api_key ? cfg.api_key.substring(0, 8) + '****' : '(无)';
     const defaultText = cfg.is_default ? '<span class="text-blue-500 font-medium">是</span>' : '<span class="text-zinc-500">否</span>';
     const upstreamName = cfg.upstream_name || '<span class="text-zinc-400">-</span>';
+    const modeText = cfg.use_multi_upstream ? '<span class="text-purple-500 font-medium">多上游</span>' : '<span class="text-zinc-500">单上游</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${cfg.model_key}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-xs">${modeText}</td>
       <td class="px-4 py-2 whitespace-nowrap">${upstreamName}</td>
       <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${cfg.target_base_url || ''}">${cfg.target_base_url || '-'}</td>
       <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${keyDisplay}</td>
@@ -1218,18 +1291,38 @@ function renderModels() {
   });
   // 编辑
   tbody.querySelectorAll('.edit-model-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const cfg = allModelConfigs.find(c => c.id == btn.dataset.id);
       if (!cfg) return;
       editingModelId = cfg.id;
+      editingRoutes = [];
       document.getElementById('modelEditTitle').textContent = '编辑模型配置';
       document.getElementById('modelKey').value = cfg.model_key;
-      // 设置上游选择
       document.getElementById('modelUpstreamSelect').value = cfg.upstream_id || '';
-      onUpstreamChange();  // 触发 url/key 填充
+      onUpstreamChange();
       document.getElementById('modelForwardModel').value = cfg.forward_model || '';
       document.getElementById('modelIsActive').checked = cfg.is_active;
       document.getElementById('modelIsDefault').checked = cfg.is_default;
+      const multi = cfg.use_multi_upstream;
+      document.getElementById('modelUseMultiUpstream').checked = multi;
+      onMultiUpstreamChange();
+      // 多上游模式：加载路由
+      if (multi) {
+        try {
+          const res = await fetch(`/api/models/${cfg.id}/routes`, { headers: getAuthHeaders() });
+          const data = await res.json();
+          editingRoutes = (data.routes || []).map(r => ({
+            id: r.id,
+            upstream_id: r.upstream_id,
+            forward_model: r.forward_model || '',
+            sort_order: r.sort_order || 0
+          }));
+          if (editingRoutes.length === 0) {
+            editingRoutes = [{ upstream_id: null, forward_model: '', sort_order: 0 }];
+          }
+          renderRoutesList();
+        } catch(e) { console.error('Failed to load routes:', e); }
+      }
       document.getElementById('modelEditError').classList.add('hidden');
       document.getElementById('modelEditModal').classList.remove('hidden');
     });
@@ -1265,7 +1358,24 @@ function onUpstreamChange() {
   }
 }
 
+// 多上游模式切换
+function onMultiUpstreamChange() {
+  const multi = document.getElementById('modelUseMultiUpstream').checked;
+  document.getElementById('modelSingleFields').style.display = multi ? 'none' : 'block';
+  document.getElementById('modelMultiFields').style.display = multi ? 'block' : 'none';
+  if (multi && editingRoutes.length === 0) {
+    editingRoutes = [{ upstream_id: null, forward_model: '', sort_order: 0 }];
+    renderRoutesList();
+  }
+}
+
 document.getElementById('modelUpstreamSelect').addEventListener('change', onUpstreamChange);
+document.getElementById('modelUseMultiUpstream').addEventListener('change', onMultiUpstreamChange);
+document.getElementById('addRouteBtn').addEventListener('click', () => {
+  const nextSort = editingRoutes.length > 0 ? Math.max(...editingRoutes.map(r => r.sort_order || 0)) + 1 : 0;
+  editingRoutes.push({ upstream_id: null, forward_model: '', sort_order: nextSort });
+  renderRoutesList();
+});
 
 // 模型搜索/重置
 document.getElementById('modelSearchBtn').addEventListener('click', renderModels);
@@ -1279,10 +1389,13 @@ document.getElementById('modelSearchKey').addEventListener('keydown', (e) => { i
 // 新增配置
 document.getElementById('createModelBtn').addEventListener('click', () => {
   editingModelId = null;
+  editingRoutes = [];
   document.getElementById('modelEditTitle').textContent = '新增模型配置';
   document.getElementById('modelKey').value = '';
   document.getElementById('modelUpstreamSelect').value = '';
+  document.getElementById('modelUseMultiUpstream').checked = false;
   onUpstreamChange();
+  onMultiUpstreamChange();
   document.getElementById('modelForwardModel').value = '';
   document.getElementById('modelIsActive').checked = true;
   document.getElementById('modelIsDefault').checked = false;
@@ -1310,16 +1423,25 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
   const forwardModel = document.getElementById('modelForwardModel').value.trim();
   const isActive = document.getElementById('modelIsActive').checked;
   const isDefault = document.getElementById('modelIsDefault').checked;
+  const useMultiUpstream = document.getElementById('modelUseMultiUpstream').checked;
 
   if (!modelKey) {
     document.getElementById('modelEditError').textContent = '模型标识不能为空';
     document.getElementById('modelEditError').classList.remove('hidden');
     return;
   }
-  if (!upstreamId && !targetBaseUrl) {
+  if (!useMultiUpstream && !upstreamId && !targetBaseUrl) {
     document.getElementById('modelEditError').textContent = '请选择上游或填写目标 URL';
     document.getElementById('modelEditError').classList.remove('hidden');
     return;
+  }
+  if (useMultiUpstream) {
+    const validRoutes = editingRoutes.filter(r => r.upstream_id);
+    if (validRoutes.length === 0) {
+      document.getElementById('modelEditError').textContent = '多上游模式至少需要一个路由';
+      document.getElementById('modelEditError').classList.remove('hidden');
+      return;
+    }
   }
 
   const body = {
@@ -1329,11 +1451,13 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
     api_key: apiKey,
     forward_model: forwardModel,
     is_active: isActive,
-    is_default: isDefault
+    is_default: isDefault,
+    use_multi_upstream: useMultiUpstream
   };
 
   try {
     let res;
+    let configId = editingModelId;
     if (editingModelId) {
       res = await fetch('/api/models/' + editingModelId, {
         method: 'PUT',
@@ -1348,14 +1472,43 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
       });
     }
     const data = await res.json();
-    if (res.ok) {
-      document.getElementById('modelEditModal').classList.add('hidden');
-      editingModelId = null;
-      loadModels();
-    } else {
+    if (!res.ok) {
       document.getElementById('modelEditError').textContent = data.error || '保存失败';
       document.getElementById('modelEditError').classList.remove('hidden');
+      return;
     }
+    configId = configId || data.id;
+
+    // 多上游模式：同步路由
+    if (useMultiUpstream) {
+      // 删除所有旧路由
+      try {
+        const oldRes = await fetch(`/api/models/${configId}/routes`, { headers: getAuthHeaders() });
+        const oldData = await oldRes.json();
+        for (const r of (oldData.routes || [])) {
+          await fetch(`/api/models/${configId}/routes/${r.id}`, { method: 'DELETE', headers: getAuthHeaders() });
+        }
+      } catch(e) { /* ignore */ }
+
+      // 创建新路由
+      for (const r of editingRoutes) {
+        if (!r.upstream_id) continue;
+        await fetch(`/api/models/${configId}/routes`, {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            upstream_id: r.upstream_id,
+            forward_model: r.forward_model || '',
+            sort_order: r.sort_order || 0
+          })
+        });
+      }
+    }
+
+    document.getElementById('modelEditModal').classList.add('hidden');
+    editingModelId = null;
+    editingRoutes = [];
+    loadModels();
   } catch(e) {
     document.getElementById('modelEditError').textContent = '网络错误: ' + e.message;
     document.getElementById('modelEditError').classList.remove('hidden');

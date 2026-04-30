@@ -8,6 +8,9 @@ import logging
 import json
 import asyncio
 import uuid
+import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Optional
 
@@ -58,13 +61,18 @@ class LLMRouterAddon:
         self.config = config
 
         # 模型配置缓存（从数据库加载）
-        self._model_cache = {}  # model_key -> {target_base_url, api_key, forward_model}
+        self._model_cache = {}  # model_key -> {target_base_url, api_key, forward_model}  or {multi_upstream: True, routes: [...]}
         self._default_model_key = None  # 默认模型的 key
 
         # 延迟初始化组件
         self._capturer = None
         self._storage = None
         self._pending_requests = {}  # flow_id -> CapturedRequest
+
+        # 健康检查定时器
+        self._health_check_timer = None
+        self._health_check_interval = 60  # 秒
+        self._health_check_started = False
     
     @property
     def capturer(self):
@@ -91,28 +99,59 @@ class LLMRouterAddon:
         """从数据库加载模型配置到内存缓存"""
         try:
             configs = self.storage.get_all_model_configs()
+            routes = self.storage.get_all_model_routes()
             self._model_cache = {}
             self._default_model_key = None
+
+            # 按 model_key 分组多上游路由
+            routes_by_model = {}
+            for r in routes:
+                mk = r["model_key"]
+                if mk not in routes_by_model:
+                    routes_by_model[mk] = []
+                routes_by_model[mk].append({
+                    "upstream_id": r["upstream_id"],
+                    "target_base_url": r["target_base_url"],
+                    "api_key": r.get("api_key", ""),
+                    "forward_model": r.get("forward_model", ""),
+                    "use_claude_features": r.get("use_claude_features", False),
+                    "use_roo_features": r.get("use_roo_features", False),
+                    "health_status": r.get("health_status", "healthy"),
+                    "sort_order": r.get("sort_order", 0),
+                })
+
             for cfg in configs:
                 if cfg["is_active"]:
-                    target_base_url = cfg.get("target_base_url", "")
-                    api_key = cfg.get("api_key", "")
-                    forward_model = (cfg.get("forward_model") or "").strip()
+                    mk = cfg["model_key"]
 
-                    # 跳过没有 url 的配置（无效模型）
-                    if not target_base_url:
-                        continue
+                    if cfg.get("use_multi_upstream") and mk in routes_by_model:
+                        # 多上游模式
+                        self._model_cache[mk] = {
+                            "multi_upstream": True,
+                            "routes": routes_by_model[mk],
+                        }
+                    else:
+                        # 单上游模式（原有逻辑）
+                        target_base_url = cfg.get("target_base_url", "")
+                        api_key = cfg.get("api_key", "")
+                        forward_model = (cfg.get("forward_model") or "").strip()
 
-                    self._model_cache[cfg["model_key"]] = {
-                        "target_base_url": target_base_url,
-                        "api_key": api_key,
-                        "forward_model": forward_model,
-                        "use_claude_features": bool(cfg.get("use_claude_features", False)),
-                        "use_roo_features": bool(cfg.get("use_roo_features", False)),
-                    }
+                        if not target_base_url:
+                            continue
+
+                        self._model_cache[mk] = {
+                            "target_base_url": target_base_url,
+                            "api_key": api_key,
+                            "forward_model": forward_model,
+                            "use_claude_features": bool(cfg.get("use_claude_features", False)),
+                            "use_roo_features": bool(cfg.get("use_roo_features", False)),
+                        }
+
                     if cfg["is_default"]:
-                        self._default_model_key = cfg["model_key"]
-            logger.info(f"Loaded {len(self._model_cache)} model configs from database")
+                        self._default_model_key = mk
+
+            multi_count = sum(1 for v in self._model_cache.values() if v.get("multi_upstream"))
+            logger.info(f"Loaded {len(self._model_cache)} model configs from database ({multi_count} multi-upstream)")
             if self._default_model_key:
                 logger.info(f"Default model: {self._default_model_key}")
         except Exception as e:
@@ -149,6 +188,9 @@ class LLMRouterAddon:
 
         # 从数据库加载模型配置到内存缓存
         self._load_model_configs()
+
+        # 启动健康检查定时器
+        self._start_health_check_timer()
     
     def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
@@ -227,6 +269,12 @@ class LLMRouterAddon:
         if is_default:
             logger.info(f"No exact match for '{model_name}', using default model: {self.config.proxy.default_model}")
 
+        # 多上游模式：带重试和故障转移的转发
+        if mapping.get("multi_upstream"):
+            self._forward_multi_upstream(flow, mapping["routes"], captured_req, model_name, path)
+            return
+
+        # === 单上游模式（原有逻辑） ===
         target_base_url = mapping["target_base_url"]
         logger.info(f"Model mapping: {model_name} -> {target_base_url}")
 
@@ -251,7 +299,6 @@ class LLMRouterAddon:
             captured_req.overridden_model = model_name
 
         # 根据上游配置决定是否注入 Claude Code 特征 headers
-        # mapping 中应包含上游的 use_claude_features 字段
         if mapping.get("use_claude_features"):
             logger.info(f"Injecting Claude Code headers (upstream: {target_base_url})")
             self._inject_claude_headers(flow)
@@ -320,6 +367,216 @@ class LLMRouterAddon:
         flow.request.headers["X-Stainless-Package-Version"] = "5.12.2"
         flow.request.headers["X-Stainless-Runtime-Version"] = "v22.22.1"
 
+    def _forward_multi_upstream(self, flow, routes, captured_req, model_name, path):
+        """多上游转发：按 sort_order 依次尝试，跳过 unhealthy 上游"""
+        last_error = None
+
+        for route in routes:
+            upstream_id = route["upstream_id"]
+            health = route.get("health_status", "healthy")
+            if health == "unhealthy":
+                logger.info(f"Skipping unhealthy upstream {upstream_id} ({route['target_base_url']}) for model {model_name}")
+                continue
+
+            target_url = route["target_base_url"]
+            api_key = route.get("api_key", "")
+            forward_model = route.get("forward_model", "")
+
+            logger.info(f"Trying upstream {upstream_id}: {target_url} for model {model_name} (fw: {forward_model})")
+
+            try:
+                # 准备请求 body
+                req_body = captured_req.body
+                if forward_model:
+                    req_body = self._replace_model_in_body(req_body, forward_model)
+
+                # 准备 headers
+                req_headers = dict(flow.request.headers)
+                if api_key:
+                    req_headers["Authorization"] = f"Bearer {api_key}"
+
+                # 注入特征 headers
+                if route.get("use_claude_features"):
+                    for h, v in self._get_claude_headers(flow).items():
+                        req_headers[h] = v
+                elif route.get("use_roo_features"):
+                    for h, v in self._get_roo_headers(flow).items():
+                        req_headers[h] = v
+                    # 删除冲突的 Claude headers
+                    for h in ["X-Claude-Code-Session-Id", "anthropic-beta",
+                              "anthropic-dangerous-direct-browser-access",
+                              "anthropic-version", "x-app", "X-Stainless-Timeout"]:
+                        req_headers.pop(h, None)
+
+                # 构建完整 URL
+                full_url = target_url.rstrip("/") + path
+                logger.info(f"Multi-upstream forwarding to: {full_url}")
+
+                # 同步 HTTP 请求
+                req_data = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
+                http_req = urllib.request.Request(
+                    full_url,
+                    data=req_data,
+                    headers=req_headers,
+                    method=captured_req.method
+                )
+
+                opener = urllib.request.build_opener()
+                resp = opener.open(http_req, timeout=120)
+
+                resp_body = resp.read()
+                resp_headers = dict(resp.headers)
+                status_code = resp.code
+
+                # 构建 mitmproxy Response
+                flow.response = http.Response.make(
+                    status_code,
+                    resp_body,
+                    resp_headers
+                )
+
+                if status_code == 200:
+                    logger.info(f"Multi-upstream success: upstream {upstream_id} returned 200")
+                    self.storage.reset_upstream_health(upstream_id)
+                    # 记录调用信息
+                    captured_req.original_model = model_name
+                    captured_req.overridden_model = forward_model or model_name
+                    captured_req.url = full_url
+                    captured_req.call_id = str(uuid.uuid4())
+                    self._pending_requests[id(flow)] = captured_req
+                    flow.metadata["multi_upstream_id"] = upstream_id
+                    return
+                else:
+                    logger.warning(f"Upstream {upstream_id} returned {status_code}, trying next")
+                    self.storage.increment_upstream_failures(upstream_id)
+                    last_error = f"Upstream {upstream_id} returned {status_code}"
+
+            except urllib.error.HTTPError as e:
+                status_code = e.code
+                logger.warning(f"Upstream {upstream_id} HTTP error {status_code}, trying next")
+                self.storage.increment_upstream_failures(upstream_id)
+                last_error = f"Upstream {upstream_id} HTTP {status_code}: {str(e)}"
+            except Exception as e:
+                logger.error(f"Upstream {upstream_id} request failed: {e}, trying next")
+                self.storage.increment_upstream_failures(upstream_id)
+                last_error = f"Upstream {upstream_id}: {str(e)}"
+
+        # 所有上游都失败
+        logger.error(f"All upstreams failed for model {model_name}: {last_error}")
+        flow.response = http.Response.make(
+            502,
+            json.dumps({"error": f"All upstreams unavailable: {last_error}"}, ensure_ascii=False).encode("utf-8"),
+            {"Content-Type": "application/json"}
+        )
+        flow.metadata["local_response"] = True
+
+    def _get_claude_headers(self, flow):
+        """获取 Claude Code 特征 headers（不修改 flow）"""
+        session_id = flow.metadata.get("claude_session_id") or str(uuid.uuid4())
+        flow.metadata["claude_session_id"] = session_id
+        return {
+            "User-Agent": "claude-cli/2.1.119 (external, cli)",
+            "X-Claude-Code-Session-Id": session_id,
+            "X-Stainless-Arch": "x64",
+            "X-Stainless-Lang": "js",
+            "X-Stainless-OS": "Windows",
+            "X-Stainless-Package-Version": "0.81.0",
+            "X-Stainless-Retry-Count": "0",
+            "X-Stainless-Runtime": "node",
+            "X-Stainless-Runtime-Version": "v24.3.0",
+            "X-Stainless-Timeout": "600",
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24",
+            "anthropic-dangerous-direct-browser-access": "true",
+            "anthropic-version": "2023-06-01",
+            "x-app": "cli",
+        }
+
+    def _get_roo_headers(self, flow):
+        """获取 Roo Code 特征 headers（不修改 flow）"""
+        return {
+            "User-Agent": "RooCode/3.53.0",
+            "HTTP-Referer": "https://github.com/RooVetGit/Roo-Cline",
+            "X-Title": "Roo Code",
+            "accept-language": "*",
+            "sec-fetch-mode": "cors",
+            "X-Stainless-Package-Version": "5.12.2",
+            "X-Stainless-Runtime-Version": "v22.22.1",
+        }
+
+    def _start_health_check_timer(self):
+        """启动健康检查定时器（后台线程）"""
+        if self._health_check_started:
+            return
+        self._health_check_started = True
+        threading.Thread(target=self._health_check_loop, daemon=True).start()
+        logger.info(f"Health check timer started (interval: {self._health_check_interval}s)")
+
+    def _health_check_loop(self):
+        """健康检查循环"""
+        import time
+        while True:
+            time.sleep(self._health_check_interval)
+            try:
+                self._run_health_checks()
+            except Exception as e:
+                logger.error(f"Health check error: {e}", exc_info=True)
+
+    def _run_health_checks(self):
+        """扫描 unhealthy 上游，检查是否恢复"""
+        unhealthy = self.storage.get_unhealthy_upstreams()
+        if not unhealthy:
+            return
+
+        logger.info(f"Health check: {len(unhealthy)} unhealthy upstream(s) found")
+
+        for upstream in unhealthy:
+            upstream_id = upstream["id"]
+            upstream_name = upstream.get("name", "unknown")
+            target_url = upstream.get("target_base_url", "")
+
+            if not target_url:
+                continue
+
+            # 随机找一个关联此上游的模型用于健康检查
+            model_info = self.storage.get_random_model_for_upstream(upstream_id)
+            if model_info is None:
+                logger.info(f"Health check: no model found for upstream {upstream_name}, skipping")
+                continue
+
+            api_key = model_info.get("api_key", "")
+            forward_model = model_info.get("forward_model", "") or model_info.get("model_key", "gpt-3.5-turbo")
+            model_key = model_info.get("model_key", "gpt-3.5-turbo")
+
+            check_url = target_url.rstrip("/") + "/v1/chat/completions"
+            check_body = json.dumps({
+                "model": forward_model,
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 5
+            })
+
+            req = urllib.request.Request(
+                check_url,
+                data=check_body.encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                method="POST"
+            )
+
+            try:
+                opener = urllib.request.build_opener()
+                resp = opener.open(req, timeout=30)
+                if resp.code == 200:
+                    self.storage.reset_upstream_health(upstream_id)
+                    logger.info(f"Health check: upstream {upstream_name} recovered (200)")
+                    # 重载模型缓存以更新路由健康状态
+                    self.reload_model_configs()
+                else:
+                    logger.info(f"Health check: upstream {upstream_name} still unhealthy (status {resp.code})")
+            except Exception as e:
+                logger.info(f"Health check: upstream {upstream_name} still unreachable: {e}")
+
     def _extract_model(self, body: str) -> str | None:
         """从请求 body 中提取 model 参数"""
         if not body:
@@ -352,7 +609,7 @@ class LLMRouterAddon:
         try:
             # === 控制台 API 路由（优先处理） ===
             from src.console_api import handle_console_api
-            if path.startswith("/api/auth") or path.startswith("/api/keys") or path.startswith("/api/upstreams") or path.startswith("/api/models") or path.startswith("/api/users") or path.startswith("/api/roles"):
+            if path.startswith("/api/auth") or path.startswith("/api/keys") or path.startswith("/api/upstreams") or path.startswith("/api/models") or path.startswith("/api/users") or path.startswith("/api/roles") or path.startswith("/api/health"):
                 handled = handle_console_api(flow, self.storage, path, self.config, self)
                 if handled:
                     return

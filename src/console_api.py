@@ -3,6 +3,7 @@
 供 proxy.py 中的 _handle_local_api 调用
 """
 import json
+import re
 import secrets
 from datetime import datetime, date, timedelta
 from typing import Optional
@@ -385,12 +386,16 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         forward_model = (body.get("forward_model") or "").strip()
         is_active = body.get("is_active", True)
         is_default = body.get("is_default", False)
+        use_multi_upstream = body.get("use_multi_upstream", False)
 
         if not model_key:
             _json_response(flow, 400, {"error": "model_key 不能为空"})
             return True
         if not upstream_id and not target_base_url:
             _json_response(flow, 400, {"error": "请选择上游或填写目标 URL"})
+            return True
+        if use_multi_upstream and not upstream_id:
+            _json_response(flow, 400, {"error": "多上游模式必须选择上游"})
             return True
 
         config_id = storage.create_model_config(
@@ -400,7 +405,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             forward_model=forward_model,
             is_active=is_active,
             is_default=is_default,
-            upstream_id=upstream_id
+            upstream_id=upstream_id,
+            use_multi_upstream=use_multi_upstream
         )
 
         # 自动刷新 proxy 缓存
@@ -445,7 +451,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             api_key=api_key,
             forward_model=body.get("forward_model"),
             is_active=body.get("is_active"),
-            is_default=body.get("is_default")
+            is_default=body.get("is_default"),
+            use_multi_upstream=body.get("use_multi_upstream")
         )
 
         if updated:
@@ -482,6 +489,84 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
         addon.reload_model_configs()
         _json_response(flow, 200, {"message": "模型配置缓存已重新加载"})
+        return True
+
+    # ========== 模型路由管理 API（多上游） ==========
+
+    # GET /api/models/{id}/routes - 获取模型的路由列表
+    if path.startswith("/api/models/") and path.endswith("/routes") and flow.request.method == "GET":
+        try:
+            config_id = int(path.split("/")[-2])
+        except (ValueError, IndexError):
+            _json_response(flow, 400, {"error": "无效的模型配置ID"})
+            return True
+        routes = storage.get_model_routes(config_id)
+        _json_response(flow, 200, {"routes": routes})
+        return True
+
+    # POST /api/models/{id}/routes - 添加路由
+    if path.startswith("/api/models/") and path.endswith("/routes") and flow.request.method == "POST":
+        try:
+            config_id = int(path.split("/")[-2])
+        except (ValueError, IndexError):
+            _json_response(flow, 400, {"error": "无效的模型配置ID"})
+            return True
+
+        body = _extract_body(flow)
+        if not body:
+            _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+
+        upstream_id = body.get("upstream_id")
+        forward_model = (body.get("forward_model") or "").strip()
+        sort_order = body.get("sort_order", 0)
+
+        if not upstream_id:
+            _json_response(flow, 400, {"error": "upstream_id 不能为空"})
+            return True
+
+        route_id = storage.create_model_route(config_id, upstream_id, forward_model, sort_order)
+        if addon:
+            addon.reload_model_configs()
+        _json_response(flow, 200, {"message": "路由添加成功", "id": route_id})
+        return True
+
+    # PUT/DELETE /api/models/{id}/routes/{route_id} - 更新/删除路由
+    route_single_match = re.match(r'^/api/models/(\d+)/routes/(\d+)$', path)
+    if route_single_match and flow.request.method == "PUT":
+        config_id = int(route_single_match.group(1))
+        route_id = int(route_single_match.group(2))
+
+        body = _extract_body(flow)
+        if not body:
+            _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+
+        updated = storage.update_model_route(
+            route_id=route_id,
+            upstream_id=body.get("upstream_id"),
+            forward_model=body.get("forward_model"),
+            sort_order=body.get("sort_order"),
+            is_active=body.get("is_active")
+        )
+        if updated:
+            if addon:
+                addon.reload_model_configs()
+            _json_response(flow, 200, {"message": "路由更新成功"})
+        else:
+            _json_response(flow, 404, {"error": "路由不存在"})
+        return True
+
+    if route_single_match and flow.request.method == "DELETE":
+        route_id = int(route_single_match.group(2))
+
+        deleted = storage.delete_model_route(route_id)
+        if deleted:
+            if addon:
+                addon.reload_model_configs()
+            _json_response(flow, 200, {"message": "路由删除成功"})
+        else:
+            _json_response(flow, 404, {"error": "路由不存在"})
         return True
 
     # ========== 用户管理 API ==========
