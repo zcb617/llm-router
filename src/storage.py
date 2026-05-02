@@ -1595,14 +1595,14 @@ class CallStorage:
         """随机获取上游关联的一个模型（优先多上游路由，否则 model_configs），用于健康检查"""
         # 先从多上游路由找
         sql = (
-            "SELECT mur.forward_model, mc.model_key, u.api_key "
+            "SELECT mur.forward_model, mc.model_key, u.api_key, u.use_claude_features, u.use_roo_features "
             "FROM model_upstream_routes mur "
             "JOIN model_configs mc ON mur.model_config_id = mc.id "
             "JOIN upstreams u ON mur.upstream_id = u.id "
             "WHERE mur.upstream_id = %s AND mur.is_active = true AND mc.is_active = true "
             "ORDER BY RANDOM() LIMIT 1"
         ) if self.postgresql else (
-            "SELECT mur.forward_model, mc.model_key, u.api_key "
+            "SELECT mur.forward_model, mc.model_key, u.api_key, u.use_claude_features, u.use_roo_features "
             "FROM model_upstream_routes mur "
             "JOIN model_configs mc ON mur.model_config_id = mc.id "
             "JOIN upstreams u ON mur.upstream_id = u.id "
@@ -1615,7 +1615,13 @@ class CallStorage:
                 cur.execute(sql, (upstream_id,))
                 row = cur.fetchone()
                 if row:
-                    return {"forward_model": row[0] or "", "model_key": row[1], "api_key": row[2] or ""}
+                    return {
+                        "forward_model": row[0] or "",
+                        "model_key": row[1],
+                        "api_key": row[2] or "",
+                        "use_claude_features": bool(row[3]) if row[3] is not None else False,
+                        "use_roo_features": bool(row[4]) if row[4] is not None else False,
+                    }
             finally:
                 self._pg_close(conn, cur)
         else:
@@ -1624,19 +1630,27 @@ class CallStorage:
                 cur.execute(sql, (upstream_id,))
                 row = cur.fetchone()
                 if row:
-                    return {"forward_model": row[0] or "", "model_key": row[1], "api_key": row[2] or ""}
+                    return {
+                        "forward_model": row[0] or "",
+                        "model_key": row[1],
+                        "api_key": row[2] or "",
+                        "use_claude_features": bool(row[3]) if row[3] is not None else False,
+                        "use_roo_features": bool(row[4]) if row[4] is not None else False,
+                    }
             finally:
                 self._sqlite_close(conn, cur)
 
         # 回退：从 model_configs 单上游模式找
         sql2 = (
-            "SELECT mc.model_key, mc.forward_model, mc.api_key "
+            "SELECT mc.model_key, mc.forward_model, u.api_key, u.use_claude_features, u.use_roo_features "
             "FROM model_configs mc "
+            "JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.upstream_id = %s AND mc.is_active = true AND mc.use_multi_upstream = false "
             "ORDER BY RANDOM() LIMIT 1"
         ) if self.postgresql else (
-            "SELECT mc.model_key, mc.forward_model, mc.api_key "
+            "SELECT mc.model_key, mc.forward_model, u.api_key, u.use_claude_features, u.use_roo_features "
             "FROM model_configs mc "
+            "JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.upstream_id = ? AND mc.is_active = 1 AND mc.use_multi_upstream = 0 "
             "ORDER BY RANDOM() LIMIT 1"
         )
@@ -1646,7 +1660,13 @@ class CallStorage:
                 cur.execute(sql2, (upstream_id,))
                 row = cur.fetchone()
                 if row:
-                    return {"model_key": row[0], "forward_model": row[1] or "", "api_key": row[2] or ""}
+                    return {
+                        "model_key": row[0],
+                        "forward_model": row[1] or "",
+                        "api_key": row[2] or "",
+                        "use_claude_features": bool(row[3]) if row[3] is not None else False,
+                        "use_roo_features": bool(row[4]) if row[4] is not None else False,
+                    }
             finally:
                 self._pg_close(conn, cur)
         else:
@@ -1655,7 +1675,13 @@ class CallStorage:
                 cur.execute(sql2, (upstream_id,))
                 row = cur.fetchone()
                 if row:
-                    return {"model_key": row[0], "forward_model": row[1] or "", "api_key": row[2] or ""}
+                    return {
+                        "model_key": row[0],
+                        "forward_model": row[1] or "",
+                        "api_key": row[2] or "",
+                        "use_claude_features": bool(row[3]) if row[3] is not None else False,
+                        "use_roo_features": bool(row[4]) if row[4] is not None else False,
+                    }
             finally:
                 self._sqlite_close(conn, cur)
 

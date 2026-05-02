@@ -21,6 +21,19 @@ class LLMRouterAddon:
     """
     mitmproxy addon，实现LLM路由和记录
     """
+    _UPSTREAM_STRIPPED_HEADERS = {
+        "host",
+        "connection",
+        "proxy-connection",
+        "keep-alive",
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "content-length",
+        "authorization",
+    }
+
     
     def __init__(self, config=None, storage=None):
         self._external_storage = storage  # 从外部传入的 storage（已初始化数据库表）
@@ -369,20 +382,37 @@ class LLMRouterAddon:
 
     def _forward_multi_upstream(self, flow, routes, captured_req, model_name, path):
         """多上游转发：按 sort_order 依次尝试，跳过 unhealthy 上游"""
+        if not routes:
+            last_error = "no upstream routes configured"
+            logger.error(f"All upstreams failed for model {model_name}: {last_error}")
+            flow.response = http.Response.make(
+                502,
+                json.dumps({"error": f"All upstreams unavailable: {last_error}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"}
+            )
+            flow.metadata["local_response"] = True
+            return
+
+        healthy_routes = [r for r in routes if r.get("health_status", "healthy") != "unhealthy"]
+        if healthy_routes:
+            candidate_routes = healthy_routes
+            skipped_count = len(routes) - len(healthy_routes)
+            if skipped_count:
+                logger.info(f"Skipping {skipped_count} unhealthy upstream(s) for model {model_name}")
+        else:
+            candidate_routes = routes
+            logger.warning(f"All upstreams are marked unhealthy for model {model_name}; retrying them anyway")
+
         last_error = None
 
-        for route in routes:
+        for route in candidate_routes:
             upstream_id = route["upstream_id"]
             health = route.get("health_status", "healthy")
-            if health == "unhealthy":
-                logger.info(f"Skipping unhealthy upstream {upstream_id} ({route['target_base_url']}) for model {model_name}")
-                continue
-
             target_url = route["target_base_url"]
             api_key = route.get("api_key", "")
             forward_model = route.get("forward_model", "")
 
-            logger.info(f"Trying upstream {upstream_id}: {target_url} for model {model_name} (fw: {forward_model})")
+            logger.info(f"Trying upstream {upstream_id}: {target_url} for model {model_name} (fw: {forward_model}, health: {health})")
 
             try:
                 # 准备请求 body
@@ -390,10 +420,8 @@ class LLMRouterAddon:
                 if forward_model:
                     req_body = self._replace_model_in_body(req_body, forward_model)
 
-                # 准备 headers
-                req_headers = dict(flow.request.headers)
-                if api_key:
-                    req_headers["Authorization"] = f"Bearer {api_key}"
+                # 准备 headers。Host/Connection/Content-Length 等由 urllib 按真实上游 URL 生成。
+                req_headers = self._build_upstream_headers(flow.request.headers, api_key)
 
                 # 注入特征 headers
                 if route.get("use_claude_features"):
@@ -438,6 +466,8 @@ class LLMRouterAddon:
                 if status_code == 200:
                     logger.info(f"Multi-upstream success: upstream {upstream_id} returned 200")
                     self.storage.reset_upstream_health(upstream_id)
+                    if health == "unhealthy":
+                        self.reload_model_configs()
                     # 记录调用信息
                     captured_req.original_model = model_name
                     captured_req.overridden_model = forward_model or model_name
@@ -462,6 +492,7 @@ class LLMRouterAddon:
                 last_error = f"Upstream {upstream_id}: {str(e)}"
 
         # 所有上游都失败
+        last_error = last_error or "no upstream was attempted"
         logger.error(f"All upstreams failed for model {model_name}: {last_error}")
         flow.response = http.Response.make(
             502,
@@ -469,6 +500,64 @@ class LLMRouterAddon:
             {"Content-Type": "application/json"}
         )
         flow.metadata["local_response"] = True
+
+    @classmethod
+    def _build_upstream_headers(cls, headers, api_key: str = "") -> dict:
+        """构造发往真实上游的请求头，避免透传反向代理和路由器认证头。"""
+        req_headers = {
+            k: v for k, v in dict(headers).items()
+            if k.lower() not in cls._UPSTREAM_STRIPPED_HEADERS
+        }
+        if api_key:
+            req_headers["Authorization"] = f"Bearer {api_key}"
+        return req_headers
+
+    @staticmethod
+    def _join_api_path(target_base_url: str, endpoint_path: str) -> str:
+        """拼接 API 路径，并避免 base_url 已经包含 /v1 时重复。"""
+        base = target_base_url.rstrip("/")
+        if endpoint_path.startswith("/v1/") and base.lower().endswith("/v1"):
+            endpoint_path = endpoint_path[len("/v1"):]
+        return base + endpoint_path
+
+    @staticmethod
+    def _prefers_anthropic_health_check(target_base_url: str, model_info: dict) -> bool:
+        """根据模型路由配置判断健康检查应优先使用 Anthropic Messages 形态。"""
+        target = (target_base_url or "").lower()
+        model = (model_info.get("forward_model") or model_info.get("model_key") or "").lower()
+        return (
+            bool(model_info.get("use_claude_features") or model_info.get("use_roo_features"))
+            or "/anthropic" in target
+            or "/coding" in target
+            or model.startswith("claude")
+        )
+
+    def _build_health_check_requests(self, target_base_url: str, model_info: dict) -> list[tuple[str, str, dict]]:
+        """基于模型配置和匹配上游构造健康检查候选请求。"""
+        api_key = model_info.get("api_key", "")
+        model = model_info.get("forward_model") or model_info.get("model_key") or "gpt-3.5-turbo"
+        headers = self._build_upstream_headers({}, api_key)
+        headers["Content-Type"] = "application/json"
+
+        openai_body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 5
+        })
+        anthropic_headers = dict(headers)
+        anthropic_headers.setdefault("anthropic-version", "2023-06-01")
+        anthropic_body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 5
+        })
+        candidates = [
+            (self._join_api_path(target_base_url, "/v1/chat/completions"), openai_body, headers),
+            (self._join_api_path(target_base_url, "/v1/messages"), anthropic_body, anthropic_headers),
+        ]
+        if self._prefers_anthropic_health_check(target_base_url, model_info):
+            candidates.reverse()
+        return candidates
 
     def _get_claude_headers(self, flow):
         """获取 Claude Code 特征 headers（不修改 flow）"""
@@ -543,39 +632,32 @@ class LLMRouterAddon:
                 logger.info(f"Health check: no model found for upstream {upstream_name}, skipping")
                 continue
 
-            api_key = model_info.get("api_key", "")
-            forward_model = model_info.get("forward_model", "") or model_info.get("model_key", "gpt-3.5-turbo")
-            model_key = model_info.get("model_key", "gpt-3.5-turbo")
+            recovered = False
+            last_error = None
+            for check_url, check_body, check_headers in self._build_health_check_requests(target_url, model_info):
+                req = urllib.request.Request(
+                    check_url,
+                    data=check_body.encode("utf-8"),
+                    headers=check_headers,
+                    method="POST"
+                )
 
-            check_url = target_url.rstrip("/") + "/v1/chat/completions"
-            check_body = json.dumps({
-                "model": forward_model,
-                "messages": [{"role": "user", "content": "hello"}],
-                "max_tokens": 5
-            })
+                try:
+                    opener = urllib.request.build_opener()
+                    resp = opener.open(req, timeout=30)
+                    if 200 <= resp.code < 300:
+                        self.storage.reset_upstream_health(upstream_id)
+                        logger.info(f"Health check: upstream {upstream_name} recovered ({resp.code}) via {check_url}")
+                        # 重载模型缓存以更新路由健康状态
+                        self.reload_model_configs()
+                        recovered = True
+                        break
+                    last_error = f"status {resp.code} via {check_url}"
+                except Exception as e:
+                    last_error = f"{e} via {check_url}"
 
-            req = urllib.request.Request(
-                check_url,
-                data=check_body.encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                },
-                method="POST"
-            )
-
-            try:
-                opener = urllib.request.build_opener()
-                resp = opener.open(req, timeout=30)
-                if resp.code == 200:
-                    self.storage.reset_upstream_health(upstream_id)
-                    logger.info(f"Health check: upstream {upstream_name} recovered (200)")
-                    # 重载模型缓存以更新路由健康状态
-                    self.reload_model_configs()
-                else:
-                    logger.info(f"Health check: upstream {upstream_name} still unhealthy (status {resp.code})")
-            except Exception as e:
-                logger.info(f"Health check: upstream {upstream_name} still unreachable: {e}")
+            if not recovered:
+                logger.info(f"Health check: upstream {upstream_name} still unreachable: {last_error}")
 
     def _extract_model(self, body: str) -> str | None:
         """从请求 body 中提取 model 参数"""
