@@ -9,9 +9,6 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 from urllib.parse import parse_qs, urlencode
 
-from src.auth import validate_email, hash_password, check_password, create_jwt_token, verify_jwt_token
-
-
 def _json_response(flow, status: int, data: dict):
     """快捷返回 JSON 响应"""
     from mitmproxy import http
@@ -40,8 +37,19 @@ def _extract_bearer_token(flow) -> Optional[str]:
     return None
 
 
+def _validate_model_config_target(upstream_id, target_base_url: str, use_multi_upstream: bool) -> Optional[str]:
+    """校验模型配置目标。多上游模式的目标由路由列表提供。"""
+    if use_multi_upstream:
+        return None
+    if not upstream_id and not target_base_url:
+        return "请选择上游或填写目标 URL"
+    return None
+
+
 def _require_auth(flow) -> Optional[dict]:
     """验证 JWT，返回 payload 或 None（同时返回 401 响应）"""
+    from src.auth import verify_jwt_token
+
     token = _extract_bearer_token(flow)
     if not token:
         _json_response(flow, 401, {"error": "Unauthorized: missing token"})
@@ -63,6 +71,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
     # POST /api/auth/register - 注册
     if path == "/api/auth/register" and flow.request.method == "POST":
+        from src.auth import validate_email, hash_password
+
         body = _extract_body(flow)
         if not body:
             _json_response(flow, 400, {"error": "请求体格式错误"})
@@ -98,6 +108,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
     # POST /api/auth/login - 登录
     if path == "/api/auth/login" and flow.request.method == "POST":
+        from src.auth import check_password, create_jwt_token
+
         body = _extract_body(flow)
         if not body:
             _json_response(flow, 400, {"error": "请求体格式错误"})
@@ -381,7 +393,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
         model_key = body.get("model_key", "").strip()
         upstream_id = body.get("upstream_id")
-        target_base_url = body.get("target_base_url", "")
+        target_base_url = (body.get("target_base_url") or "").strip()
         api_key = body.get("api_key", "")
         forward_model = (body.get("forward_model") or "").strip()
         is_active = body.get("is_active", True)
@@ -391,12 +403,15 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         if not model_key:
             _json_response(flow, 400, {"error": "model_key 不能为空"})
             return True
-        if not upstream_id and not target_base_url:
-            _json_response(flow, 400, {"error": "请选择上游或填写目标 URL"})
+        target_error = _validate_model_config_target(upstream_id, target_base_url, use_multi_upstream)
+        if target_error:
+            _json_response(flow, 400, {"error": target_error})
             return True
-        if use_multi_upstream and not upstream_id:
-            _json_response(flow, 400, {"error": "多上游模式必须选择上游"})
-            return True
+        if use_multi_upstream:
+            upstream_id = None
+            target_base_url = ""
+            api_key = ""
+            forward_model = ""
 
         config_id = storage.create_model_config(
             model_key=model_key,

@@ -1446,10 +1446,10 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
 
   const body = {
     model_key: modelKey,
-    upstream_id: upstreamId ? parseInt(upstreamId) : null,
-    target_base_url: targetBaseUrl,
-    api_key: apiKey,
-    forward_model: forwardModel,
+    upstream_id: !useMultiUpstream && upstreamId ? parseInt(upstreamId) : null,
+    target_base_url: useMultiUpstream ? '' : targetBaseUrl,
+    api_key: useMultiUpstream ? '' : apiKey,
+    forward_model: useMultiUpstream ? '' : forwardModel,
     is_active: isActive,
     is_default: isDefault,
     use_multi_upstream: useMultiUpstream
