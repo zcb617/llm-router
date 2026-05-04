@@ -1159,6 +1159,54 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur, commit=True)
 
+    def create_model_config_with_routes(
+        self, model_key: str, target_base_url: str = "", api_key: str = "",
+        model_overrides: str = "{}", forward_model: str = "", is_active: bool = True, is_default: bool = False,
+        upstream_id: int = None, use_multi_upstream: bool = False, routes: list = None
+    ) -> int:
+        """创建模型配置，并在同一事务内写入多上游路由。"""
+        routes = routes or []
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                if is_default:
+                    cur.execute("UPDATE model_configs SET is_default = false")
+                cur.execute(
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream)
+                )
+                config_id = cur.fetchone()[0]
+                if use_multi_upstream:
+                    self._replace_model_routes_in_cursor(cur, config_id, routes)
+                conn.commit()
+                return config_id
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                if is_default:
+                    cur.execute("UPDATE model_configs SET is_default = 0")
+                cur.execute(
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, int(is_active), int(is_default), int(use_multi_upstream))
+                )
+                config_id = cur.lastrowid
+                if use_multi_upstream:
+                    self._replace_model_routes_in_cursor(cur, config_id, routes)
+                conn.commit()
+                return config_id
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self._sqlite_close(conn, cur)
+
     def update_model_config(
         self, config_id: int, model_key: str = None, target_base_url: str = None,
         api_key: str = None, model_overrides: str = None, forward_model: str = None, is_active: bool = None,
@@ -1213,6 +1261,76 @@ class CallStorage:
                 return cur.rowcount > 0
             finally:
                 self._sqlite_close(conn, cur, commit=True)
+
+    def update_model_config_with_routes(
+        self, config_id: int, model_key: str = None, target_base_url: str = None,
+        api_key: str = None, model_overrides: str = None, forward_model: str = None, is_active: bool = None,
+        is_default: bool = None, upstream_id: int = None, use_multi_upstream: bool = None, routes: list = None
+    ) -> bool:
+        """更新模型配置，并在同一事务内替换多上游路由。"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                if is_default:
+                    cur.execute("UPDATE model_configs SET is_default = false")
+                fields = [
+                    "model_key = %s",
+                    "upstream_id = %s",
+                    "target_base_url = %s",
+                    "api_key = %s",
+                    "forward_model = %s",
+                    "is_active = %s",
+                    "is_default = %s",
+                    "use_multi_upstream = %s",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                params = [model_key, upstream_id, target_base_url, api_key, forward_model, is_active, is_default, use_multi_upstream, config_id]
+                cur.execute(f"UPDATE model_configs SET {', '.join(fields)} WHERE id = %s", params)
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return False
+                if routes is not None or not use_multi_upstream:
+                    self._replace_model_routes_in_cursor(cur, config_id, routes if use_multi_upstream else [])
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                if is_default:
+                    cur.execute("UPDATE model_configs SET is_default = 0")
+                fields = [
+                    "model_key = ?",
+                    "upstream_id = ?",
+                    "target_base_url = ?",
+                    "api_key = ?",
+                    "forward_model = ?",
+                    "is_active = ?",
+                    "is_default = ?",
+                    "use_multi_upstream = ?",
+                    "updated_at = datetime('now')",
+                ]
+                params = [
+                    model_key, upstream_id, target_base_url, api_key, forward_model,
+                    int(is_active), int(is_default), int(use_multi_upstream), config_id
+                ]
+                cur.execute(f"UPDATE model_configs SET {', '.join(fields)} WHERE id = ?", params)
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return False
+                if routes is not None or not use_multi_upstream:
+                    self._replace_model_routes_in_cursor(cur, config_id, routes if use_multi_upstream else [])
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self._sqlite_close(conn, cur)
 
     def delete_model_config(self, config_id: int) -> bool:
         """删除模型配置"""
@@ -1393,6 +1511,29 @@ class CallStorage:
                 self._sqlite_close(conn, cur, commit=True)
 
     # ========== 模型路由管理 CRUD（多上游） ==========
+
+    def _replace_model_routes_in_cursor(self, cur, model_config_id: int, routes: list):
+        """在当前事务中替换模型路由。调用方负责提交或回滚事务。"""
+        delete_sql = "DELETE FROM model_upstream_routes WHERE model_config_id = %s" if self.postgresql else \
+                     "DELETE FROM model_upstream_routes WHERE model_config_id = ?"
+        insert_sql = (
+            "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, sort_order) "
+            "VALUES (%s, %s, %s, %s)"
+        ) if self.postgresql else (
+            "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, sort_order) "
+            "VALUES (?, ?, ?, ?)"
+        )
+        cur.execute(delete_sql, (model_config_id,))
+        for route in routes or []:
+            cur.execute(
+                insert_sql,
+                (
+                    model_config_id,
+                    route["upstream_id"],
+                    route.get("forward_model", "") or "",
+                    route.get("sort_order", 0),
+                )
+            )
 
     def get_model_routes(self, model_config_id: int) -> list:
         """获取某个模型配置的所有路由（按 sort_order 排序）"""

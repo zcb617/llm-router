@@ -1452,12 +1452,16 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
     forward_model: useMultiUpstream ? '' : forwardModel,
     is_active: isActive,
     is_default: isDefault,
-    use_multi_upstream: useMultiUpstream
+    use_multi_upstream: useMultiUpstream,
+    routes: useMultiUpstream ? editingRoutes.filter(r => r.upstream_id).map(r => ({
+      upstream_id: r.upstream_id,
+      forward_model: r.forward_model || '',
+      sort_order: r.sort_order || 0
+    })) : []
   };
 
   try {
     let res;
-    let configId = editingModelId;
     if (editingModelId) {
       res = await fetch('/api/models/' + editingModelId, {
         method: 'PUT',
@@ -1476,33 +1480,6 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
       document.getElementById('modelEditError').textContent = data.error || '保存失败';
       document.getElementById('modelEditError').classList.remove('hidden');
       return;
-    }
-    configId = configId || data.id;
-
-    // 多上游模式：同步路由
-    if (useMultiUpstream) {
-      // 删除所有旧路由
-      try {
-        const oldRes = await fetch(`/api/models/${configId}/routes`, { headers: getAuthHeaders() });
-        const oldData = await oldRes.json();
-        for (const r of (oldData.routes || [])) {
-          await fetch(`/api/models/${configId}/routes/${r.id}`, { method: 'DELETE', headers: getAuthHeaders() });
-        }
-      } catch(e) { /* ignore */ }
-
-      // 创建新路由
-      for (const r of editingRoutes) {
-        if (!r.upstream_id) continue;
-        await fetch(`/api/models/${configId}/routes`, {
-          method: 'POST',
-          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            upstream_id: r.upstream_id,
-            forward_model: r.forward_model || '',
-            sort_order: r.sort_order || 0
-          })
-        });
-      }
     }
 
     document.getElementById('modelEditModal').classList.add('hidden');

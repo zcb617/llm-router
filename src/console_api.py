@@ -9,6 +9,19 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 from urllib.parse import parse_qs, urlencode
 
+
+_MODEL_CONFIG_PATH_RE = re.compile(r'^/api/models/(\d+)$')
+_MODEL_ROUTE_PATH_RE = re.compile(r'^/api/models/(\d+)/routes/(\d+)$')
+
+
+def _match_model_config_path(path: str):
+    return _MODEL_CONFIG_PATH_RE.match(path)
+
+
+def _match_model_route_path(path: str):
+    return _MODEL_ROUTE_PATH_RE.match(path)
+
+
 def _json_response(flow, status: int, data: dict):
     """快捷返回 JSON 响应"""
     from mitmproxy import http
@@ -44,6 +57,33 @@ def _validate_model_config_target(upstream_id, target_base_url: str, use_multi_u
     if not upstream_id and not target_base_url:
         return "请选择上游或填写目标 URL"
     return None
+
+
+def _extract_model_routes(body: dict) -> tuple[list, Optional[str]]:
+    """从模型保存请求中提取并规范化多上游路由。"""
+    raw_routes = body.get("routes") or []
+    if not isinstance(raw_routes, list):
+        return [], "routes 必须是数组"
+
+    routes = []
+    for idx, route in enumerate(raw_routes):
+        if not isinstance(route, dict):
+            return [], f"第 {idx + 1} 条路由格式错误"
+        upstream_id = route.get("upstream_id")
+        if not upstream_id:
+            return [], f"第 {idx + 1} 条路由未选择上游"
+        try:
+            upstream_id = int(upstream_id)
+            sort_order = int(route.get("sort_order", idx))
+        except (TypeError, ValueError):
+            return [], f"第 {idx + 1} 条路由参数错误"
+        routes.append({
+            "upstream_id": upstream_id,
+            "forward_model": (route.get("forward_model") or "").strip(),
+            "sort_order": sort_order,
+        })
+
+    return routes, None
 
 
 def _require_auth(flow) -> Optional[dict]:
@@ -399,6 +439,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         is_active = body.get("is_active", True)
         is_default = body.get("is_default", False)
         use_multi_upstream = body.get("use_multi_upstream", False)
+        routes, routes_error = _extract_model_routes(body)
 
         if not model_key:
             _json_response(flow, 400, {"error": "model_key 不能为空"})
@@ -407,13 +448,19 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         if target_error:
             _json_response(flow, 400, {"error": target_error})
             return True
+        if routes_error:
+            _json_response(flow, 400, {"error": routes_error})
+            return True
+        if use_multi_upstream and not routes:
+            _json_response(flow, 400, {"error": "多上游模式至少需要一个路由"})
+            return True
         if use_multi_upstream:
             upstream_id = None
             target_base_url = ""
             api_key = ""
             forward_model = ""
 
-        config_id = storage.create_model_config(
+        config_id = storage.create_model_config_with_routes(
             model_key=model_key,
             target_base_url=target_base_url,
             api_key=api_key,
@@ -421,7 +468,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             is_active=is_active,
             is_default=is_default,
             upstream_id=upstream_id,
-            use_multi_upstream=use_multi_upstream
+            use_multi_upstream=use_multi_upstream,
+            routes=routes
         )
 
         # 自动刷新 proxy 缓存
@@ -431,13 +479,11 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         _json_response(flow, 200, {"message": "模型配置创建成功", "id": config_id})
         return True
 
+    model_config_match = _match_model_config_path(path)
+
     # PUT /api/models/{id} - 更新模型配置
-    if path.startswith("/api/models/") and "/reload" not in path and flow.request.method == "PUT":
-        try:
-            config_id = int(path.split("/")[-1])
-        except (ValueError, IndexError):
-            _json_response(flow, 400, {"error": "无效的模型配置ID"})
-            return True
+    if model_config_match and flow.request.method == "PUT":
+        config_id = int(model_config_match.group(1))
 
         existing = storage.get_model_config_by_id(config_id)
         if not existing:
@@ -449,25 +495,51 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "请求体格式错误"})
             return True
 
-        upstream_id = body.get("upstream_id")
-        target_base_url = body.get("target_base_url")
-        api_key = body.get("api_key")
+        model_key = (body.get("model_key") or existing.get("model_key") or "").strip()
+        upstream_id = body.get("upstream_id", existing.get("upstream_id"))
+        target_base_url = (body.get("target_base_url", existing.get("target_base_url") or "") or "").strip()
+        api_key = body.get("api_key", existing.get("api_key") or "")
+        forward_model = (body.get("forward_model", existing.get("forward_model") or "") or "").strip()
+        is_active = body.get("is_active", existing.get("is_active", True))
+        is_default = body.get("is_default", existing.get("is_default", False))
+        use_multi_upstream = body.get("use_multi_upstream", existing.get("use_multi_upstream", False))
+        routes, routes_error = _extract_model_routes(body)
+
+        if not model_key:
+            _json_response(flow, 400, {"error": "model_key 不能为空"})
+            return True
+        target_error = _validate_model_config_target(upstream_id, target_base_url, use_multi_upstream)
+        if target_error:
+            _json_response(flow, 400, {"error": target_error})
+            return True
+        if routes_error:
+            _json_response(flow, 400, {"error": routes_error})
+            return True
+        if use_multi_upstream and "routes" in body and not routes:
+            _json_response(flow, 400, {"error": "多上游模式至少需要一个路由"})
+            return True
 
         # 如果选择了上游，不更新 url/key（以上游为准）
         if upstream_id:
             target_base_url = None
             api_key = None
+        if use_multi_upstream:
+            upstream_id = None
+            target_base_url = ""
+            api_key = ""
+            forward_model = ""
 
-        updated = storage.update_model_config(
+        updated = storage.update_model_config_with_routes(
             config_id=config_id,
-            model_key=body.get("model_key"),
+            model_key=model_key,
             upstream_id=upstream_id,
             target_base_url=target_base_url,
             api_key=api_key,
-            forward_model=body.get("forward_model"),
-            is_active=body.get("is_active"),
-            is_default=body.get("is_default"),
-            use_multi_upstream=body.get("use_multi_upstream")
+            forward_model=forward_model,
+            is_active=is_active,
+            is_default=is_default,
+            use_multi_upstream=use_multi_upstream,
+            routes=routes if "routes" in body else None
         )
 
         if updated:
@@ -480,12 +552,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         return True
 
     # DELETE /api/models/{id} - 删除模型配置
-    if path.startswith("/api/models/") and "/reload" not in path and flow.request.method == "DELETE":
-        try:
-            config_id = int(path.split("/")[-1])
-        except (ValueError, IndexError):
-            _json_response(flow, 400, {"error": "无效的模型配置ID"})
-            return True
+    if model_config_match and flow.request.method == "DELETE":
+        config_id = int(model_config_match.group(1))
 
         deleted = storage.delete_model_config(config_id)
         if deleted:
@@ -547,7 +615,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         return True
 
     # PUT/DELETE /api/models/{id}/routes/{route_id} - 更新/删除路由
-    route_single_match = re.match(r'^/api/models/(\d+)/routes/(\d+)$', path)
+    route_single_match = _match_model_route_path(path)
     if route_single_match and flow.request.method == "PUT":
         config_id = int(route_single_match.group(1))
         route_id = int(route_single_match.group(2))

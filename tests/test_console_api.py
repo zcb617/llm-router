@@ -1,7 +1,32 @@
 """
 控制台 API 测试
 """
-from src.console_api import _validate_model_config_target
+import json
+import sys
+import types
+
+mitmproxy_stub = types.ModuleType("mitmproxy")
+http_stub = types.ModuleType("mitmproxy.http")
+http_stub.HTTPFlow = type("HTTPFlow", (), {})
+
+
+class ResponseStub:
+    @staticmethod
+    def make(status, content=b"", headers=None):
+        return {"status": status, "content": content, "headers": headers or {}}
+
+
+http_stub.Response = ResponseStub
+mitmproxy_stub.http = http_stub
+sys.modules.setdefault("mitmproxy", mitmproxy_stub)
+sys.modules.setdefault("mitmproxy.http", http_stub)
+
+from src.console_api import (
+    handle_console_api,
+    _match_model_config_path,
+    _match_model_route_path,
+    _validate_model_config_target,
+)
 
 
 def test_model_config_target_allows_multi_upstream_without_single_target():
@@ -22,3 +47,77 @@ def test_model_config_target_allows_single_upstream():
 def test_model_config_target_allows_direct_url():
     """单上游模式填写目标 URL 后可保存。"""
     assert _validate_model_config_target(None, "https://api.example.com/v1", False) is None
+
+
+def test_model_config_path_does_not_match_route_path():
+    """路由更新/删除不能被模型配置更新/删除接口截获。"""
+    assert _match_model_config_path("/api/models/1")
+    assert _match_model_config_path("/api/models/1/routes/2") is None
+
+
+def test_model_route_path_matches_route_id():
+    """模型路由接口应能精确提取模型 ID 和路由 ID。"""
+    match = _match_model_route_path("/api/models/1/routes/2")
+
+    assert match
+    assert match.group(1) == "1"
+    assert match.group(2) == "2"
+
+
+class DummyRequest:
+    def __init__(self, method, body):
+        self.method = method
+        self.content = json.dumps(body).encode("utf-8")
+        self.headers = {}
+
+
+class DummyFlow:
+    def __init__(self, method, body):
+        self.request = DummyRequest(method, body)
+        self.response = None
+
+
+class DummyModelStorage:
+    def __init__(self):
+        self.updated = None
+
+    def get_model_config_by_id(self, config_id):
+        return {
+            "id": config_id,
+            "model_key": "claude-opus",
+            "upstream_id": None,
+            "target_base_url": "",
+            "api_key": "",
+            "forward_model": "",
+            "is_active": True,
+            "is_default": False,
+            "use_multi_upstream": True,
+        }
+
+    def update_model_config_with_routes(self, **kwargs):
+        self.updated = kwargs
+        return True
+
+
+def test_update_model_config_saves_routes_in_backend_service():
+    """保存多上游模型时，后端一次性接收并替换 routes。"""
+    body = {
+        "model_key": "claude-opus",
+        "use_multi_upstream": True,
+        "is_active": True,
+        "is_default": False,
+        "routes": [
+            {"upstream_id": 1, "forward_model": "deepseek-v4-pro", "sort_order": 0},
+            {"upstream_id": 2, "forward_model": "kimi-for-coding", "sort_order": 1},
+        ],
+    }
+    flow = DummyFlow("PUT", body)
+    storage = DummyModelStorage()
+
+    handled = handle_console_api(flow, storage, "/api/models/1")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.updated["config_id"] == 1
+    assert storage.updated["use_multi_upstream"] is True
+    assert storage.updated["routes"] == body["routes"]
