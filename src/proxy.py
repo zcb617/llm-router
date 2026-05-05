@@ -9,6 +9,7 @@ import json
 import asyncio
 import uuid
 import threading
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -81,6 +82,7 @@ class LLMRouterAddon:
         self._capturer = None
         self._storage = None
         self._pending_requests = {}  # flow_id -> CapturedRequest
+        self._pending_requests_lock = threading.Lock()
 
         # 健康检查定时器
         self._health_check_timer = None
@@ -205,7 +207,7 @@ class LLMRouterAddon:
         # 启动健康检查定时器
         self._start_health_check_timer()
     
-    def request(self, flow: http.HTTPFlow):
+    async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
         from urllib.parse import urlparse
 
@@ -246,6 +248,7 @@ class LLMRouterAddon:
 
         # 捕获请求数据
         captured_req = self.capturer.capture_request(flow)
+        flow.metadata["request_body_for_stream"] = captured_req.body
 
         # 解析路径
         parsed = urlparse(captured_req.url)
@@ -284,7 +287,18 @@ class LLMRouterAddon:
 
         # 多上游模式：带重试和故障转移的转发
         if mapping.get("multi_upstream"):
-            self._forward_multi_upstream(flow, mapping["routes"], captured_req, model_name, path)
+            if self._is_stream_request(captured_req.body):
+                self._route_multi_upstream_streaming(flow, mapping["routes"], captured_req, model_name, path)
+                return
+
+            await asyncio.to_thread(
+                self._forward_multi_upstream,
+                flow,
+                mapping["routes"],
+                captured_req,
+                model_name,
+                path
+            )
             return
 
         # === 单上游模式（原有逻辑） ===
@@ -329,7 +343,7 @@ class LLMRouterAddon:
         captured_req.call_id = str(uuid.uuid4())
 
         # 存储捕获的请求，等待响应处理
-        self._pending_requests[id(flow)] = captured_req
+        self._store_pending_request(flow, captured_req)
 
     def _inject_claude_headers(self, flow: http.HTTPFlow):
         """注入 Claude Code 特征 headers，让上游 LLM 认为请求来自 Claude Code 客户端
@@ -380,6 +394,28 @@ class LLMRouterAddon:
         flow.request.headers["X-Stainless-Package-Version"] = "5.12.2"
         flow.request.headers["X-Stainless-Runtime-Version"] = "v22.22.1"
 
+    def _route_multi_upstream_streaming(self, flow, routes, captured_req, model_name, path):
+        """多上游流式转发：选择一个可用上游后交给 mitmproxy 原生流式代理。"""
+        candidate_routes = self._get_candidate_routes(routes, model_name)
+        if not candidate_routes:
+            last_error = "no upstream routes configured"
+            logger.error(f"All upstreams failed for model {model_name}: {last_error}")
+            flow.response = http.Response.make(
+                502,
+                json.dumps({"error": f"All upstreams unavailable: {last_error}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"}
+            )
+            flow.metadata["local_response"] = True
+            return
+
+        route = candidate_routes[0]
+        self._apply_multi_upstream_route(flow, route, captured_req, model_name, path)
+        flow.metadata["multi_upstream_native"] = True
+        logger.info(
+            f"Multi-upstream streaming selected upstream {route['upstream_id']}: "
+            f"{route['target_base_url']} for model {model_name}"
+        )
+
     def _forward_multi_upstream(self, flow, routes, captured_req, model_name, path):
         """多上游转发：按 sort_order 依次尝试，跳过 unhealthy 上游"""
         if not routes:
@@ -393,15 +429,7 @@ class LLMRouterAddon:
             flow.metadata["local_response"] = True
             return
 
-        healthy_routes = [r for r in routes if r.get("health_status", "healthy") != "unhealthy"]
-        if healthy_routes:
-            candidate_routes = healthy_routes
-            skipped_count = len(routes) - len(healthy_routes)
-            if skipped_count:
-                logger.info(f"Skipping {skipped_count} unhealthy upstream(s) for model {model_name}")
-        else:
-            candidate_routes = routes
-            logger.warning(f"All upstreams are marked unhealthy for model {model_name}; retrying them anyway")
+        candidate_routes = self._get_candidate_routes(routes, model_name)
 
         last_error = None
 
@@ -452,7 +480,8 @@ class LLMRouterAddon:
                 opener = urllib.request.build_opener()
                 resp = opener.open(http_req, timeout=120)
 
-                resp_body = resp.read()
+                upstream_headers_time = time.time()
+                resp_body, first_body_time = self._read_response_body_with_timing(resp)
                 resp_headers = dict(resp.headers)
                 status_code = resp.code
 
@@ -473,8 +502,9 @@ class LLMRouterAddon:
                     captured_req.overridden_model = forward_model or model_name
                     captured_req.url = full_url
                     captured_req.call_id = str(uuid.uuid4())
-                    self._pending_requests[id(flow)] = captured_req
+                    self._store_pending_request(flow, captured_req)
                     flow.metadata["multi_upstream_id"] = upstream_id
+                    flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
                     return
                 else:
                     logger.warning(f"Upstream {upstream_id} returned {status_code}, trying next")
@@ -501,6 +531,71 @@ class LLMRouterAddon:
         )
         flow.metadata["local_response"] = True
 
+    @staticmethod
+    def _is_stream_request(body: str | None) -> bool:
+        """判断请求是否要求流式响应。"""
+        if not body:
+            return False
+        try:
+            data = json.loads(body)
+            return bool(data.get("stream"))
+        except (json.JSONDecodeError, AttributeError):
+            return False
+
+    def _get_candidate_routes(self, routes, model_name):
+        """按健康状态和排序返回本次可尝试的多上游路由。"""
+        ordered_routes = sorted(routes or [], key=lambda r: r.get("sort_order", 0))
+        healthy_routes = [r for r in ordered_routes if r.get("health_status", "healthy") != "unhealthy"]
+        if healthy_routes:
+            skipped_count = len(ordered_routes) - len(healthy_routes)
+            if skipped_count:
+                logger.info(f"Skipping {skipped_count} unhealthy upstream(s) for model {model_name}")
+            return healthy_routes
+
+        if ordered_routes:
+            logger.warning(f"All upstreams are marked unhealthy for model {model_name}; retrying them anyway")
+        return ordered_routes
+
+    def _apply_multi_upstream_route(self, flow, route, captured_req, model_name, path):
+        """把当前 flow 改写到选中的多上游路由。"""
+        upstream_id = route["upstream_id"]
+        target_url = route["target_base_url"]
+        api_key = route.get("api_key", "")
+        forward_model = route.get("forward_model", "")
+
+        req_body = captured_req.body
+        if forward_model:
+            req_body = self._replace_model_in_body(req_body, forward_model)
+
+        req_headers = self._build_upstream_headers(flow.request.headers, api_key)
+        if route.get("use_claude_features"):
+            for h, v in self._get_claude_headers(flow).items():
+                req_headers[h] = v
+        elif route.get("use_roo_features"):
+            for h, v in self._get_roo_headers(flow).items():
+                req_headers[h] = v
+            for h in ["X-Claude-Code-Session-Id", "anthropic-beta",
+                      "anthropic-dangerous-direct-browser-access",
+                      "anthropic-version", "x-app", "X-Stainless-Timeout"]:
+                req_headers.pop(h, None)
+
+        flow.request.headers.clear()
+        for h, v in req_headers.items():
+            flow.request.headers[h] = v
+        if req_body is not None:
+            flow.request.content = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
+
+        new_url = self.capturer.rewrite_url(flow, target_url, path)
+        logger.info(f"Multi-upstream rewritten URL: {new_url}")
+
+        captured_req.body = req_body
+        captured_req.original_model = model_name
+        captured_req.overridden_model = forward_model or model_name
+        captured_req.url = new_url
+        captured_req.call_id = str(uuid.uuid4())
+        self._store_pending_request(flow, captured_req)
+        flow.metadata["multi_upstream_id"] = upstream_id
+
     @classmethod
     def _build_upstream_headers(cls, headers, api_key: str = "") -> dict:
         """构造发往真实上游的请求头，避免透传反向代理和路由器认证头。"""
@@ -511,6 +606,41 @@ class LLMRouterAddon:
         if api_key:
             req_headers["Authorization"] = f"Bearer {api_key}"
         return req_headers
+
+    def _store_pending_request(self, flow, captured_req):
+        """记录等待响应阶段补全的请求数据。"""
+        with self._pending_requests_lock:
+            self._pending_requests[id(flow)] = captured_req
+
+    def _pop_pending_request(self, flow):
+        """取出等待响应阶段补全的请求数据。"""
+        with self._pending_requests_lock:
+            return self._pending_requests.pop(id(flow), None)
+
+    @staticmethod
+    def _read_response_body_with_timing(resp, chunk_size: int = 65536) -> tuple[bytes, float | None]:
+        """读取上游响应体，并记录第一次读到响应体数据的时间。"""
+        chunks = []
+        first_body_time = None
+        read_chunk = getattr(resp, "read1", resp.read)
+
+        while True:
+            chunk = read_chunk(chunk_size)
+            if not chunk:
+                break
+            if first_body_time is None:
+                first_body_time = time.time()
+            chunks.append(chunk)
+
+        return b"".join(chunks), first_body_time
+
+    def _capture_stream_chunk(self, flow, chunk: bytes):
+        """透传流式响应 chunk，并保留一份用于调用记录。"""
+        if chunk and flow.metadata.get("first_token_time") is None:
+            flow.metadata["first_token_time"] = time.time()
+        if chunk:
+            flow.metadata.setdefault("streamed_response_chunks", []).append(chunk)
+        return chunk
 
     @staticmethod
     def _join_api_path(target_base_url: str, endpoint_path: str) -> str:
@@ -865,14 +995,14 @@ class LLMRouterAddon:
 
     def responseheaders(self, flow: http.HTTPFlow):
         """响应头到达时触发（用于计算首字耗时）"""
-        import time
         # 记录响应头到达时间，跳过本地请求
         if not flow.metadata.get("local_response"):
             flow.metadata["headers_time"] = time.time()
+            if self._is_stream_request(flow.metadata.get("request_body_for_stream")):
+                flow.response.stream = lambda chunk: self._capture_stream_chunk(flow, chunk)
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
-        import time
         from src.tokenizer import calculate_tokens
 
         # 跳过本地响应的请求（探活、查询API等）
@@ -880,13 +1010,19 @@ class LLMRouterAddon:
             return
 
         # 获取之前捕获的请求
-        captured_req = self._pending_requests.pop(id(flow), None)
+        captured_req = self._pop_pending_request(flow)
         if captured_req is None:
             logger.warning("No captured request found for this response")
             return
 
+        streamed_chunks = flow.metadata.pop("streamed_response_chunks", None)
+        if streamed_chunks is not None and flow.response and flow.response.raw_content is None:
+            flow.response.raw_content = b"".join(streamed_chunks)
+
         # 捕获响应数据
         captured_resp = self.capturer.capture_response(flow, captured_req)
+
+        self._update_native_multi_upstream_health(flow, captured_resp.status_code)
 
         logger.info(
             f"Response captured: "
@@ -912,9 +1048,9 @@ class LLMRouterAddon:
         # 首字耗时 = 响应头到达时间 - 请求发送时间
         # 对于流式响应，响应头到达时首字节数据也基本到了
         first_token_ms = None
-        headers_time = flow.metadata.get("headers_time")
-        if headers_time and stream_type == "stream":
-            first_token_ms = int((headers_time - captured_req.start_time) * 1000)
+        first_token_time = flow.metadata.get("first_token_time") or flow.metadata.get("headers_time")
+        if first_token_time and stream_type == "stream":
+            first_token_ms = int((first_token_time - captured_req.start_time) * 1000)
 
         tokens_input, tokens_output, token_source = calculate_tokens(
             model=model,
@@ -988,6 +1124,30 @@ class LLMRouterAddon:
             logger.info("Call record saved to database")
         except Exception as e:
             logger.error(f"Failed to save call record: {e}", exc_info=True)
+
+    def error(self, flow: http.HTTPFlow):
+        """上游连接/传输错误时标记当前多上游路由失败。"""
+        if not flow.metadata.get("multi_upstream_native"):
+            return
+        upstream_id = flow.metadata.get("multi_upstream_id")
+        if upstream_id is None:
+            return
+        logger.warning(f"Multi-upstream native request failed for upstream {upstream_id}: {flow.error}")
+        self._pop_pending_request(flow)
+        self.storage.increment_upstream_failures(upstream_id)
+
+    def _update_native_multi_upstream_health(self, flow, status_code: int):
+        """根据原生转发结果更新多上游健康状态。"""
+        if not flow.metadata.get("multi_upstream_native"):
+            return
+        upstream_id = flow.metadata.get("multi_upstream_id")
+        if upstream_id is None:
+            return
+        if 200 <= status_code < 300:
+            self.storage.reset_upstream_health(upstream_id)
+        else:
+            logger.warning(f"Multi-upstream native upstream {upstream_id} returned {status_code}")
+            self.storage.increment_upstream_failures(upstream_id)
 
 
 # mitmdump加载时需要的addons变量
