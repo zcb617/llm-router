@@ -325,13 +325,17 @@ class LLMRouterAddon:
             captured_req.original_model = model_name
             captured_req.overridden_model = model_name
 
-        # 根据上游配置决定是否注入 Claude Code 特征 headers
+        # 根据上游配置决定是否注入客户端特征 headers；已由对应客户端发出的请求保持原样。
         if mapping.get("use_claude_features"):
-            logger.info(f"Injecting Claude Code headers (upstream: {target_base_url})")
-            self._inject_claude_headers(flow)
+            if self._apply_claude_feature_headers(flow.request.headers, flow):
+                logger.info(f"Injecting Claude Code headers (upstream: {target_base_url})")
+            else:
+                logger.info(f"Preserving incoming Claude Code headers (upstream: {target_base_url})")
         elif mapping.get("use_roo_features"):
-            logger.info(f"Injecting Roo Code headers (upstream: {target_base_url})")
-            self._inject_roo_headers(flow)
+            if self._apply_roo_feature_headers(flow.request.headers, flow):
+                logger.info(f"Injecting Roo Code headers (upstream: {target_base_url})")
+            else:
+                logger.info(f"Preserving incoming Roo Code headers (upstream: {target_base_url})")
 
         # 重写URL
         new_url = self.capturer.rewrite_url(flow, target_base_url, path)
@@ -345,32 +349,79 @@ class LLMRouterAddon:
         # 存储捕获的请求，等待响应处理
         self._store_pending_request(flow, captured_req)
 
+    @staticmethod
+    def _normalized_headers(headers) -> dict:
+        """把请求头转成小写 key，便于兼容 dict 和 mitmproxy Headers。"""
+        return {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+
+    @staticmethod
+    def _pop_header(headers, header_name: str):
+        """按大小写不敏感方式删除请求头。"""
+        target = header_name.lower()
+        for key in list(dict(headers or {}).keys()):
+            if str(key).lower() == target:
+                headers.pop(key, None)
+
+    @classmethod
+    def _has_claude_client_features(cls, headers) -> bool:
+        """判断入站请求是否已经带有 Claude Code 客户端特征。"""
+        normalized = cls._normalized_headers(headers)
+        user_agent = normalized.get("user-agent", "").lower()
+        anthropic_beta = normalized.get("anthropic-beta", "").lower()
+        return (
+            "claude-cli/" in user_agent
+            or "claude-code" in user_agent
+            or bool(normalized.get("x-claude-code-session-id"))
+            or "claude-code-" in anthropic_beta
+        )
+
+    @classmethod
+    def _has_roo_client_features(cls, headers) -> bool:
+        """判断入站请求是否已经带有 Roo Code 客户端特征。"""
+        normalized = cls._normalized_headers(headers)
+        user_agent = normalized.get("user-agent", "").lower()
+        title = normalized.get("x-title", "").strip().lower()
+        referer = (
+            normalized.get("http-referer", "")
+            or normalized.get("referer", "")
+        ).lower()
+        return (
+            "roocode/" in user_agent
+            or "roo code" in user_agent
+            or title == "roo code"
+            or "roo-cline" in referer
+            or "roo-code" in referer
+            or "roovetgit" in referer
+        )
+
+    def _apply_claude_feature_headers(self, headers, flow) -> bool:
+        """按需应用 Claude Code 特征 headers，返回是否发生注入。"""
+        if self._has_claude_client_features(headers):
+            return False
+        for h, v in self._get_claude_headers(flow).items():
+            headers[h] = v
+        return True
+
+    def _apply_roo_feature_headers(self, headers, flow) -> bool:
+        """按需应用 Roo Code 特征 headers，返回是否发生注入。"""
+        if self._has_roo_client_features(headers):
+            return False
+        for h in ["X-Claude-Code-Session-Id", "anthropic-beta",
+                  "anthropic-dangerous-direct-browser-access",
+                  "anthropic-version", "x-app", "X-Stainless-Timeout"]:
+            self._pop_header(headers, h)
+        for h, v in self._get_roo_headers(flow).items():
+            headers[h] = v
+        return True
+
     def _inject_claude_headers(self, flow: http.HTTPFlow):
         """注入 Claude Code 特征 headers，让上游 LLM 认为请求来自 Claude Code 客户端
 
         注意：只修改 flow.request.headers（转发给上游），不修改 captured_req.headers
         （数据库记录保持原始客户端信息，用于审计）。
         """
-        # 复用已有的 Session-Id 或生成新的
-        session_id = flow.metadata.get("claude_session_id")
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            flow.metadata["claude_session_id"] = session_id
-
-        flow.request.headers["User-Agent"] = "claude-cli/2.1.119 (external, cli)"
-        flow.request.headers["X-Claude-Code-Session-Id"] = session_id
-        flow.request.headers["X-Stainless-Arch"] = "x64"
-        flow.request.headers["X-Stainless-Lang"] = "js"
-        flow.request.headers["X-Stainless-OS"] = "Windows"
-        flow.request.headers["X-Stainless-Package-Version"] = "0.81.0"
-        flow.request.headers["X-Stainless-Retry-Count"] = "0"
-        flow.request.headers["X-Stainless-Runtime"] = "node"
-        flow.request.headers["X-Stainless-Runtime-Version"] = "v24.3.0"
-        flow.request.headers["X-Stainless-Timeout"] = "600"
-        flow.request.headers["anthropic-beta"] = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24"
-        flow.request.headers["anthropic-dangerous-direct-browser-access"] = "true"
-        flow.request.headers["anthropic-version"] = "2023-06-01"
-        flow.request.headers["x-app"] = "cli"
+        for h, v in self._get_claude_headers(flow).items():
+            flow.request.headers[h] = v
 
     def _inject_roo_headers(self, flow: http.HTTPFlow):
         """注入 Roo Code 特征 headers，让上游 LLM 认为请求来自 Roo Code 客户端
@@ -381,18 +432,11 @@ class LLMRouterAddon:
         for h in ["X-Claude-Code-Session-Id", "anthropic-beta",
                   "anthropic-dangerous-direct-browser-access",
                   "anthropic-version", "x-app", "X-Stainless-Timeout"]:
-            flow.request.headers.pop(h, None)
+            self._pop_header(flow.request.headers, h)
 
         # 设置 Roo Code 特征 headers
-        flow.request.headers["User-Agent"] = "RooCode/3.53.0"
-        flow.request.headers["HTTP-Referer"] = "https://github.com/RooVetGit/Roo-Cline"
-        flow.request.headers["X-Title"] = "Roo Code"
-        flow.request.headers["accept-language"] = "*"
-        flow.request.headers["sec-fetch-mode"] = "cors"
-
-        # 更新共有的 X-Stainless-* 版本号为 Roo Code 的
-        flow.request.headers["X-Stainless-Package-Version"] = "5.12.2"
-        flow.request.headers["X-Stainless-Runtime-Version"] = "v22.22.1"
+        for h, v in self._get_roo_headers(flow).items():
+            flow.request.headers[h] = v
 
     def _route_multi_upstream_streaming(self, flow, routes, captured_req, model_name, path):
         """多上游流式转发：选择一个可用上游后交给 mitmproxy 原生流式代理。"""
@@ -451,18 +495,11 @@ class LLMRouterAddon:
                 # 准备 headers。Host/Connection/Content-Length 等由 urllib 按真实上游 URL 生成。
                 req_headers = self._build_upstream_headers(flow.request.headers, api_key)
 
-                # 注入特征 headers
+                # 注入特征 headers；已由对应客户端发出的请求保持原样。
                 if route.get("use_claude_features"):
-                    for h, v in self._get_claude_headers(flow).items():
-                        req_headers[h] = v
+                    self._apply_claude_feature_headers(req_headers, flow)
                 elif route.get("use_roo_features"):
-                    for h, v in self._get_roo_headers(flow).items():
-                        req_headers[h] = v
-                    # 删除冲突的 Claude headers
-                    for h in ["X-Claude-Code-Session-Id", "anthropic-beta",
-                              "anthropic-dangerous-direct-browser-access",
-                              "anthropic-version", "x-app", "X-Stainless-Timeout"]:
-                        req_headers.pop(h, None)
+                    self._apply_roo_feature_headers(req_headers, flow)
 
                 # 构建完整 URL
                 full_url = target_url.rstrip("/") + path
@@ -569,15 +606,9 @@ class LLMRouterAddon:
 
         req_headers = self._build_upstream_headers(flow.request.headers, api_key)
         if route.get("use_claude_features"):
-            for h, v in self._get_claude_headers(flow).items():
-                req_headers[h] = v
+            self._apply_claude_feature_headers(req_headers, flow)
         elif route.get("use_roo_features"):
-            for h, v in self._get_roo_headers(flow).items():
-                req_headers[h] = v
-            for h in ["X-Claude-Code-Session-Id", "anthropic-beta",
-                      "anthropic-dangerous-direct-browser-access",
-                      "anthropic-version", "x-app", "X-Stainless-Timeout"]:
-                req_headers.pop(h, None)
+            self._apply_roo_feature_headers(req_headers, flow)
 
         flow.request.headers.clear()
         for h, v in req_headers.items():
@@ -694,7 +725,7 @@ class LLMRouterAddon:
         session_id = flow.metadata.get("claude_session_id") or str(uuid.uuid4())
         flow.metadata["claude_session_id"] = session_id
         return {
-            "User-Agent": "claude-cli/2.1.119 (external, cli)",
+            "User-Agent": "claude-cli/2.1.132 (external, cli)",
             "X-Claude-Code-Session-Id": session_id,
             "X-Stainless-Arch": "x64",
             "X-Stainless-Lang": "js",

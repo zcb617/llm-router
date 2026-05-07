@@ -22,6 +22,49 @@ from src.proxy import LLMRouterAddon
 from src.capture import CapturedRequest, DataCapturer
 
 
+def _make_addon_for_route_tests():
+    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon._capturer = DataCapturer()
+    addon._pending_requests = {}
+    addon._pending_requests_lock = threading.Lock()
+    return addon
+
+
+def _make_captured_request(flow):
+    return CapturedRequest(
+        timestamp="2026-05-06T00:00:00",
+        url=flow.request.url,
+        method=flow.request.method,
+        headers=dict(flow.request.headers),
+        body=flow.request.content.decode("utf-8"),
+        start_time=1.0,
+    )
+
+
+def _make_flow(headers=None):
+    class DummyRequest:
+        def __init__(self):
+            self.url = "http://router.test/v1/messages?beta=true"
+            self.method = "POST"
+            self.headers = {
+                "Host": "router.test",
+                "Authorization": "Bearer router-key",
+                "Content-Type": "application/json",
+            }
+            if headers:
+                self.headers.update(headers)
+            self.query = {"beta": "true"}
+            self.content = b'{"model": "claude-opus", "stream": true}'
+            self.scheme = "http"
+
+    class DummyFlow:
+        def __init__(self):
+            self.request = DummyRequest()
+            self.metadata = {}
+
+    return DummyFlow()
+
+
 def test_request_hook_is_async_without_concurrent_decorator():
     assert inspect.iscoroutinefunction(LLMRouterAddon.request)
 
@@ -47,37 +90,9 @@ def test_stream_request_detection():
 
 
 def test_apply_multi_upstream_route_rewrites_flow_for_native_proxy():
-    class DummyRequest:
-        def __init__(self):
-            self.url = "http://router.test/v1/messages?beta=true"
-            self.method = "POST"
-            self.headers = {
-                "Host": "router.test",
-                "Authorization": "Bearer router-key",
-                "Content-Type": "application/json",
-            }
-            self.query = {"beta": "true"}
-            self.content = b'{"model": "claude-opus", "stream": true}'
-            self.scheme = "http"
-
-    class DummyFlow:
-        def __init__(self):
-            self.request = DummyRequest()
-            self.metadata = {}
-
-    addon = LLMRouterAddon.__new__(LLMRouterAddon)
-    addon._capturer = DataCapturer()
-    addon._pending_requests = {}
-    addon._pending_requests_lock = threading.Lock()
-    flow = DummyFlow()
-    captured_req = CapturedRequest(
-        timestamp="2026-05-06T00:00:00",
-        url=flow.request.url,
-        method=flow.request.method,
-        headers=dict(flow.request.headers),
-        body=flow.request.content.decode("utf-8"),
-        start_time=1.0,
-    )
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow()
+    captured_req = _make_captured_request(flow)
 
     addon._apply_multi_upstream_route(
         flow,
@@ -99,6 +114,70 @@ def test_apply_multi_upstream_route_rewrites_flow_for_native_proxy():
     assert b"deepseek-v4-pro" in flow.request.content
     assert captured_req.overridden_model == "deepseek-v4-pro"
     assert flow.metadata["multi_upstream_id"] == 7
+
+
+def test_apply_multi_upstream_route_preserves_incoming_claude_code_headers():
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow({
+        "User-Agent": "claude-cli/2.2.0 (external, cli)",
+        "X-Claude-Code-Session-Id": "client-session",
+        "X-Stainless-Package-Version": "0.92.0",
+        "X-Stainless-Runtime-Version": "v24.9.0",
+        "anthropic-beta": "claude-code-20250219,new-client-beta-2026-05-01",
+    })
+    captured_req = _make_captured_request(flow)
+
+    addon._apply_multi_upstream_route(
+        flow,
+        {
+            "upstream_id": 7,
+            "target_base_url": "https://api.example.com/anthropic/",
+            "api_key": "sk-upstream",
+            "use_claude_features": True,
+            "sort_order": 0,
+        },
+        captured_req,
+        "claude-opus",
+        "/v1/messages",
+    )
+
+    assert flow.request.headers["Authorization"] == "Bearer sk-upstream"
+    assert flow.request.headers["User-Agent"] == "claude-cli/2.2.0 (external, cli)"
+    assert flow.request.headers["X-Claude-Code-Session-Id"] == "client-session"
+    assert flow.request.headers["X-Stainless-Package-Version"] == "0.92.0"
+    assert flow.request.headers["X-Stainless-Runtime-Version"] == "v24.9.0"
+    assert flow.request.headers["anthropic-beta"] == "claude-code-20250219,new-client-beta-2026-05-01"
+
+
+def test_apply_multi_upstream_route_injects_claude_headers_for_plain_client():
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow({"User-Agent": "curl/8.7.1"})
+    captured_req = _make_captured_request(flow)
+
+    addon._apply_multi_upstream_route(
+        flow,
+        {
+            "upstream_id": 7,
+            "target_base_url": "https://api.example.com/anthropic/",
+            "api_key": "sk-upstream",
+            "use_claude_features": True,
+            "sort_order": 0,
+        },
+        captured_req,
+        "claude-opus",
+        "/v1/messages",
+    )
+
+    assert flow.request.headers["User-Agent"] == "claude-cli/2.1.132 (external, cli)"
+    assert flow.request.headers["X-Stainless-Package-Version"] == "0.81.0"
+    assert flow.request.headers["X-Claude-Code-Session-Id"]
+
+
+def test_feature_detection_identifies_roo_client_headers():
+    assert LLMRouterAddon._has_roo_client_features({
+        "User-Agent": "RooCode/3.60.0",
+        "X-Title": "Roo Code",
+    })
 
 
 def test_responseheaders_streams_and_captures_chunks():
