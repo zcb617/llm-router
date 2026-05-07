@@ -39,14 +39,22 @@
     .json-body { font-family: 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
     .truncate-cell { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .truncate-cell-long { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-nav-link { color: #71717a; padding: 4px 8px; border-radius: 6px; transition: background-color .15s, color .15s; }
+    .top-nav-link:hover { color: #18181b; background: #f4f4f5; }
+    .dark .top-nav-link:hover { color: #f4f4f5; background: #27272a; }
+    .top-nav-link.active { color: #18181b; background: #f4f4f5; }
+    .dark .top-nav-link.active { color: #f4f4f5; background: #27272a; }
   </style>
 </head>
 <body class="h-full flex flex-col">
   <!-- Top Header -->
   <header class="bg-white dark:bg-zinc-900 border-b border-zinc-300 dark:border-zinc-700 px-4 py-3 flex items-center justify-between flex-shrink-0">
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-5">
       <h1 class="text-lg font-bold">LLM Router</h1>
-      <span class="text-sm text-zinc-500">控制台</span>
+      <nav class="flex items-center gap-1 text-sm">
+        <a href="/web/console.html" class="top-nav-link active">控制台</a>
+        <a href="/web/model-square.html" class="top-nav-link">模型广场</a>
+      </nav>
     </div>
     <div class="flex items-center gap-3">
       <span id="userEmail" class="text-sm text-zinc-500"></span>

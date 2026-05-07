@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Router - 模型广场</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            border: 'hsl(var(--border))',
+            background: 'hsl(var(--background))',
+            foreground: 'hsl(var(--foreground))',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    :root {
+      --background: 0 0% 100%;
+      --foreground: 222.2 84% 4.9%;
+      --border: 214.3 31.8% 91.4%;
+    }
+    .dark {
+      --background: 222.2 84% 4.9%;
+      --foreground: 210 40% 98%;
+      --border: 217.2 32.6% 17.5%;
+    }
+    body { background: hsl(var(--background)); color: hsl(var(--foreground)); }
+    html, body { height: 100%; }
+    .top-nav-link { color: #71717a; padding: 4px 8px; border-radius: 6px; transition: background-color .15s, color .15s; }
+    .top-nav-link:hover { color: #18181b; background: #f4f4f5; }
+    .dark .top-nav-link:hover { color: #f4f4f5; background: #27272a; }
+    .top-nav-link.active { color: #18181b; background: #f4f4f5; }
+    .dark .top-nav-link.active { color: #f4f4f5; background: #27272a; }
+    .model-card { border-radius: 8px; }
+    .value-chip {
+      display: inline-flex;
+      max-width: 100%;
+      align-items: center;
+      border: 1px solid rgba(113, 113, 122, 0.35);
+      background: rgba(39, 39, 42, 0.62);
+      color: #f4f4f5;
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .field-label {
+      display: block;
+      margin-bottom: 7px;
+      color: #71717a;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .copy-menu {
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(8px) scale(0.98);
+      transform-origin: bottom right;
+      transition: opacity .14s ease, visibility .14s ease, transform .14s ease;
+    }
+    .copy-menu-wrap:hover .copy-menu,
+    .copy-menu-wrap:focus-within .copy-menu {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0) scale(1);
+    }
+  </style>
+</head>
+<body class="h-full flex flex-col">
+  <header class="bg-white dark:bg-zinc-900 border-b border-zinc-300 dark:border-zinc-700 px-4 py-3 flex items-center justify-between flex-shrink-0">
+    <div class="flex items-center gap-5">
+      <h1 class="text-lg font-bold">LLM Router</h1>
+      <nav class="flex items-center gap-1 text-sm">
+        <a href="/web/console.html" class="top-nav-link">控制台</a>
+        <a href="/web/model-square.html" class="top-nav-link active">模型广场</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="userEmail" class="text-sm text-zinc-500"></span>
+      <button id="logoutBtn" class="px-3 py-1 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">
+        退出登录
+      </button>
+    </div>
+  </header>
+
+  <main class="flex-1 overflow-auto p-6">
+    <div class="max-w-7xl mx-auto space-y-5">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 class="text-xl font-bold">模型广场</h2>
+          <p id="modelSummary" class="text-sm text-zinc-500 mt-1">启用模型 0 个</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <input id="modelSearch" type="text" placeholder="搜索模型名称..."
+            class="w-64 max-w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none text-sm">
+          <select id="tagFilter" class="px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none text-sm">
+            <option value="">全部</option>
+            <option value="openai">openai</option>
+            <option value="anthropic">anthropic</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="loadState" class="hidden rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-4 py-3 text-sm text-zinc-500"></div>
+      <div id="modelGrid" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"></div>
+      <div id="emptyState" class="hidden rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 py-14 text-center text-zinc-500">
+        暂无启用模型
+      </div>
+    </div>
+  </main>
+
+<script>
+const token = localStorage.getItem('llm_token');
+if (!token) {
+  window.location.href = '/web/login.html';
+}
+
+const state = {
+  models: [],
+  search: '',
+  tag: '',
+};
+
+function getAuthHeaders() {
+  return { 'Authorization': 'Bearer ' + token };
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getModelTag(model) {
+  return model.use_claude_features ? 'anthropic' : 'openai';
+}
+
+function getProxyUrl(model) {
+  return getModelTag(model) === 'anthropic' ? window.location.origin : `${window.location.origin}/v1`;
+}
+
+function getTagLabel(tag) {
+  return tag === 'anthropic' ? 'Anthropic' : 'openai';
+}
+
+function getTagClass(tag) {
+  return tag === 'anthropic'
+    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/20'
+    : 'bg-sky-500/15 text-sky-300 border border-sky-500/20';
+}
+
+function badge(text, className) {
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${className}">${escapeHtml(text)}</span>`;
+}
+
+function renderValueChip(label, value) {
+  return `
+    <div>
+      <span class="field-label">${escapeHtml(label)}</span>
+      <code class="value-chip">${escapeHtml(value)}</code>
+    </div>
+  `;
+}
+
+function renderCopyMenu(modelName, proxyUrl) {
+  return `
+    <div class="copy-menu-wrap relative">
+      <button type="button" class="px-3 py-1.5 text-sm rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800 hover:border-zinc-600 transition">
+        复制
+      </button>
+      <div class="copy-menu absolute right-0 bottom-full z-20 mb-2 w-36 rounded-lg border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/30 overflow-hidden">
+        <button type="button" class="copy-btn flex w-full items-center justify-between px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 transition" data-copy-value="${escapeHtml(proxyUrl)}">
+          <span class="pointer-events-none">链接</span>
+          <span class="pointer-events-none text-xs text-zinc-500">URL</span>
+        </button>
+        <button type="button" class="copy-btn flex w-full items-center justify-between px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 transition" data-copy-value="${escapeHtml(modelName)}">
+          <span class="pointer-events-none">模型</span>
+          <span class="pointer-events-none text-xs text-zinc-500">model</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderCard(model) {
+  const tag = getModelTag(model);
+  const proxyUrl = getProxyUrl(model);
+  const tagBadge = badge(getTagLabel(tag), getTagClass(tag));
+
+  return `
+    <article class="model-card border border-zinc-800 bg-zinc-900/70 p-5 flex flex-col gap-5 min-h-[210px] shadow-sm">
+      <div class="flex-1 space-y-4">
+        ${renderValueChip('模型名称', model.model_key)}
+        ${renderValueChip('代理 URL', proxyUrl)}
+      </div>
+      <div class="flex items-center justify-between gap-3 border-t border-zinc-800 pt-4">
+        <div>${tagBadge}</div>
+        ${renderCopyMenu(model.model_key, proxyUrl)}
+      </div>
+    </article>
+  `;
+}
+
+function modelMatches(model) {
+  const search = state.search.trim().toLowerCase();
+  const tag = getModelTag(model);
+  if (state.tag && state.tag !== tag) return false;
+  if (!search) return true;
+  return (model.model_key || '').toLowerCase().includes(search);
+}
+
+function bindCopyButtons() {
+  function resetCopyButton(btn) {
+    if (btn.dataset.originalHtml) {
+      btn.innerHTML = btn.dataset.originalHtml;
+    }
+  }
+
+  async function copyValue(value) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+
+  document.querySelectorAll('.copy-menu-wrap').forEach(menu => {
+    menu.addEventListener('mouseenter', () => {
+      menu.querySelectorAll('.copy-btn').forEach(resetCopyButton);
+    });
+    menu.addEventListener('focusin', () => {
+      menu.querySelectorAll('.copy-btn').forEach(resetCopyButton);
+    });
+    menu.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.copy-btn');
+      if (!btn || !menu.contains(btn)) return;
+      try {
+        await copyValue(btn.dataset.copyValue || '');
+        btn.textContent = '已复制';
+        setTimeout(() => { resetCopyButton(btn); }, 1200);
+      } catch (err) {
+        alert('复制失败: ' + err.message);
+      }
+    });
+  });
+
+  document.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.dataset.originalHtml = btn.innerHTML;
+  });
+}
+
+function renderModels() {
+  const grid = document.getElementById('modelGrid');
+  const empty = document.getElementById('emptyState');
+  const summary = document.getElementById('modelSummary');
+  const filtered = state.models.filter(modelMatches);
+
+  summary.textContent = `启用模型 ${state.models.length} 个`;
+  grid.innerHTML = filtered.map(renderCard).join('');
+  bindCopyButtons();
+
+  if (filtered.length === 0) {
+    empty.textContent = state.models.length === 0 ? '暂无启用模型' : '没有匹配的启用模型';
+    empty.classList.remove('hidden');
+  } else {
+    empty.classList.add('hidden');
+  }
+}
+
+async function loadUser() {
+  try {
+    const res = await fetch('/api/auth/me', { headers: getAuthHeaders() });
+    if (res.status === 401) {
+      window.location.href = '/web/login.html';
+      return false;
+    }
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('userEmail').textContent = data.email || localStorage.getItem('llm_email') || '';
+    }
+  } catch (e) {
+    document.getElementById('userEmail').textContent = localStorage.getItem('llm_email') || '';
+  }
+  return true;
+}
+
+async function loadModels() {
+  const loadState = document.getElementById('loadState');
+  loadState.textContent = '加载中...';
+  loadState.classList.remove('hidden');
+  try {
+    const res = await fetch('/api/models/available', { headers: getAuthHeaders() });
+    if (res.status === 401) {
+      window.location.href = '/web/login.html';
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || '加载失败');
+    }
+    state.models = data.models || [];
+    loadState.classList.add('hidden');
+    renderModels();
+  } catch (e) {
+    loadState.textContent = '加载失败: ' + e.message;
+  }
+}
+
+document.getElementById('modelSearch').addEventListener('input', (e) => {
+  state.search = e.target.value;
+  renderModels();
+});
+
+document.getElementById('tagFilter').addEventListener('change', (e) => {
+  state.tag = e.target.value;
+  renderModels();
+});
+
+document.getElementById('logoutBtn').addEventListener('click', () => {
+  localStorage.removeItem('llm_token');
+  localStorage.removeItem('llm_email');
+  localStorage.removeItem('llm_user_id');
+  window.location.href = '/web/login.html';
+});
+
+async function init() {
+  const authed = await loadUser();
+  if (authed !== false) {
+    loadModels();
+  }
+}
+
+init();
+</script>
+</body>
+</html>

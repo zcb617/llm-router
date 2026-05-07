@@ -859,6 +859,15 @@ class LLMRouterAddon:
                     flow.response = http.Response.make(404, b"Console page not found", {"Content-Type": "text/plain"})
                 return
 
+            if path == "/web/model-square.html":
+                model_square_path = Path(__file__).parent.parent / "web" / "model-square.html"
+                if model_square_path.exists():
+                    content = model_square_path.read_bytes()
+                    flow.response = http.Response.make(200, content, {"Content-Type": "text/html; charset=utf-8"})
+                else:
+                    flow.response = http.Response.make(404, b"Model square page not found", {"Content-Type": "text/plain"})
+                return
+
             # 根据配置连接数据库（同步）
             if self.config.database.postgresql:
                 import psycopg2

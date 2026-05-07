@@ -121,3 +121,80 @@ def test_update_model_config_saves_routes_in_backend_service():
     assert storage.updated["config_id"] == 1
     assert storage.updated["use_multi_upstream"] is True
     assert storage.updated["routes"] == body["routes"]
+
+
+class DummyAvailableModelStorage:
+    def get_all_model_configs(self):
+        return [
+            {
+                "id": 1,
+                "model_key": "claude-sonnet",
+                "upstream_id": 7,
+                "upstream_name": "anthropic",
+                "target_base_url": "https://api.anthropic.com",
+                "api_key": "sk-should-not-leak",
+                "forward_model": "claude-3-5-sonnet",
+                "is_active": True,
+                "is_default": True,
+                "use_multi_upstream": False,
+                "use_claude_features": True,
+                "use_roo_features": False,
+            },
+            {
+                "id": 2,
+                "model_key": "disabled-model",
+                "is_active": False,
+                "use_multi_upstream": False,
+                "api_key": "sk-disabled",
+            },
+            {
+                "id": 3,
+                "model_key": "coding-router",
+                "is_active": 1,
+                "is_default": 0,
+                "use_multi_upstream": 1,
+                "api_key": "sk-multi",
+            },
+        ]
+
+    def get_model_routes(self, config_id):
+        assert config_id == 3
+        return [
+            {
+                "id": 11,
+                "upstream_id": 8,
+                "upstream_name": "deepseek",
+                "target_base_url": "https://api.deepseek.com",
+                "api_key": "sk-route-should-not-leak",
+                "forward_model": "deepseek-coder",
+                "sort_order": 0,
+                "is_active": 1,
+                "health_status": "healthy",
+                "use_claude_features": 0,
+                "use_roo_features": 1,
+            },
+            {
+                "id": 12,
+                "upstream_id": 9,
+                "upstream_name": "disabled-route",
+                "api_key": "sk-disabled-route",
+                "is_active": 0,
+            },
+        ]
+
+
+def test_available_models_returns_enabled_models_without_api_keys():
+    """模型广场接口只返回启用模型，并且不暴露 API Key。"""
+    flow = DummyFlow("GET", {})
+    handled = handle_console_api(flow, DummyAvailableModelStorage(), "/api/models/available")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+    assert payload["total"] == 2
+    assert [model["model_key"] for model in payload["models"]] == ["claude-sonnet", "coding-router"]
+    assert payload["models"][1]["routes"][0]["upstream_name"] == "deepseek"
+    assert payload["models"][1]["routes"][0]["use_roo_features"] is True
+    assert "api_key" not in json.dumps(payload, ensure_ascii=False)
+    assert "sk-" not in json.dumps(payload, ensure_ascii=False)

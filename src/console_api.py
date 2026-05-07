@@ -32,6 +32,59 @@ def _json_response(flow, status: int, data: dict):
     )
 
 
+def _is_enabled(value) -> bool:
+    """兼容 SQLite/PostgreSQL 返回的布尔值。"""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "t", "yes", "on")
+    return bool(value)
+
+
+def _sanitize_available_route(route: dict) -> dict:
+    """模型广场路由数据，不返回 API Key。"""
+    return {
+        "id": route.get("id"),
+        "upstream_id": route.get("upstream_id"),
+        "upstream_name": route.get("upstream_name") or "",
+        "target_base_url": route.get("target_base_url") or "",
+        "forward_model": route.get("forward_model") or "",
+        "sort_order": route.get("sort_order") or 0,
+        "is_active": _is_enabled(route.get("is_active", True)),
+        "health_status": route.get("health_status") or "healthy",
+        "use_claude_features": _is_enabled(route.get("use_claude_features", False)),
+        "use_roo_features": _is_enabled(route.get("use_roo_features", False)),
+    }
+
+
+def _build_available_model(config: dict, routes: Optional[list] = None) -> dict:
+    """模型广场模型数据，来源于模型配置中的启用项。"""
+    active_routes = [
+        _sanitize_available_route(route)
+        for route in (routes or [])
+        if _is_enabled(route.get("is_active", True))
+    ]
+    use_multi_upstream = _is_enabled(config.get("use_multi_upstream", False))
+    route_has_claude = any(route["use_claude_features"] for route in active_routes)
+    route_has_roo = any(route["use_roo_features"] for route in active_routes)
+
+    return {
+        "id": config.get("id"),
+        "model_key": config.get("model_key") or "",
+        "forward_model": config.get("forward_model") or "",
+        "upstream_id": config.get("upstream_id"),
+        "upstream_name": config.get("upstream_name") or "",
+        "target_base_url": config.get("target_base_url") or "",
+        "is_default": _is_enabled(config.get("is_default", False)),
+        "is_active": True,
+        "use_multi_upstream": use_multi_upstream,
+        "route_count": len(active_routes),
+        "routes": active_routes if use_multi_upstream else [],
+        "use_claude_features": _is_enabled(config.get("use_claude_features", False)) or route_has_claude,
+        "use_roo_features": _is_enabled(config.get("use_roo_features", False)) or route_has_roo,
+        "created_at": config.get("created_at"),
+        "updated_at": config.get("updated_at"),
+    }
+
+
 def _extract_body(flow) -> Optional[dict]:
     """解析请求体为 JSON"""
     if not flow.request.content:
@@ -422,6 +475,19 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
     if path == "/api/models" and flow.request.method == "GET":
         configs = storage.get_all_model_configs()
         _json_response(flow, 200, {"configs": configs})
+        return True
+
+    # GET /api/models/available - 获取模型广场可用模型（仅启用项，不返回 API Key）
+    if path == "/api/models/available" and flow.request.method == "GET":
+        configs = [
+            config for config in storage.get_all_model_configs()
+            if _is_enabled(config.get("is_active"))
+        ]
+        models = []
+        for config in configs:
+            routes = storage.get_model_routes(config["id"]) if _is_enabled(config.get("use_multi_upstream", False)) else []
+            models.append(_build_available_model(config, routes))
+        _json_response(flow, 200, {"models": models, "total": len(models)})
         return True
 
     # POST /api/models - 创建模型配置
