@@ -866,6 +866,14 @@ class LLMRouterAddon:
                         "role": "assistant",
                         "content": "\n".join(texts)
                     })
+            elif item.get("type") == "function_call":
+                messages.append({
+                    "role": "assistant",
+                    "type": "function_call",
+                    "call_id": item.get("call_id", item.get("id", "")),
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments", ""),
+                })
 
         return messages
 

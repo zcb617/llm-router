@@ -489,3 +489,67 @@ class TestConvertRequestMessages:
         result = convert_request(req)
         assert result["messages"][0] == {"role": "system", "content": "Sys"}
         assert result["messages"][1] == {"role": "user", "content": "User"}
+
+    def test_function_call_message_conversion(self):
+        """function_call item in input becomes assistant with tool_calls."""
+        req = {
+            "model": "kimi-k2.6",
+            "input": [
+                {"type": "function_call", "call_id": "shell_command:2", "name": "run_shell", "arguments": '{"cmd": "ls"}'},
+                {"type": "function_call_output", "call_id": "shell_command:2", "output": "file.txt"},
+            ],
+        }
+        result = convert_request(req)
+        assert result["messages"][0]["role"] == "assistant"
+        assert result["messages"][0]["content"] is None
+        assert result["messages"][0]["reasoning_content"] == ""
+        assert result["messages"][0]["tool_calls"][0]["id"] == "shell_command:2"
+        assert result["messages"][0]["tool_calls"][0]["function"]["name"] == "run_shell"
+        assert result["messages"][1]["role"] == "tool"
+        assert result["messages"][1]["tool_call_id"] == "shell_command:2"
+        assert result["messages"][1]["content"] == "file.txt"
+
+
+class TestResolveHistory:
+    """Test proxy._resolve_history preserves function_call output items."""
+
+    def test_resolve_history_preserves_function_call(self):
+        """_resolve_history must include function_call items from response output."""
+        import sys
+        from unittest.mock import MagicMock
+
+        # Mock mitmproxy module to avoid import error in test environment
+        mock_mitmproxy = MagicMock()
+        sys.modules["mitmproxy"] = mock_mitmproxy
+        sys.modules["mitmproxy.addonmanager"] = mock_mitmproxy.addonmanager
+        try:
+            from src.proxy import LLMRouterAddon
+
+            class MockStorage:
+                def get_call_history(self, call_id, api_key_id):
+                    return {
+                        "request_body": json.dumps({
+                            "input": [{"role": "user", "content": "Run a command"}]
+                        }),
+                        "response_body": json.dumps({
+                            "output": [
+                                {"type": "message", "content": [{"type": "output_text", "text": "OK"}]},
+                                {"type": "function_call", "call_id": "call_123", "name": "run_shell", "arguments": '{"cmd": "ls"}'},
+                            ]
+                        }),
+                    }
+
+            addon = LLMRouterAddon()
+            addon._storage = MockStorage()
+            messages = addon._resolve_history("prev-id", 1)
+
+            # Should have user message + assistant text + function_call
+            assert len(messages) == 3
+            assert messages[0] == {"role": "user", "content": "Run a command"}
+            assert messages[1] == {"role": "assistant", "content": "OK"}
+            assert messages[2]["type"] == "function_call"
+            assert messages[2]["call_id"] == "call_123"
+            assert messages[2]["name"] == "run_shell"
+        finally:
+            del sys.modules["mitmproxy"]
+            del sys.modules["mitmproxy.addonmanager"]
