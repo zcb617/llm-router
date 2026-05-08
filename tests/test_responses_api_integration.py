@@ -219,6 +219,95 @@ class TestStreamConverter:
         seqs = [json.loads(r)["sequence_number"] for r in results]
         assert seqs == [3, 4]
 
+    def test_tool_call_streaming(self):
+        """Tool call deltas converted to proper Responses API events."""
+        converter = StreamConverter("resp-tool", "kimi-k2.6")
+        # First tool call chunk: id + name
+        event1 = json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_abc", "function": {"name": "get_weather", "arguments": ""}}
+        ]}}]})
+        # Second chunk: arguments delta
+        event2 = json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"city": "'}}
+        ]}}]})
+        # Third chunk: more arguments
+        event3 = json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": 'Beijing"}'}}
+        ]}}]})
+
+        results1 = converter.process_event(event1)
+        assert len(results1) == 2
+        added = json.loads(results1[0])
+        assert added["type"] == "response.output_item.added"
+        assert added["output_index"] == 1
+        assert added["item"]["type"] == "function_call"
+        assert added["item"]["call_id"] == "call_abc"
+        assert added["item"]["name"] == "get_weather"
+
+        delta1 = json.loads(results1[1])
+        assert delta1["type"] == "response.function_call_arguments.delta"
+        assert delta1["output_index"] == 1
+        assert delta1["call_id"] == "call_abc"
+        assert delta1["delta"] == ""
+
+        results2 = converter.process_event(event2)
+        assert len(results2) == 1
+        delta2 = json.loads(results2[0])
+        assert delta2["type"] == "response.function_call_arguments.delta"
+        assert delta2["delta"] == '{"city": "'
+
+        results3 = converter.process_event(event3)
+        assert len(results3) == 1
+        delta3 = json.loads(results3[0])
+        assert delta3["delta"] == 'Beijing"}'
+
+    def test_content_to_tool_call_transition(self):
+        """When tool_calls arrive after content, content is properly closed."""
+        converter = StreamConverter("resp-trans", "kimi-k2.6")
+        # Content first
+        converter.process_event(json.dumps({"choices": [{"delta": {"content": "Hello"}}]}))
+        # Then tool call
+        event = json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_x", "function": {"name": "foo", "arguments": "{}"}}
+        ]}}]})
+        results = converter.process_event(event)
+        types = [json.loads(r)["type"] for r in results]
+        assert types == [
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+        ]
+
+    def test_tool_call_completion(self):
+        """[DONE] after tool calls emits proper done events."""
+        converter = StreamConverter("resp-done", "kimi-k2.6")
+        converter.process_event(json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_end", "function": {"name": "bar", "arguments": "{}"}}
+        ]}}]}))
+        results = converter.process_event("[DONE]")
+        types = [json.loads(r)["type"] for r in results]
+        assert "response.function_call_arguments.done" in types
+        assert "response.output_item.done" in types
+        assert "response.completed" in types
+        # Verify response.completed contains function_call in output
+        completed = json.loads(results[-1])
+        output = completed["response"]["output"]
+        assert any(item["type"] == "function_call" for item in output)
+
+    def test_multiple_tool_calls(self):
+        """Multiple tool calls get distinct output_indices."""
+        converter = StreamConverter("resp-multi", "kimi-k2.6")
+        event = json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_0", "function": {"name": "a", "arguments": "{}"}},
+            {"index": 1, "id": "call_1", "function": {"name": "b", "arguments": "{}"}},
+        ]}}]})
+        results = converter.process_event(event)
+        added_events = [json.loads(r) for r in results if json.loads(r)["type"] == "response.output_item.added"]
+        assert len(added_events) == 2
+        assert added_events[0]["output_index"] == 1
+        assert added_events[1]["output_index"] == 2
+
 
 class TestSSEParser:
     """Test SSE buffer parsing."""

@@ -61,8 +61,8 @@ def _convert_message(msg: dict) -> dict:
     result["role"] = role
     # Convert content
     result["content"] = _convert_content(msg.get("content"))
-    # Preserve other known fields
-    for key in ("name", "tool_calls"):
+    # Preserve other known fields (tool_call_id is required for role="tool")
+    for key in ("name", "tool_calls", "tool_call_id"):
         if key in msg:
             result[key] = msg[key]
     return result
@@ -77,7 +77,16 @@ def convert_request(responses_req: dict) -> dict:
     if isinstance(input_data, str):
         chat_req["messages"] = [{"role": "user", "content": input_data}]
     elif isinstance(input_data, list):
-        chat_req["messages"] = [_convert_message(m) for m in input_data]
+        converted_msgs = []
+        for m in input_data:
+            cm = _convert_message(m)
+            role = cm.get("role", "")
+            content = cm.get("content")
+            # 防御性过滤：跳过 content 为空的 user/system 消息（避免上游 400）
+            if role in ("user", "system") and (content is None or content == "" or content == []):
+                continue
+            converted_msgs.append(cm)
+        chat_req["messages"] = converted_msgs
 
     # Handle instructions -> system message
     instructions = responses_req.get("instructions")

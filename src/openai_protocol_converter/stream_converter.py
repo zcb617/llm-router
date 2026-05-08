@@ -47,7 +47,11 @@ class StreamConverter:
         self._text_content = ""
         self._tool_calls: dict[int, dict] = {}
         self._emitted_tool_ids: set[int] = set()
+        self._emitted_tool_call_items: set[int] = set()
+        self._tool_call_output_indices: dict[int, int] = {}
+        self._next_output_index = 1  # 0 is reserved for the message item
         self._completed = False
+        self._message_done = False
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -177,9 +181,27 @@ class StreamConverter:
             }, separators=(",", ":")))
 
         if tool_calls:
-            tc_event = self._process_tool_call_delta(tool_calls)
-            if tc_event:
-                events.append(tc_event)
+            # Transition from content to tool_calls: close content first
+            if self._text_content and not self._message_done:
+                events.append(json.dumps({
+                    "type": "response.output_text.done",
+                    "item_id": self.item_id,
+                    "output_index": 0,
+                    "content_index": 1,
+                    "text": self._text_content,
+                    "logprobs": [],
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
+                events.append(json.dumps({
+                    "type": "response.content_part.done",
+                    "item_id": self.item_id,
+                    "output_index": 0,
+                    "content_index": 1,
+                    "part": {"type": "output_text", "text": self._text_content, "annotations": []},
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
+                self._message_done = True
+            events.extend(self._process_tool_call_delta(tool_calls))
 
         return events
 
@@ -207,40 +229,127 @@ class StreamConverter:
         if self._text_content:
             content_parts.append({"type": "output_text", "text": self._text_content})
 
-        # output_text.done
-        events.append(json.dumps({
-            "type": "response.output_text.done",
-            "item_id": self.item_id,
-            "output_index": 0,
-            "content_index": 1,
-            "text": self._text_content,
-            "logprobs": [],
-            "sequence_number": self._next_seq(),
-        }, separators=(",", ":")))
+        # If message has content and not yet done, close it
+        if self._text_content and not self._message_done:
+            # output_text.done
+            events.append(json.dumps({
+                "type": "response.output_text.done",
+                "item_id": self.item_id,
+                "output_index": 0,
+                "content_index": 1,
+                "text": self._text_content,
+                "logprobs": [],
+                "sequence_number": self._next_seq(),
+            }, separators=(",", ":")))
 
-        # content_part.done for output_text
-        events.append(json.dumps({
-            "type": "response.content_part.done",
-            "item_id": self.item_id,
-            "output_index": 0,
-            "content_index": 1,
-            "part": {"type": "output_text", "text": self._text_content, "annotations": []},
-            "sequence_number": self._next_seq(),
-        }, separators=(",", ":")))
+            # content_part.done for output_text
+            events.append(json.dumps({
+                "type": "response.content_part.done",
+                "item_id": self.item_id,
+                "output_index": 0,
+                "content_index": 1,
+                "part": {"type": "output_text", "text": self._text_content, "annotations": []},
+                "sequence_number": self._next_seq(),
+            }, separators=(",", ":")))
 
-        # output_item.done
-        events.append(json.dumps({
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": {
+            # output_item.done for message
+            events.append(json.dumps({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": self.item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": content_parts,
+                },
+                "sequence_number": self._next_seq(),
+            }, separators=(",", ":")))
+        elif not self._tool_calls:
+            # No content and no tool calls: still close message item
+            # output_text.done (even if empty)
+            events.append(json.dumps({
+                "type": "response.output_text.done",
+                "item_id": self.item_id,
+                "output_index": 0,
+                "content_index": 1,
+                "text": self._text_content,
+                "logprobs": [],
+                "sequence_number": self._next_seq(),
+            }, separators=(",", ":")))
+
+            # content_part.done for output_text
+            events.append(json.dumps({
+                "type": "response.content_part.done",
+                "item_id": self.item_id,
+                "output_index": 0,
+                "content_index": 1,
+                "part": {"type": "output_text", "text": self._text_content, "annotations": []},
+                "sequence_number": self._next_seq(),
+            }, separators=(",", ":")))
+
+            # output_item.done for message
+            events.append(json.dumps({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": self.item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": content_parts,
+                },
+                "sequence_number": self._next_seq(),
+            }, separators=(",", ":")))
+
+        # Close any tool calls that were emitted
+        for index, tc in self._tool_calls.items():
+            if index in self._emitted_tool_ids and tc.get("id"):
+                output_index = self._tool_call_output_indices.get(index, self._next_output_index)
+                # function_call_arguments.done
+                events.append(json.dumps({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": tc["id"],
+                    "output_index": output_index,
+                    "call_id": tc["id"],
+                    "arguments": tc.get("arguments", ""),
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
+                # output_item.done for function_call
+                events.append(json.dumps({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": {
+                        "id": tc["id"],
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": tc["id"],
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("arguments", ""),
+                    },
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
+
+        # Build output array for response.completed
+        output_items: list[dict] = []
+        if content_parts:
+            output_items.append({
                 "id": self.item_id,
                 "type": "message",
                 "role": "assistant",
                 "status": "completed",
                 "content": content_parts,
-            },
-            "sequence_number": self._next_seq(),
-        }, separators=(",", ":")))
+            })
+        for index, tc in self._tool_calls.items():
+            if tc.get("id"):
+                output_items.append({
+                    "id": tc["id"],
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": tc["id"],
+                    "name": tc.get("name", ""),
+                    "arguments": tc.get("arguments", ""),
+                })
 
         # response.completed
         events.append(json.dumps({
@@ -250,19 +359,18 @@ class StreamConverter:
                 "object": "response",
                 "model": self.model,
                 "status": "completed",
-                "output": [{
-                    "id": self.item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": content_parts,
-                }],
+                "output": output_items,
             },
             "sequence_number": self._next_seq(),
         }, separators=(",", ":")))
 
-    def _process_tool_call_delta(self, tool_calls: list[dict]) -> str | None:
-        """Accumulate tool call deltas and emit when complete."""
+    def _process_tool_call_delta(self, tool_calls: list[dict]) -> list[str]:
+        """Accumulate tool call deltas and emit events.
+
+        Returns a list of converted event strings (may include
+        response.output_item.added + response.function_call_arguments.delta).
+        """
+        events: list[str] = []
         for tc in tool_calls:
             index = tc.get("index", 0)
 
@@ -287,17 +395,44 @@ class StreamConverter:
             if not existing["id"] or not existing["name"]:
                 continue
 
+            # Assign output_index for this tool call (persistent)
+            if index not in self._tool_call_output_indices:
+                self._tool_call_output_indices[index] = self._next_output_index
+                self._next_output_index += 1
+            output_index = self._tool_call_output_indices[index]
+
+            # Emit output_item.added on first encounter
+            if index not in self._emitted_tool_call_items:
+                self._emitted_tool_call_items.add(index)
+                events.append(json.dumps({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "id": existing["id"],
+                        "type": "function_call",
+                        "status": "in_progress",
+                        "call_id": existing["id"],
+                        "name": existing["name"],
+                        "arguments": "",
+                    },
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
+
+            # Track that we've emitted this tool call
             if index not in self._emitted_tool_ids:
                 self._emitted_tool_ids.add(index)
 
-            return json.dumps({
+            # Extract just the delta (new arguments fragment) from this chunk
+            func = tc.get("function", {})
+            arg_delta = func.get("arguments", "") or ""
+
+            events.append(json.dumps({
                 "type": "response.function_call_arguments.delta",
                 "item_id": existing["id"],
-                "output_index": 0,
+                "output_index": output_index,
                 "call_id": existing["id"],
-                "name": existing["name"],
-                "arguments": existing["arguments"],
+                "delta": arg_delta,
                 "sequence_number": self._next_seq(),
-            }, separators=(",", ":"))
+            }, separators=(",", ":")))
 
-        return None
+        return events

@@ -847,12 +847,13 @@ class LLMRouterAddon:
         )
         messages.extend(earlier_history)
 
-        # 添加当前历史轮次
+        # 添加当前历史轮次（跳过空的 input，避免 Kimi 返回 400）
         prev_input = prev_request.get("input", "")
-        if isinstance(prev_input, str):
-            messages.append({"role": "user", "content": prev_input})
-        elif isinstance(prev_input, list):
-            messages.extend(prev_input)
+        if prev_input:
+            if isinstance(prev_input, str):
+                messages.append({"role": "user", "content": prev_input})
+            elif isinstance(prev_input, list):
+                messages.extend(prev_input)
 
         for item in prev_response.get("output", []):
             if item.get("type") == "message":
@@ -873,10 +874,11 @@ class LLMRouterAddon:
         messages = self._resolve_history(previous_id, api_key_id)
 
         current_input = body_dict.get("input", "")
-        if isinstance(current_input, str):
-            messages.append({"role": "user", "content": current_input})
-        elif isinstance(current_input, list):
-            messages.extend(current_input)
+        if current_input:
+            if isinstance(current_input, str):
+                messages.append({"role": "user", "content": current_input})
+            elif isinstance(current_input, list):
+                messages.extend(current_input)
 
         body_dict["input"] = messages
         body_dict.pop("previous_response_id", None)
@@ -1181,6 +1183,12 @@ class LLMRouterAddon:
             return
         flow.metadata["headers_time"] = time.time()
         if not self._is_stream_request(flow.metadata.get("request_body_for_stream")):
+            return
+        # 上游返回非 2xx 时不进行协议转换，直接透传错误响应
+        status = getattr(flow.response, "status_code", 0) if flow.response else 0
+        if status and not (200 <= status < 300):
+            logger.warning(f"[ProtocolConvert] Upstream returned {status}, skipping conversion")
+            flow.response.stream = lambda chunk: self._capture_stream_chunk(flow, chunk)
             return
         # 检查是否需要协议转换
         if flow.metadata.get("needs_protocol_conversion"):
