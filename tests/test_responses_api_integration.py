@@ -40,11 +40,11 @@ class TestConvertRequest:
         assert result["top_p"] == 0.9
         assert result["stream"] is True
 
-    def test_reasoning_passthrough(self):
-        """reasoning field is not touched by generic converter (upstream-specific)."""
+    def test_reasoning_to_thinking(self):
+        """reasoning.effort is mapped to Kimi thinking parameter."""
         req = {"model": "kimi-k2.6", "input": "Hello", "reasoning": {"effort": "medium"}}
         result = convert_request(req)
-        assert "thinking" not in result
+        assert result["thinking"] == {"type": "enabled"}
         assert "reasoning" not in result
 
 

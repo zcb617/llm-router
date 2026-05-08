@@ -4,13 +4,14 @@ All protocol conversion logic lives in the submodule; this package simply
 re-exports it so that ``from src.openai_protocol_converter import ...``
 continues to work inside llm_router.
 """
-import importlib.util
+import sys
 from pathlib import Path
 
-_submod_init = Path(__file__).parent.parent.parent / "kimi-open-responses" / "src" / "openai_protocol_converter" / "__init__.py"
-spec = importlib.util.spec_from_file_location("_submod_converter", _submod_init)
-_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(_mod)
+_submod_src = str(Path(__file__).parent.parent.parent / "kimi-open-responses" / "src")
+if _submod_src not in sys.path:
+    sys.path.insert(0, _submod_src)
+
+import openai_protocol_converter as _mod  # noqa: E402
 
 convert_request = _mod.convert_request
 convert_response = _mod.convert_response
