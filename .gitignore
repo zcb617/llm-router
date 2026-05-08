@@ -27,3 +27,4 @@ certs/
 
 # Logs
 *.log
+.mcp.json
