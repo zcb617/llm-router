@@ -59,7 +59,7 @@ def _convert_message(msg: dict) -> dict | None:
     if msg_type == "function_call_output":
         return {
             "role": "tool",
-            "tool_call_id": msg.get("call_id", ""),
+            "tool_call_id": msg.get("call_id") or msg.get("id", ""),
             "content": msg.get("output", ""),
         }
 
@@ -70,7 +70,7 @@ def _convert_message(msg: dict) -> dict | None:
             "content": None,
             "reasoning_content": "",
             "tool_calls": [{
-                "id": msg.get("call_id", msg.get("id", "")),
+                "id": msg.get("call_id") or msg.get("id", ""),
                 "type": "function",
                 "function": {
                     "name": msg.get("name", ""),
@@ -111,6 +111,15 @@ def convert_request(responses_req: dict) -> dict:
             # 防御性过滤：跳过 content 为空的 user/system 消息（避免上游 400）
             if role in ("user", "system") and (content is None or content == "" or content == []):
                 continue
+            # 合并连续的 assistant 消息的 tool_calls 到同一个消息中
+            # Chat Completions 要求所有 tool_calls 必须在同一个 assistant 消息里
+            if (role == "assistant"
+                    and cm.get("tool_calls")
+                    and converted_msgs
+                    and converted_msgs[-1].get("role") == "assistant"
+                    and converted_msgs[-1].get("tool_calls")):
+                converted_msgs[-1]["tool_calls"].extend(cm["tool_calls"])
+                continue
             converted_msgs.append(cm)
         chat_req["messages"] = converted_msgs
 
@@ -144,6 +153,14 @@ def convert_request(responses_req: dict) -> dict:
     # Tools — Responses API format differs from Chat Completions
     # Responses: [{"type": "function", "name": "...", "parameters": {...}}]
     # Chat:      [{"type": "function", "function": {"name": "...", "parameters": {...}}}]
+
+    # 诊断日志：打印转换后的 messages 中的 tool_call_id
+    import logging
+    for i, m in enumerate(chat_req.get("messages", [])):
+        tc = m.get("tool_calls", [])
+        tids = [t.get("id", "-") for t in tc]
+        logging.warning(f"[RequestConvert] out_msg[{i}] role={m.get('role','-')} tool_call_ids={tids} tool_call_id={m.get('tool_call_id','-')}")
+
     if "tools" in responses_req:
         tools = responses_req["tools"]
         if isinstance(tools, list):

@@ -861,6 +861,14 @@ class LLMRouterAddon:
                 for part in item.get("content", []):
                     if part.get("type") == "output_text":
                         texts.append(part["text"])
+                    elif part.get("type") == "output_function_call":
+                        messages.append({
+                            "role": "assistant",
+                            "type": "function_call",
+                            "call_id": part.get("call_id") or part.get("id", ""),
+                            "name": part.get("name", ""),
+                            "arguments": part.get("arguments", ""),
+                        })
                 if texts:
                     messages.append({
                         "role": "assistant",
@@ -870,10 +878,15 @@ class LLMRouterAddon:
                 messages.append({
                     "role": "assistant",
                     "type": "function_call",
-                    "call_id": item.get("call_id", item.get("id", "")),
+                    "call_id": item.get("call_id") or item.get("id", ""),
                     "name": item.get("name", ""),
                     "arguments": item.get("arguments", ""),
                 })
+
+        # 诊断日志：打印 _resolve_history 提取的消息（含 call_id）
+        for i, m in enumerate(messages):
+            cid = m.get("call_id") or m.get("id", "")
+            logger.warning(f"[HistoryResolve] msg[{i}] type={m.get('type','-')} role={m.get('role','-')} call_id={cid}")
 
         return messages
 
@@ -887,6 +900,11 @@ class LLMRouterAddon:
                 messages.append({"role": "user", "content": current_input})
             elif isinstance(current_input, list):
                 messages.extend(current_input)
+
+        # 诊断日志：打印注入后的完整 input
+        for i, m in enumerate(messages):
+            cid = m.get("call_id") or m.get("id", "")
+            logger.warning(f"[HistoryInject] input[{i}] type={m.get('type','-')} role={m.get('role','-')} call_id={cid}")
 
         body_dict["input"] = messages
         body_dict.pop("previous_response_id", None)
@@ -1279,6 +1297,45 @@ class LLMRouterAddon:
                 flow.response.headers["Content-Length"] = str(len(new_body.encode("utf-8")))
             except Exception as e:
                 logger.error(f"Response conversion failed: {e}")
+
+        # 流式响应：从 StreamConverter 状态重建 Responses API 响应体，供 _resolve_history 使用
+        if needs_conversion and is_stream == "stream":
+            converter = flow.metadata.get("stream_converter")
+            if converter:
+                try:
+                    output_items: list[dict] = []
+                    # 构建 message 的 content parts
+                    content_parts: list[dict] = []
+                    if converter._reasoning_text:
+                        content_parts.append({"type": "reasoning_text", "text": converter._reasoning_text})
+                    if converter._text_content:
+                        content_parts.append({"type": "output_text", "text": converter._text_content})
+                    if content_parts:
+                        output_items.append({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": content_parts,
+                        })
+                    # 构建 function_call 项
+                    for _idx, tc in converter._tool_calls.items():
+                        if tc.get("id"):
+                            output_items.append({
+                                "type": "function_call",
+                                "call_id": tc["id"],
+                                "name": tc.get("name", ""),
+                                "arguments": tc.get("arguments", ""),
+                            })
+                    responses_resp = {
+                        "id": captured_req.call_id,
+                        "object": "response",
+                        "model": flow.metadata.get("overridden_model", flow.metadata.get("original_model", "unknown")),
+                        "status": "completed",
+                        "output": output_items,
+                    }
+                    captured_resp.body = json.dumps(responses_resp, ensure_ascii=False)
+                    logger.info(f"[ProtocolConvert] Stream response rebuilt for history: {len(output_items)} output items")
+                except Exception as e:
+                    logger.error(f"Failed to rebuild stream response for history: {e}")
 
         self._update_native_multi_upstream_health(flow, captured_resp.status_code)
 

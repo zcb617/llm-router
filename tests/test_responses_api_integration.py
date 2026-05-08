@@ -553,3 +553,54 @@ class TestResolveHistory:
         finally:
             del sys.modules["mitmproxy"]
             del sys.modules["mitmproxy.addonmanager"]
+
+    def test_resolve_history_extracts_output_function_call_from_message(self):
+        """_resolve_history must extract output_function_call nested in message content.
+
+        response_converter.py generates function_call as output_function_call inside
+        message content (not as a standalone output item). This test verifies that
+        _resolve_history correctly extracts them.
+        """
+        import sys
+        from unittest.mock import MagicMock
+
+        mock_mitmproxy = MagicMock()
+        sys.modules["mitmproxy"] = mock_mitmproxy
+        sys.modules["mitmproxy.addonmanager"] = mock_mitmproxy.addonmanager
+        try:
+            from src.proxy import LLMRouterAddon
+
+            class MockStorage:
+                def get_call_history(self, call_id, api_key_id):
+                    return {
+                        "request_body": json.dumps({
+                            "input": [{"role": "user", "content": "Run a command"}]
+                        }),
+                        "response_body": json.dumps({
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [
+                                        {"type": "output_text", "text": "OK"},
+                                        {"type": "output_function_call", "call_id": "shell_command:1", "name": "shell_command", "arguments": '{"cmd": "ls"}'},
+                                    ]
+                                },
+                            ]
+                        }),
+                    }
+
+            addon = LLMRouterAddon()
+            addon._storage = MockStorage()
+            messages = addon._resolve_history("prev-id", 1)
+
+            # Should have user message + function_call + assistant text
+            assert len(messages) == 3
+            assert messages[0] == {"role": "user", "content": "Run a command"}
+            assert messages[1]["type"] == "function_call"
+            assert messages[1]["call_id"] == "shell_command:1"
+            assert messages[1]["name"] == "shell_command"
+            assert messages[2] == {"role": "assistant", "content": "OK"}
+        finally:
+            del sys.modules["mitmproxy"]
+            del sys.modules["mitmproxy.addonmanager"]
