@@ -325,6 +325,15 @@ class LLMRouterAddon:
                 # 调用转换器转换请求体
                 from src.openai_protocol_converter import convert_request
                 converted_body = convert_request(body_dict)
+                # Upstream-specific parameter injection
+                if protocol_converter and "kimi" in protocol_converter.lower():
+                    reasoning = body_dict.get("reasoning")
+                    if reasoning:
+                        effort = reasoning.get("effort", "medium")
+                        if effort == "none":
+                            converted_body["thinking"] = {"type": "disabled"}
+                        else:
+                            converted_body["thinking"] = {"type": "enabled"}
                 converted_json = json.dumps(converted_body, ensure_ascii=False)
                 logger.warning(f"[ProtocolConvert] Request converted. Original roles: {[m.get('role') for m in body_dict.get('input', [])]}")
                 logger.warning(f"[ProtocolConvert] Converted roles: {[m.get('role') for m in converted_body.get('messages', [])]}")

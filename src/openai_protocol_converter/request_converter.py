@@ -100,15 +100,6 @@ def convert_request(responses_req: dict) -> dict:
     if "stream" in responses_req:
         chat_req["stream"] = responses_req["stream"]
 
-    # Reasoning effort -> thinking.type
-    reasoning = responses_req.get("reasoning")
-    if reasoning:
-        effort = reasoning.get("effort", "medium")
-        if effort == "none":
-            chat_req["thinking"] = {"type": "disabled"}
-        else:
-            chat_req["thinking"] = {"type": "enabled"}
-
     # text.format -> response_format
     text_config = responses_req.get("text")
     if text_config and "format" in text_config:

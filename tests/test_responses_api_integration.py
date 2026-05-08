@@ -40,15 +40,12 @@ class TestConvertRequest:
         assert result["top_p"] == 0.9
         assert result["stream"] is True
 
-    def test_reasoning_effort_mapping(self):
+    def test_reasoning_passthrough(self):
+        """reasoning field is not touched by generic converter (upstream-specific)."""
         req = {"model": "kimi-k2.6", "input": "Hello", "reasoning": {"effort": "medium"}}
         result = convert_request(req)
-        assert result["thinking"] == {"type": "enabled"}
-
-    def test_reasoning_none_mapping(self):
-        req = {"model": "kimi-k2.6", "input": "Hello", "reasoning": {"effort": "none"}}
-        result = convert_request(req)
-        assert result["thinking"] == {"type": "disabled"}
+        assert "thinking" not in result
+        assert "reasoning" not in result
 
 
 class TestConvertResponse:
