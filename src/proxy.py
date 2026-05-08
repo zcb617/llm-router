@@ -15,6 +15,8 @@ import urllib.error
 from pathlib import Path
 from typing import Optional
 
+from src.openai_protocol_converter import parse_sse_buffer
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,6 +133,7 @@ class LLMRouterAddon:
                     "forward_model": r.get("forward_model", ""),
                     "use_claude_features": r.get("use_claude_features", False),
                     "use_roo_features": r.get("use_roo_features", False),
+                    "protocol_converter": r.get("protocol_converter") or None,
                     "health_status": r.get("health_status", "healthy"),
                     "sort_order": r.get("sort_order", 0),
                 })
@@ -160,6 +163,7 @@ class LLMRouterAddon:
                             "forward_model": forward_model,
                             "use_claude_features": bool(cfg.get("use_claude_features", False)),
                             "use_roo_features": bool(cfg.get("use_roo_features", False)),
+                            "protocol_converter": cfg.get("protocol_converter") or None,
                         }
 
                     if cfg["is_default"]:
@@ -285,6 +289,70 @@ class LLMRouterAddon:
         if is_default:
             logger.info(f"No exact match for '{model_name}', using default model: {self.config.proxy.default_model}")
 
+        # 保存模型映射信息到 flow.metadata，供 response() 使用
+        flow.metadata["model_mapping"] = mapping
+        flow.metadata["original_model"] = model_name
+        flow.metadata["overridden_model"] = mapping.get("forward_model", "") or model_name
+
+        # 判断是否为 Responses API 请求（支持 /v1/responses 和 /responses）
+        is_responses_api = path == "/v1/responses" or path == "/responses"
+        protocol_converter = mapping.get("protocol_converter")
+        needs_conversion = is_responses_api and protocol_converter
+
+        if needs_conversion:
+            logger.info(f"Protocol conversion enabled: {protocol_converter} for Responses API request (path={path})")
+            try:
+                body_dict = json.loads(captured_req.body)
+                # 处理 previous_response_id
+                previous_id = body_dict.get("previous_response_id")
+                if previous_id:
+                    history = self.storage.get_call_history(previous_id, key_info["id"])
+                    if history is None:
+                        flow.response = http.Response.make(
+                            400,
+                            json.dumps({
+                                "error": {
+                                    "type": "invalid_request_error",
+                                    "code": "invalid_id",
+                                    "message": "Previous response not found"
+                                }
+                            }, ensure_ascii=False).encode("utf-8"),
+                            {"Content-Type": "application/json"}
+                        )
+                        flow.metadata["local_response"] = True
+                        return
+                    body_dict = self._inject_history_into_input(body_dict, previous_id, key_info["id"])
+                # 调用转换器转换请求体
+                from src.openai_protocol_converter import convert_request
+                converted_body = convert_request(body_dict)
+                converted_json = json.dumps(converted_body, ensure_ascii=False)
+                logger.warning(f"[ProtocolConvert] Request converted. Original roles: {[m.get('role') for m in body_dict.get('input', [])]}")
+                logger.warning(f"[ProtocolConvert] Converted roles: {[m.get('role') for m in converted_body.get('messages', [])]}")
+                logger.warning(f"[ProtocolConvert] Converted content types: {[type(m.get('content')).__name__ for m in converted_body.get('messages', [])]}")
+                # 保存原始请求体（responses API 格式）到 metadata，供 response() 保存到数据库
+                flow.metadata["original_request_body"] = captured_req.body
+                captured_req.body = converted_json
+                flow.request.content = captured_req.body.encode("utf-8")
+                flow.metadata["needs_protocol_conversion"] = True
+                flow.metadata["protocol_converter"] = protocol_converter
+                flow.metadata["previous_response_id"] = previous_id
+                # 重写 path 为 chat.completions（无论原始 path 是 /v1/responses 还是 /responses）
+                path = "/v1/chat/completions"
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(f"Request conversion failed: {e}")
+                flow.response = http.Response.make(
+                    400,
+                    json.dumps({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": f"Invalid request format: {e}"
+                        }
+                    }, ensure_ascii=False).encode("utf-8"),
+                    {"Content-Type": "application/json"}
+                )
+                flow.metadata["local_response"] = True
+                return
+
         # 多上游模式：带重试和故障转移的转发
         if mapping.get("multi_upstream"):
             if self._is_stream_request(captured_req.body):
@@ -345,6 +413,7 @@ class LLMRouterAddon:
         captured_req.url = new_url
         # 生成唯一调用ID
         captured_req.call_id = str(uuid.uuid4())
+        flow.metadata["call_id"] = captured_req.call_id
 
         # 存储捕获的请求，等待响应处理
         self._store_pending_request(flow, captured_req)
@@ -539,6 +608,7 @@ class LLMRouterAddon:
                     captured_req.overridden_model = forward_model or model_name
                     captured_req.url = full_url
                     captured_req.call_id = str(uuid.uuid4())
+                    flow.metadata["call_id"] = captured_req.call_id
                     self._store_pending_request(flow, captured_req)
                     flow.metadata["multi_upstream_id"] = upstream_id
                     flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
@@ -624,6 +694,7 @@ class LLMRouterAddon:
         captured_req.overridden_model = forward_model or model_name
         captured_req.url = new_url
         captured_req.call_id = str(uuid.uuid4())
+        flow.metadata["call_id"] = captured_req.call_id
         self._store_pending_request(flow, captured_req)
         flow.metadata["multi_upstream_id"] = upstream_id
 
@@ -740,6 +811,67 @@ class LLMRouterAddon:
             "anthropic-version": "2023-06-01",
             "x-app": "cli",
         }
+
+    def _resolve_history(self, previous_id: str, api_key_id: int, visited: set = None) -> list:
+        """递归展开 previous_response_id 链，返回完整的 messages 数组。"""
+        if visited is None:
+            visited = set()
+        if not previous_id or previous_id in visited:
+            return []
+        visited.add(previous_id)
+
+        history = self.storage.get_call_history(previous_id, api_key_id)
+        if not history:
+            return []
+
+        try:
+            prev_request = json.loads(history["request_body"])
+            prev_response = json.loads(history["response_body"])
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+        messages = []
+
+        # 递归获取更早的历史
+        earlier_history = self._resolve_history(
+            prev_request.get("previous_response_id"), api_key_id, visited
+        )
+        messages.extend(earlier_history)
+
+        # 添加当前历史轮次
+        prev_input = prev_request.get("input", "")
+        if isinstance(prev_input, str):
+            messages.append({"role": "user", "content": prev_input})
+        elif isinstance(prev_input, list):
+            messages.extend(prev_input)
+
+        for item in prev_response.get("output", []):
+            if item.get("type") == "message":
+                texts = []
+                for part in item.get("content", []):
+                    if part.get("type") == "output_text":
+                        texts.append(part["text"])
+                if texts:
+                    messages.append({
+                        "role": "assistant",
+                        "content": "\n".join(texts)
+                    })
+
+        return messages
+
+    def _inject_history_into_input(self, body_dict: dict, previous_id: str, api_key_id: int) -> dict:
+        """将历史调用的消息注入到当前请求的 input 中。"""
+        messages = self._resolve_history(previous_id, api_key_id)
+
+        current_input = body_dict.get("input", "")
+        if isinstance(current_input, str):
+            messages.append({"role": "user", "content": current_input})
+        elif isinstance(current_input, list):
+            messages.extend(current_input)
+
+        body_dict["input"] = messages
+        body_dict.pop("previous_response_id", None)
+        return body_dict
 
     def _get_roo_headers(self, flow):
         """获取 Roo Code 特征 headers（不修改 flow）"""
@@ -1036,10 +1168,53 @@ class LLMRouterAddon:
     def responseheaders(self, flow: http.HTTPFlow):
         """响应头到达时触发（用于计算首字耗时）"""
         # 记录响应头到达时间，跳过本地请求
-        if not flow.metadata.get("local_response"):
-            flow.metadata["headers_time"] = time.time()
-            if self._is_stream_request(flow.metadata.get("request_body_for_stream")):
-                flow.response.stream = lambda chunk: self._capture_stream_chunk(flow, chunk)
+        if flow.metadata.get("local_response"):
+            return
+        flow.metadata["headers_time"] = time.time()
+        if not self._is_stream_request(flow.metadata.get("request_body_for_stream")):
+            return
+        # 检查是否需要协议转换
+        if flow.metadata.get("needs_protocol_conversion"):
+            call_id = flow.metadata.get("call_id")
+            model = flow.metadata.get("overridden_model", flow.metadata.get("original_model", "unknown"))
+            from src.openai_protocol_converter import StreamConverter
+            converter = StreamConverter(response_id=call_id, model=model)
+            flow.metadata["stream_converter"] = converter
+            flow.metadata["sse_buffer"] = ""
+
+            def converted_stream(chunk: bytes) -> bytes:
+                if chunk and flow.metadata.get("first_token_time") is None:
+                    flow.metadata["first_token_time"] = time.time()
+                if chunk:
+                    flow.metadata.setdefault("streamed_response_chunks", []).append(chunk)
+                raw_text = chunk.decode("utf-8", errors="replace")
+                buffer = flow.metadata.get("sse_buffer", "") + raw_text
+                # 流结束时(chunk为空)，若buffer还有数据，尝试强制解析末尾事件
+                if not chunk and buffer.strip():
+                    buffer += "\n\n"
+                events, remaining = parse_sse_buffer(buffer)
+                flow.metadata["sse_buffer"] = remaining
+                if chunk:
+                    logger.warning(f"[ProtocolConvert] Raw chunk ({len(chunk)} bytes): {raw_text[:200]!r}")
+                    logger.warning(f"[ProtocolConvert] Parsed {len(events)} events, remaining={len(remaining)}")
+                output_lines = []
+                # 在第一个有数据的 chunk 到达时，发送前置事件序列
+                if chunk:
+                    for ev in converter.get_preamble_events():
+                        output_lines.append(f"data: {ev}")
+                for event in events:
+                    converted_list = converter.process_event(event["data"])
+                    for converted in converted_list:
+                        output_lines.append(f"data: {converted}")
+                if output_lines:
+                    result = ("\n\n".join(output_lines) + "\n\n").encode("utf-8")
+                    logger.warning(f"[ProtocolConvert] Sending {len(output_lines)} events ({len(result)} bytes)")
+                    return result
+                return b""
+
+            flow.response.stream = converted_stream
+        else:
+            flow.response.stream = lambda chunk: self._capture_stream_chunk(flow, chunk)
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
@@ -1061,6 +1236,24 @@ class LLMRouterAddon:
 
         # 捕获响应数据
         captured_resp = self.capturer.capture_response(flow, captured_req)
+
+        # 协议转换：非流式响应
+        needs_conversion = flow.metadata.get("needs_protocol_conversion")
+        is_stream = stream_type = "stream" if self._is_stream_request(flow.metadata.get("request_body_for_stream")) else "non_stream"
+
+        if needs_conversion and is_stream == "non_stream":
+            try:
+                from src.openai_protocol_converter import convert_response
+                chat_resp = json.loads(captured_resp.body)
+                responses_resp = convert_response(chat_resp)
+                # 替换 id 为 llm_router 的 call_id
+                responses_resp["id"] = captured_req.call_id
+                new_body = json.dumps(responses_resp, ensure_ascii=False)
+                flow.response.content = new_body.encode("utf-8")
+                captured_resp.body = new_body
+                flow.response.headers["Content-Length"] = str(len(new_body.encode("utf-8")))
+            except Exception as e:
+                logger.error(f"Response conversion failed: {e}")
 
         self._update_native_multi_upstream_health(flow, captured_resp.status_code)
 
@@ -1107,6 +1300,11 @@ class LLMRouterAddon:
         # 异步保存到数据库
         user_id = flow.metadata.get("user_id")
         api_key_id = flow.metadata.get("api_key_id")
+        previous_response_id = flow.metadata.get("previous_response_id")
+        # 如果有协议转换，保存原始请求体（responses API 格式）
+        original_request_body = flow.metadata.get("original_request_body")
+        if original_request_body:
+            captured_req.body = original_request_body
         asyncio.create_task(
             self._save_call(
                 captured_req=captured_req,
@@ -1120,7 +1318,8 @@ class LLMRouterAddon:
                 overridden_model=captured_req.overridden_model,
                 call_id=captured_req.call_id,
                 user_id=user_id,
-                api_key_id=api_key_id
+                api_key_id=api_key_id,
+                previous_response_id=previous_response_id
             )
         )
 
@@ -1137,7 +1336,9 @@ class LLMRouterAddon:
         overridden_model: str = None,
         call_id: str = None,
         user_id: Optional[int] = None,
-        api_key_id: Optional[int] = None
+        api_key_id: Optional[int] = None,
+        previous_response_id: Optional[str] = None,
+        full_context: Optional[str] = None
     ):
         """保存调用记录到数据库"""
         try:
@@ -1159,7 +1360,9 @@ class LLMRouterAddon:
                 original_model=original_model,
                 overridden_model=overridden_model,
                 user_id=user_id,
-                api_key_id=api_key_id
+                api_key_id=api_key_id,
+                previous_response_id=previous_response_id,
+                full_context=full_context
             )
             logger.info("Call record saved to database")
         except Exception as e:
@@ -1192,6 +1395,8 @@ class LLMRouterAddon:
 
 # mitmdump加载时需要的addons变量
 addons = [LLMRouterAddon()]
+
+
 
 
 def create_addon(config, storage=None) -> LLMRouterAddon:

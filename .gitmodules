@@ -1,0 +1,3 @@
+[submodule "kimi-open-responses"]
+	path = kimi-open-responses
+	url = ssh://git@www.zhangchenbin.com.cn/zcb617/kimi-open-responses.git

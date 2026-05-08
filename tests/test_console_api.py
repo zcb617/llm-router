@@ -107,8 +107,8 @@ def test_update_model_config_saves_routes_in_backend_service():
         "is_active": True,
         "is_default": False,
         "routes": [
-            {"upstream_id": 1, "forward_model": "deepseek-v4-pro", "sort_order": 0},
-            {"upstream_id": 2, "forward_model": "kimi-for-coding", "sort_order": 1},
+            {"upstream_id": 1, "forward_model": "deepseek-v4-pro", "protocol_converter": None, "sort_order": 0},
+            {"upstream_id": 2, "forward_model": "kimi-for-coding", "protocol_converter": None, "sort_order": 1},
         ],
     }
     flow = DummyFlow("PUT", body)
@@ -121,6 +121,31 @@ def test_update_model_config_saves_routes_in_backend_service():
     assert storage.updated["config_id"] == 1
     assert storage.updated["use_multi_upstream"] is True
     assert storage.updated["routes"] == body["routes"]
+
+
+def test_update_single_upstream_model_clears_direct_target_with_empty_strings():
+    """单上游模式选择上游时，不向旧 schema 的 NOT NULL url/key 字段写入 NULL。"""
+    body = {
+        "model_key": "gpt-5.5",
+        "upstream_id": 6,
+        "forward_model": "kimi-for-coding",
+        "protocol_converter": "kimi2.6",
+        "use_multi_upstream": False,
+        "is_active": True,
+        "is_default": False,
+    }
+    flow = DummyFlow("PUT", body)
+    storage = DummyModelStorage()
+
+    handled = handle_console_api(flow, storage, "/api/models/12")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.updated["config_id"] == 12
+    assert storage.updated["upstream_id"] == 6
+    assert storage.updated["target_base_url"] == ""
+    assert storage.updated["api_key"] == ""
+    assert storage.updated["protocol_converter"] == "kimi2.6"
 
 
 class DummyAvailableModelStorage:

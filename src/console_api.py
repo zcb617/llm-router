@@ -47,6 +47,7 @@ def _sanitize_available_route(route: dict) -> dict:
         "upstream_name": route.get("upstream_name") or "",
         "target_base_url": route.get("target_base_url") or "",
         "forward_model": route.get("forward_model") or "",
+        "protocol_converter": route.get("protocol_converter"),
         "sort_order": route.get("sort_order") or 0,
         "is_active": _is_enabled(route.get("is_active", True)),
         "health_status": route.get("health_status") or "healthy",
@@ -78,6 +79,7 @@ def _build_available_model(config: dict, routes: Optional[list] = None) -> dict:
         "use_multi_upstream": use_multi_upstream,
         "route_count": len(active_routes),
         "routes": active_routes if use_multi_upstream else [],
+        "protocol_converter": config.get("protocol_converter"),
         "use_claude_features": _is_enabled(config.get("use_claude_features", False)) or route_has_claude,
         "use_roo_features": _is_enabled(config.get("use_roo_features", False)) or route_has_roo,
         "created_at": config.get("created_at"),
@@ -133,6 +135,7 @@ def _extract_model_routes(body: dict) -> tuple[list, Optional[str]]:
         routes.append({
             "upstream_id": upstream_id,
             "forward_model": (route.get("forward_model") or "").strip(),
+            "protocol_converter": route.get("protocol_converter") or None,
             "sort_order": sort_order,
         })
 
@@ -502,6 +505,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         target_base_url = (body.get("target_base_url") or "").strip()
         api_key = body.get("api_key", "")
         forward_model = (body.get("forward_model") or "").strip()
+        protocol_converter = body.get("protocol_converter") or None
         is_active = body.get("is_active", True)
         is_default = body.get("is_default", False)
         use_multi_upstream = body.get("use_multi_upstream", False)
@@ -535,6 +539,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             is_default=is_default,
             upstream_id=upstream_id,
             use_multi_upstream=use_multi_upstream,
+            protocol_converter=protocol_converter,
             routes=routes
         )
 
@@ -566,6 +571,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         target_base_url = (body.get("target_base_url", existing.get("target_base_url") or "") or "").strip()
         api_key = body.get("api_key", existing.get("api_key") or "")
         forward_model = (body.get("forward_model", existing.get("forward_model") or "") or "").strip()
+        protocol_converter = body.get("protocol_converter", existing.get("protocol_converter"))
         is_active = body.get("is_active", existing.get("is_active", True))
         is_default = body.get("is_default", existing.get("is_default", False))
         use_multi_upstream = body.get("use_multi_upstream", existing.get("use_multi_upstream", False))
@@ -585,10 +591,11 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "多上游模式至少需要一个路由"})
             return True
 
-        # 如果选择了上游，不更新 url/key（以上游为准）
+        # 如果选择了上游，模型配置自身不保存直连 url/key（以上游为准）。
+        # 旧版本 PostgreSQL schema 中 target_base_url 可能仍是 NOT NULL，因此用空字符串清空。
         if upstream_id:
-            target_base_url = None
-            api_key = None
+            target_base_url = ""
+            api_key = ""
         if use_multi_upstream:
             upstream_id = None
             target_base_url = ""
@@ -605,6 +612,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             is_active=is_active,
             is_default=is_default,
             use_multi_upstream=use_multi_upstream,
+            protocol_converter=protocol_converter,
             routes=routes if "routes" in body else None
         )
 
@@ -668,13 +676,14 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
         upstream_id = body.get("upstream_id")
         forward_model = (body.get("forward_model") or "").strip()
+        protocol_converter = body.get("protocol_converter") or None
         sort_order = body.get("sort_order", 0)
 
         if not upstream_id:
             _json_response(flow, 400, {"error": "upstream_id 不能为空"})
             return True
 
-        route_id = storage.create_model_route(config_id, upstream_id, forward_model, sort_order)
+        route_id = storage.create_model_route(config_id, upstream_id, forward_model, protocol_converter, sort_order)
         if addon:
             addon.reload_model_configs()
         _json_response(flow, 200, {"message": "路由添加成功", "id": route_id})
@@ -695,6 +704,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             route_id=route_id,
             upstream_id=body.get("upstream_id"),
             forward_model=body.get("forward_model"),
+            protocol_converter=body.get("protocol_converter"),
             sort_order=body.get("sort_order"),
             is_active=body.get("is_active")
         )

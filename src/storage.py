@@ -497,7 +497,8 @@ class CallStorage:
         duration_ms: int, tokens_input: int, tokens_output: int, token_source: str,
         stream_type: str = "non_stream", first_token_ms: Optional[int] = None,
         original_model: str = None, overridden_model: str = None,
-        user_id: Optional[int] = None, api_key_id: Optional[int] = None
+        user_id: Optional[int] = None, api_key_id: Optional[int] = None,
+        previous_response_id: Optional[str] = None, full_context: Optional[str] = None
     ):
         """保存调用记录（带用户和 API Key 关联）"""
         args = (
@@ -508,7 +509,8 @@ class CallStorage:
             response_body,
             duration_ms, tokens_input, tokens_output, token_source,
             stream_type, first_token_ms,
-            original_model, overridden_model, user_id, api_key_id
+            original_model, overridden_model, user_id, api_key_id,
+            previous_response_id, full_context
         )
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -520,8 +522,9 @@ class CallStorage:
                         response_headers, response_body,
                         duration_ms, tokens_input, tokens_output, token_source,
                         stream_type, first_token_ms,
-                        original_model, overridden_model, user_id, api_key_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        original_model, overridden_model, user_id, api_key_id,
+                        previous_response_id, full_context
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -535,11 +538,50 @@ class CallStorage:
                         response_headers, response_body,
                         duration_ms, tokens_input, tokens_output, token_source,
                         stream_type, first_token_ms,
-                        original_model, overridden_model, user_id, api_key_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        original_model, overridden_model, user_id, api_key_id,
+                        previous_response_id, full_context
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
+
+    def get_call_history(self, call_id: str, api_key_id: int) -> Optional[dict]:
+        """查询历史调用记录，按 api_key_id 隔离。
+
+        返回 llm_calls 记录（包含 request_body 和 response_body），
+        如果找不到或不属于该 api_key_id，返回 None。
+        """
+        sql = (
+            "SELECT request_body, response_body, full_context FROM llm_calls "
+            "WHERE call_id = %s AND api_key_id = %s"
+        ) if self.postgresql else (
+            "SELECT request_body, response_body, full_context FROM llm_calls "
+            "WHERE call_id = ? AND api_key_id = ?"
+        )
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (call_id, api_key_id))
+                row = cur.fetchone()
+                if row:
+                    return {
+                        "request_body": row[0],
+                        "response_body": row[1],
+                        "full_context": row[2]
+                    }
+                return None
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (call_id, api_key_id))
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+                return None
+            finally:
+                self._sqlite_close(conn, cur)
 
     # ========== RBAC 相关方法（同步） ==========
 
@@ -970,15 +1012,16 @@ class CallStorage:
                     "forward_model": r[6],
                     "is_active": r[7], "is_default": r[8],
                     "use_multi_upstream": bool(r[9]) if r[9] is not None else False,
-                    "created_at": r[10].isoformat() if r[10] else None,
-                    "updated_at": r[11].isoformat() if r[11] else None,
+                    "protocol_converter": r[10] or None,
+                    "created_at": r[11].isoformat() if r[11] else None,
+                    "updated_at": r[12].isoformat() if r[12] else None,
                 }
-                if len(r) > 12 and r[12] is not None:
-                    d["upstream_name"] = r[12]
                 if len(r) > 13 and r[13] is not None:
-                    d["use_claude_features"] = bool(r[13])
+                    d["upstream_name"] = r[13]
                 if len(r) > 14 and r[14] is not None:
-                    d["use_roo_features"] = bool(r[14])
+                    d["use_claude_features"] = bool(r[14])
+                if len(r) > 15 and r[15] is not None:
+                    d["use_roo_features"] = bool(r[15])
                 return d
             else:
                 d = dict(r)
@@ -989,6 +1032,8 @@ class CallStorage:
                     d["use_claude_features"] = bool(d["use_claude_features"])
                 if "use_roo_features" in d:
                     d["use_roo_features"] = bool(d["use_roo_features"])
+                if d.get("protocol_converter") == "":
+                    d["protocol_converter"] = None
                 if d.get("created_at") and not isinstance(d["created_at"], str):
                     d["created_at"] = d["created_at"].isoformat()
                 if d.get("updated_at") and not isinstance(d["updated_at"], str):
@@ -998,14 +1043,14 @@ class CallStorage:
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
-            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name, u.use_claude_features, u.use_roo_features "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "ORDER BY mc.model_key"
         ) if self.postgresql else (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
-            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name, u.use_claude_features, u.use_roo_features FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id ORDER BY mc.model_key"
         )
@@ -1029,14 +1074,14 @@ class CallStorage:
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
-            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.model_key = %s"
         ) if self.postgresql else (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
-            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id WHERE mc.model_key = ?"
         )
@@ -1051,11 +1096,12 @@ class CallStorage:
                         "target_base_url": row[3], "api_key": row[4], "model_overrides": row[5],
                         "forward_model": row[6],
                         "is_active": row[7], "is_default": row[8], "use_multi_upstream": bool(row[9]) if row[9] is not None else False,
-                        "created_at": row[10].isoformat() if row[10] else None,
-                        "updated_at": row[11].isoformat() if row[11] else None,
+                        "protocol_converter": row[10] or None,
+                        "created_at": row[11].isoformat() if row[11] else None,
+                        "updated_at": row[12].isoformat() if row[12] else None,
                     }
-                    if row[12] is not None:
-                        d["upstream_name"] = row[12]
+                    if row[13] is not None:
+                        d["upstream_name"] = row[13]
                     return d
                 return None
             finally:
@@ -1070,6 +1116,8 @@ class CallStorage:
                     d["is_active"] = bool(d["is_active"])
                     d["is_default"] = bool(d["is_default"])
                     d["use_multi_upstream"] = bool(d.get("use_multi_upstream", False))
+                    if d.get("protocol_converter") == "":
+                        d["protocol_converter"] = None
                     return d
                 return None
             finally:
@@ -1080,14 +1128,14 @@ class CallStorage:
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
-            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.id = %s"
         ) if self.postgresql else (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, "
-            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.created_at, mc.updated_at, "
+            "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id WHERE mc.id = ?"
         )
@@ -1102,11 +1150,12 @@ class CallStorage:
                         "target_base_url": row[3], "api_key": row[4], "model_overrides": row[5],
                         "forward_model": row[6],
                         "is_active": row[7], "is_default": row[8], "use_multi_upstream": bool(row[9]) if row[9] is not None else False,
-                        "created_at": row[10].isoformat() if row[10] else None,
-                        "updated_at": row[11].isoformat() if row[11] else None,
+                        "protocol_converter": row[10] or None,
+                        "created_at": row[11].isoformat() if row[11] else None,
+                        "updated_at": row[12].isoformat() if row[12] else None,
                     }
-                    if row[12] is not None:
-                        d["upstream_name"] = row[12]
+                    if row[13] is not None:
+                        d["upstream_name"] = row[13]
                     return d
                 return None
             finally:
@@ -1121,6 +1170,8 @@ class CallStorage:
                     d["is_active"] = bool(d["is_active"])
                     d["is_default"] = bool(d["is_default"])
                     d["use_multi_upstream"] = bool(d.get("use_multi_upstream", False))
+                    if d.get("protocol_converter") == "":
+                        d["protocol_converter"] = None
                     return d
                 return None
             finally:
@@ -1129,7 +1180,7 @@ class CallStorage:
     def create_model_config(
         self, model_key: str, target_base_url: str = "", api_key: str = "",
         model_overrides: str = "{}", forward_model: str = "", is_active: bool = True, is_default: bool = False,
-        upstream_id: int = None, use_multi_upstream: bool = False
+        upstream_id: int = None, use_multi_upstream: bool = False, protocol_converter: str = None
     ) -> int:
         """创建模型配置，返回 ID"""
         if self.postgresql:
@@ -1138,9 +1189,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = false")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream)
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream, protocol_converter) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream, protocol_converter)
                 )
                 return cur.fetchone()[0]
             finally:
@@ -1151,9 +1202,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = 0")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, int(is_active), int(is_default), int(use_multi_upstream))
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream, protocol_converter) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, int(is_active), int(is_default), int(use_multi_upstream), protocol_converter)
                 )
                 return cur.lastrowid
             finally:
@@ -1162,7 +1213,7 @@ class CallStorage:
     def create_model_config_with_routes(
         self, model_key: str, target_base_url: str = "", api_key: str = "",
         model_overrides: str = "{}", forward_model: str = "", is_active: bool = True, is_default: bool = False,
-        upstream_id: int = None, use_multi_upstream: bool = False, routes: list = None
+        upstream_id: int = None, use_multi_upstream: bool = False, protocol_converter: str = None, routes: list = None
     ) -> int:
         """创建模型配置，并在同一事务内写入多上游路由。"""
         routes = routes or []
@@ -1172,9 +1223,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = false")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream)
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream, protocol_converter) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream, protocol_converter)
                 )
                 config_id = cur.fetchone()[0]
                 if use_multi_upstream:
@@ -1192,9 +1243,9 @@ class CallStorage:
                 if is_default:
                     cur.execute("UPDATE model_configs SET is_default = 0")
                 cur.execute(
-                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, int(is_active), int(is_default), int(use_multi_upstream))
+                    "INSERT INTO model_configs (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, is_active, is_default, use_multi_upstream, protocol_converter) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (model_key, upstream_id, target_base_url, api_key, model_overrides, forward_model, int(is_active), int(is_default), int(use_multi_upstream), protocol_converter)
                 )
                 config_id = cur.lastrowid
                 if use_multi_upstream:
@@ -1210,7 +1261,8 @@ class CallStorage:
     def update_model_config(
         self, config_id: int, model_key: str = None, target_base_url: str = None,
         api_key: str = None, model_overrides: str = None, forward_model: str = None, is_active: bool = None,
-        is_default: bool = None, upstream_id: int = None, use_multi_upstream: bool = None
+        is_default: bool = None, upstream_id: int = None, use_multi_upstream: bool = None,
+        protocol_converter: str = None
     ) -> bool:
         """更新模型配置"""
         fields, params = [], []
@@ -1223,6 +1275,7 @@ class CallStorage:
             ("forward_model = %s", "forward_model = ?", forward_model),
             ("is_active = %s", "is_active = ?", is_active),
             ("use_multi_upstream = %s", "use_multi_upstream = ?", use_multi_upstream),
+            ("protocol_converter = %s", "protocol_converter = ?", protocol_converter),
         ]:
             if v is not None:
                 fields.append(fmt_pg if self.postgresql else fmt_sqlite)
@@ -1265,7 +1318,8 @@ class CallStorage:
     def update_model_config_with_routes(
         self, config_id: int, model_key: str = None, target_base_url: str = None,
         api_key: str = None, model_overrides: str = None, forward_model: str = None, is_active: bool = None,
-        is_default: bool = None, upstream_id: int = None, use_multi_upstream: bool = None, routes: list = None
+        is_default: bool = None, upstream_id: int = None, use_multi_upstream: bool = None,
+        protocol_converter: str = None, routes: list = None
     ) -> bool:
         """更新模型配置，并在同一事务内替换多上游路由。"""
         if self.postgresql:
@@ -1282,9 +1336,10 @@ class CallStorage:
                     "is_active = %s",
                     "is_default = %s",
                     "use_multi_upstream = %s",
+                    "protocol_converter = %s",
                     "updated_at = CURRENT_TIMESTAMP",
                 ]
-                params = [model_key, upstream_id, target_base_url, api_key, forward_model, is_active, is_default, use_multi_upstream, config_id]
+                params = [model_key, upstream_id, target_base_url, api_key, forward_model, is_active, is_default, use_multi_upstream, protocol_converter, config_id]
                 cur.execute(f"UPDATE model_configs SET {', '.join(fields)} WHERE id = %s", params)
                 if cur.rowcount == 0:
                     conn.rollback()
@@ -1312,11 +1367,12 @@ class CallStorage:
                     "is_active = ?",
                     "is_default = ?",
                     "use_multi_upstream = ?",
+                    "protocol_converter = ?",
                     "updated_at = datetime('now')",
                 ]
                 params = [
                     model_key, upstream_id, target_base_url, api_key, forward_model,
-                    int(is_active), int(is_default), int(use_multi_upstream), config_id
+                    int(is_active), int(is_default), int(use_multi_upstream), protocol_converter, config_id
                 ]
                 cur.execute(f"UPDATE model_configs SET {', '.join(fields)} WHERE id = ?", params)
                 if cur.rowcount == 0:
@@ -1517,11 +1573,11 @@ class CallStorage:
         delete_sql = "DELETE FROM model_upstream_routes WHERE model_config_id = %s" if self.postgresql else \
                      "DELETE FROM model_upstream_routes WHERE model_config_id = ?"
         insert_sql = (
-            "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, sort_order) "
-            "VALUES (%s, %s, %s, %s)"
+            "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, protocol_converter, sort_order) "
+            "VALUES (%s, %s, %s, %s, %s)"
         ) if self.postgresql else (
-            "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, sort_order) "
-            "VALUES (?, ?, ?, ?)"
+            "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, protocol_converter, sort_order) "
+            "VALUES (?, ?, ?, ?, ?)"
         )
         cur.execute(delete_sql, (model_config_id,))
         for route in routes or []:
@@ -1531,6 +1587,7 @@ class CallStorage:
                     model_config_id,
                     route["upstream_id"],
                     route.get("forward_model", "") or "",
+                    route.get("protocol_converter") or None,
                     route.get("sort_order", 0),
                 )
             )
@@ -1538,7 +1595,7 @@ class CallStorage:
     def get_model_routes(self, model_config_id: int) -> list:
         """获取某个模型配置的所有路由（按 sort_order 排序）"""
         sql = (
-            "SELECT mur.id, mur.model_config_id, mur.upstream_id, mur.forward_model, "
+            "SELECT mur.id, mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, "
             "mur.sort_order, mur.is_active, mur.created_at, mur.updated_at, "
             "u.name as upstream_name, u.target_base_url, u.api_key, u.use_claude_features, u.use_roo_features, "
             "u.health_status "
@@ -1546,7 +1603,7 @@ class CallStorage:
             "JOIN upstreams u ON mur.upstream_id = u.id "
             "WHERE mur.model_config_id = %s ORDER BY mur.sort_order"
         ) if self.postgresql else (
-            "SELECT mur.id, mur.model_config_id, mur.upstream_id, mur.forward_model, "
+            "SELECT mur.id, mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, "
             "mur.sort_order, mur.is_active, mur.created_at, mur.updated_at, "
             "u.name as upstream_name, u.target_base_url, u.api_key, u.use_claude_features, u.use_roo_features, "
             "u.health_status "
@@ -1561,15 +1618,16 @@ class CallStorage:
                 return [
                     {
                         "id": r[0], "model_config_id": r[1], "upstream_id": r[2],
-                        "forward_model": r[3] or "", "sort_order": r[4],
-                        "is_active": r[5],
-                        "created_at": r[6].isoformat() if r[6] else None,
-                        "updated_at": r[7].isoformat() if r[7] else None,
-                        "upstream_name": r[8], "target_base_url": r[9],
-                        "api_key": r[10] or "",
-                        "use_claude_features": bool(r[11]) if r[11] is not None else False,
-                        "use_roo_features": bool(r[12]) if r[12] is not None else False,
-                        "health_status": r[13] or 'healthy',
+                        "forward_model": r[3] or "", "protocol_converter": r[4] or None,
+                        "sort_order": r[5],
+                        "is_active": r[6],
+                        "created_at": r[7].isoformat() if r[7] else None,
+                        "updated_at": r[8].isoformat() if r[8] else None,
+                        "upstream_name": r[9], "target_base_url": r[10],
+                        "api_key": r[11] or "",
+                        "use_claude_features": bool(r[12]) if r[12] is not None else False,
+                        "use_roo_features": bool(r[13]) if r[13] is not None else False,
+                        "health_status": r[14] or 'healthy',
                     }
                     for r in cur.fetchall()
                 ]
@@ -1586,7 +1644,7 @@ class CallStorage:
     def get_all_model_routes(self) -> list:
         """获取所有多上游路由（用于 proxy 缓存加载）"""
         sql = (
-            "SELECT mur.model_config_id, mur.upstream_id, mur.forward_model, mur.sort_order, "
+            "SELECT mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, mur.sort_order, "
             "u.target_base_url, u.api_key, u.use_claude_features, u.use_roo_features, "
             "u.health_status, mc.model_key "
             "FROM model_upstream_routes mur "
@@ -1595,7 +1653,7 @@ class CallStorage:
             "WHERE mur.is_active = true AND mc.is_active = true AND mc.use_multi_upstream = true "
             "ORDER BY mc.model_key, mur.sort_order"
         ) if self.postgresql else (
-            "SELECT mur.model_config_id, mur.upstream_id, mur.forward_model, mur.sort_order, "
+            "SELECT mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, mur.sort_order, "
             "u.target_base_url, u.api_key, u.use_claude_features, u.use_roo_features, "
             "u.health_status, mc.model_key "
             "FROM model_upstream_routes mur "
@@ -1611,12 +1669,13 @@ class CallStorage:
                 return [
                     {
                         "model_config_id": r[0], "upstream_id": r[1],
-                        "forward_model": r[2] or "", "sort_order": r[3],
-                        "target_base_url": r[4], "api_key": r[5] or "",
-                        "use_claude_features": bool(r[6]) if r[6] is not None else False,
-                        "use_roo_features": bool(r[7]) if r[7] is not None else False,
-                        "health_status": r[8] or 'healthy',
-                        "model_key": r[9],
+                        "forward_model": r[2] or "", "protocol_converter": r[3] or None,
+                        "sort_order": r[4],
+                        "target_base_url": r[5], "api_key": r[6] or "",
+                        "use_claude_features": bool(r[7]) if r[7] is not None else False,
+                        "use_roo_features": bool(r[8]) if r[8] is not None else False,
+                        "health_status": r[9] or 'healthy',
+                        "model_key": r[10],
                     }
                     for r in cur.fetchall()
                 ]
@@ -1631,15 +1690,15 @@ class CallStorage:
                 self._sqlite_close(conn, cur)
 
     def create_model_route(self, model_config_id: int, upstream_id: int,
-                           forward_model: str = "", sort_order: int = 0) -> int:
+                           forward_model: str = "", protocol_converter: str = None, sort_order: int = 0) -> int:
         """创建模型路由"""
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
                 cur.execute(
-                    "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, sort_order) "
-                    "VALUES (%s, %s, %s, %s) RETURNING id",
-                    (model_config_id, upstream_id, forward_model or "", sort_order)
+                    "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, protocol_converter, sort_order) "
+                    "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                    (model_config_id, upstream_id, forward_model or "", protocol_converter, sort_order)
                 )
                 return cur.fetchone()[0]
             finally:
@@ -1648,17 +1707,17 @@ class CallStorage:
             conn, cur = self._sqlite_conn()
             try:
                 cur.execute(
-                    "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, sort_order) "
-                    "VALUES (?, ?, ?, ?)",
-                    (model_config_id, upstream_id, forward_model or "", sort_order)
+                    "INSERT INTO model_upstream_routes (model_config_id, upstream_id, forward_model, protocol_converter, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (model_config_id, upstream_id, forward_model or "", protocol_converter, sort_order)
                 )
                 return cur.lastrowid
             finally:
                 self._sqlite_close(conn, cur, commit=True)
 
     def update_model_route(self, route_id: int, upstream_id: int = None,
-                           forward_model: str = None, sort_order: int = None,
-                           is_active: bool = None) -> bool:
+                           forward_model: str = None, protocol_converter: str = None,
+                           sort_order: int = None, is_active: bool = None) -> bool:
         """更新模型路由"""
         fields, params = [], []
         if upstream_id is not None:
@@ -1667,6 +1726,9 @@ class CallStorage:
         if forward_model is not None:
             fields.append("forward_model = %s" if self.postgresql else "forward_model = ?")
             params.append(forward_model)
+        if protocol_converter is not None:
+            fields.append("protocol_converter = %s" if self.postgresql else "protocol_converter = ?")
+            params.append(protocol_converter)
         if sort_order is not None:
             fields.append("sort_order = %s" if self.postgresql else "sort_order = ?")
             params.append(sort_order)

@@ -1,0 +1,405 @@
+"""Tests for Responses API integration with protocol converter."""
+import json
+import pytest
+from src.openai_protocol_converter import convert_request, convert_response, StreamConverter
+
+
+class TestConvertRequest:
+    """Test request conversion from Responses API to chat.completions."""
+
+    def test_string_input_to_messages(self):
+        req = {"model": "kimi-k2.6", "input": "Hello"}
+        result = convert_request(req)
+        assert result["messages"] == [{"role": "user", "content": "Hello"}]
+        assert result["model"] == "kimi-k2.6"
+
+    def test_list_input_passthrough(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        req = {"model": "kimi-k2.6", "input": messages}
+        result = convert_request(req)
+        assert result["messages"] == messages
+
+    def test_instructions_to_system_message(self):
+        req = {"model": "kimi-k2.6", "input": "Hello", "instructions": "Be helpful"}
+        result = convert_request(req)
+        assert result["messages"][0] == {"role": "system", "content": "Be helpful"}
+        assert result["messages"][1] == {"role": "user", "content": "Hello"}
+
+    def test_parameter_mapping(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": "Hello",
+            "temperature": 0.5,
+            "max_output_tokens": 100,
+            "top_p": 0.9,
+            "stream": True,
+        }
+        result = convert_request(req)
+        assert result["temperature"] == 0.5
+        assert result["max_tokens"] == 100
+        assert result["top_p"] == 0.9
+        assert result["stream"] is True
+
+    def test_reasoning_effort_mapping(self):
+        req = {"model": "kimi-k2.6", "input": "Hello", "reasoning": {"effort": "medium"}}
+        result = convert_request(req)
+        assert result["thinking"] == {"type": "enabled"}
+
+    def test_reasoning_none_mapping(self):
+        req = {"model": "kimi-k2.6", "input": "Hello", "reasoning": {"effort": "none"}}
+        result = convert_request(req)
+        assert result["thinking"] == {"type": "disabled"}
+
+
+class TestConvertResponse:
+    """Test response conversion from chat.completions to Responses API."""
+
+    def test_basic_response_conversion(self):
+        chat_resp = {
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "kimi-k2.6",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+        }
+        result = convert_response(chat_resp)
+        assert result["id"] == "chatcmpl-123"
+        assert result["object"] == "response"
+        assert result["status"] == "completed"
+        assert result["output"][0]["type"] == "message"
+        assert result["output"][0]["content"][0]["type"] == "output_text"
+        assert result["output"][0]["content"][0]["text"] == "Hello!"
+        assert result["usage"]["input_tokens"] == 10
+        assert result["usage"]["output_tokens"] == 3
+
+    def test_tool_call_conversion(self):
+        chat_resp = {
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "kimi-k2.6",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-123",
+                        "function": {"name": "get_weather", "arguments": '{"city": "Beijing"}'}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = convert_response(chat_resp)
+        content = result["output"][0]["content"][0]
+        assert content["type"] == "output_function_call"
+        assert content["call_id"] == "call-123"
+        assert content["name"] == "get_weather"
+
+
+class TestStreamConverter:
+    """Test SSE stream conversion with precise reasoning/content separation."""
+
+    def test_preamble_events(self):
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        preamble = converter.get_preamble_events()
+        assert len(preamble) == 2
+        assert json.loads(preamble[0])["type"] == "response.created"
+        assert json.loads(preamble[1])["type"] == "response.output_item.added"
+        assert converter.get_preamble_events() == []
+
+    def test_reasoning_only(self):
+        """Kimi returns reasoning_content before content."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        results = converter.process_event(json.dumps({"choices": [{"delta": {"reasoning_content": "Think"}}]}))
+        assert len(results) == 2
+        assert json.loads(results[0])["type"] == "response.content_part.added"
+        assert json.loads(results[0])["part"]["type"] == "reasoning_text"
+        assert json.loads(results[1])["type"] == "response.reasoning_text.delta"
+        assert json.loads(results[1])["delta"] == "Think"
+        assert json.loads(results[1])["content_index"] == 0
+
+    def test_reasoning_to_content_transition(self):
+        """Transition from reasoning to content emits reasoning_text.done."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        converter.process_event(json.dumps({"choices": [{"delta": {"reasoning_content": "A"}}]}))
+        results = converter.process_event(json.dumps({"choices": [{"delta": {"content": "B"}}]}))
+        types = [json.loads(r)["type"] for r in results]
+        assert types == [
+            "response.reasoning_text.done",
+            "response.content_part.added",
+            "response.output_text.delta",
+        ]
+        assert json.loads(results[2])["delta"] == "B"
+        assert json.loads(results[2])["content_index"] == 1
+
+    def test_content_without_reasoning(self):
+        """Non-reasoning model: content directly."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        results = converter.process_event(json.dumps({"choices": [{"delta": {"content": "Hello"}}]}))
+        assert len(results) == 2
+        assert json.loads(results[0])["type"] == "response.content_part.added"
+        assert json.loads(results[0])["part"]["type"] == "output_text"
+        assert json.loads(results[1])["type"] == "response.output_text.delta"
+        assert json.loads(results[1])["delta"] == "Hello"
+        assert json.loads(results[1])["logprobs"] == []
+
+    def test_done_with_reasoning(self):
+        """[DONE] emits full completion sequence with reasoning."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        converter.process_event(json.dumps({"choices": [{"delta": {"reasoning_content": "R"}}]}))
+        converter.process_event(json.dumps({"choices": [{"delta": {"content": "C"}}]}))
+        results = converter.process_event("[DONE]")
+        types = [json.loads(r)["type"] for r in results]
+        # reasoning_text.done was already emitted during reasoning->content transition
+        assert types == [
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        assert json.loads(results[0])["logprobs"] == []
+        completed = json.loads(results[-1])
+        assert completed["response"]["status"] == "completed"
+        content = completed["response"]["output"][0]["content"]
+        assert content[0]["type"] == "reasoning_text"
+        assert content[0]["text"] == "R"
+        assert content[1]["type"] == "output_text"
+        assert content[1]["text"] == "C"
+
+    def test_done_without_reasoning(self):
+        """[DONE] without reasoning omits reasoning events."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        converter.process_event(json.dumps({"choices": [{"delta": {"content": "Hello"}}]}))
+        results = converter.process_event("[DONE]")
+        types = [json.loads(r)["type"] for r in results]
+        assert types == [
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        assert json.loads(results[0])["logprobs"] == []
+        completed = json.loads(results[-1])
+        content = completed["response"]["output"][0]["content"]
+        assert len(content) == 1
+        assert content[0]["type"] == "output_text"
+        assert content[0]["text"] == "Hello"
+
+    def test_finish_reason_stop_triggers_completion(self):
+        """finish_reason='stop' triggers completion without relying on [DONE]."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        converter.process_event(json.dumps({"choices": [{"delta": {"content": "Hello"}}]}))
+        results = converter.process_event(json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}))
+        types = [json.loads(r)["type"] for r in results]
+        assert types == [
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+
+    def test_finish_reason_then_done_no_duplicate(self):
+        """[DONE] after finish_reason must not emit duplicate completion events."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        converter.process_event(json.dumps({"choices": [{"delta": {"content": "Hello"}}]}))
+        results1 = converter.process_event(json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}))
+        assert len(results1) == 4
+        results2 = converter.process_event("[DONE]")
+        assert results2 == []
+
+    def test_sequence_numbers_increment(self):
+        """Each event gets an incrementing sequence_number."""
+        converter = StreamConverter("resp-123", "kimi-k2.6")
+        converter.get_preamble_events()  # seq 1, 2
+        results = converter.process_event(json.dumps({"choices": [{"delta": {"content": "A"}}]}))
+        seqs = [json.loads(r)["sequence_number"] for r in results]
+        assert seqs == [3, 4]
+
+
+class TestSSEParser:
+    """Test SSE buffer parsing."""
+
+    def test_parse_complete_events(self):
+        from src.openai_protocol_converter import parse_sse_buffer
+        buffer = "data: hello\n\ndata: world\n\n"
+        events, remaining = parse_sse_buffer(buffer)
+        assert len(events) == 2
+        assert events[0]["data"] == "hello"
+        assert events[1]["data"] == "world"
+        assert remaining == ""
+
+    def test_parse_incomplete_event(self):
+        from src.openai_protocol_converter import parse_sse_buffer
+        buffer = "data: hello\n\ndata: wor"
+        events, remaining = parse_sse_buffer(buffer)
+        assert len(events) == 1
+        assert events[0]["data"] == "hello"
+        assert remaining == "data: wor"
+
+    def test_parse_crlf_separator(self):
+        from src.openai_protocol_converter import parse_sse_buffer
+        buffer = "data: hello\r\n\r\ndata: world\r\n\r\n"
+        events, remaining = parse_sse_buffer(buffer)
+        assert len(events) == 2
+        assert events[0]["data"] == "hello"
+        assert events[1]["data"] == "world"
+        assert remaining == ""
+
+    def test_parse_crlf_lines(self):
+        from src.openai_protocol_converter import parse_sse_buffer
+        buffer = "data: hello\r\ndata: world\r\n\r\n"
+        events, remaining = parse_sse_buffer(buffer)
+        assert len(events) == 1
+        assert events[0]["data"] == "world"
+        assert remaining == ""
+
+
+class TestConvertRequestTools:
+    """Test tools and tool_choice conversion."""
+
+    def test_tools_responses_to_chat_format(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": "Hello",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                }
+            ],
+        }
+        result = convert_request(req)
+        tool = result["tools"][0]
+        assert tool["type"] == "function"
+        assert "function" in tool
+        assert tool["function"]["name"] == "get_weather"
+        assert tool["function"]["description"] == "Get weather"
+
+    def test_tool_choice_responses_to_chat_format(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": "Hello",
+            "tool_choice": {"type": "function", "name": "get_weather"},
+        }
+        result = convert_request(req)
+        assert result["tool_choice"]["type"] == "function"
+        assert result["tool_choice"]["function"]["name"] == "get_weather"
+
+    def test_unsupported_tool_type_filtered(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": "Hello",
+            "tools": [{"type": "code_interpreter"}, {"type": "custom"}],
+        }
+        result = convert_request(req)
+        assert "tools" not in result
+
+    def test_plugin_tool_passthrough(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": "Hello",
+            "tools": [{"type": "plugin", "name": "web_search"}],
+        }
+        result = convert_request(req)
+        assert result["tools"][0]["type"] == "plugin"
+
+
+class TestConvertRequestMessages:
+    """Test message format conversion from Responses API to chat.completions."""
+
+    def test_developer_role_to_system(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": [{"role": "developer", "content": "Be helpful"}],
+        }
+        result = convert_request(req)
+        assert result["messages"][0] == {"role": "system", "content": "Be helpful"}
+
+    def test_input_text_part_to_string(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}
+            ],
+        }
+        result = convert_request(req)
+        assert result["messages"][0] == {"role": "user", "content": "Hello"}
+
+    def test_output_text_part_to_string(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": [
+                {"role": "assistant", "content": [{"type": "output_text", "text": "Hi!"}]}
+            ],
+        }
+        result = convert_request(req)
+        assert result["messages"][0] == {"role": "assistant", "content": "Hi!"}
+
+    def test_input_image_part_to_image_url(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe this"},
+                        {"type": "input_image", "image_url": "https://example.com/img.png"},
+                    ],
+                }
+            ],
+        }
+        result = convert_request(req)
+        content = result["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "Describe this"}
+        assert content[1] == {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+
+    def test_refusal_part_dropped(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "refusal", "refusal": "I can't help with that"},
+                        {"type": "output_text", "text": "But I can say hello"},
+                    ],
+                }
+            ],
+        }
+        result = convert_request(req)
+        assert result["messages"][0] == {"role": "assistant", "content": "But I can say hello"}
+
+    def test_chat_format_message_passthrough(self):
+        """Messages already in chat.completions format should pass through unchanged."""
+        req = {
+            "model": "kimi-k2.6",
+            "input": [
+                {"role": "system", "content": "Be helpful"},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ],
+        }
+        result = convert_request(req)
+        assert result["messages"] == req["input"]
+
+    def test_mixed_role_and_parts_conversion(self):
+        req = {
+            "model": "kimi-k2.6",
+            "input": [
+                {"role": "developer", "content": [{"type": "input_text", "text": "Sys"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "User"}]},
+            ],
+        }
+        result = convert_request(req)
+        assert result["messages"][0] == {"role": "system", "content": "Sys"}
+        assert result["messages"][1] == {"role": "user", "content": "User"}

@@ -232,6 +232,7 @@
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">所属上游</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">目标 URL</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">API Key</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">Responses API</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">默认</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">状态</th>
                 <th class="px-4 py-2 text-left font-medium whitespace-nowrap">更新时间</th>
@@ -489,6 +490,13 @@
             <label class="block text-sm font-medium mb-1">转发模型名称</label>
             <input id="modelForwardModel" type="text" placeholder="如：claude-sonnet-4-5（留空则不替换）"
               class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div class="mt-3">
+            <label class="block text-sm font-medium mb-1">协议转换器</label>
+            <select id="modelProtocolConverter" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="">无（直接透传）</option>
+              <option value="kimi2.6">kimi2.6（Responses API &rarr; Chat Completions）</option>
+            </select>
           </div>
         </div>
         <!-- 多上游模式 -->
@@ -1217,7 +1225,11 @@ function renderRoutesList() {
         <option value="">-- 选择上游 --</option>
         ${allUpstreamsCache.map(u => makeUpstreamOption(u, r.upstream_id)).join('')}
       </select>
-      <input type="text" class="route-fw px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-40" placeholder="转发模型名" value="${r.forward_model || ''}" data-idx="${idx}">
+      <input type="text" class="route-fw px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-32" placeholder="转发模型名" value="${r.forward_model || ''}" data-idx="${idx}">
+      <select class="route-converter px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-32" data-idx="${idx}">
+        <option value="">无转换</option>
+        <option value="kimi2.6" ${r.protocol_converter === 'kimi2.6' ? 'selected' : ''}>kimi2.6</option>
+      </select>
       <input type="number" class="route-sort px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-16" placeholder="序号" value="${r.sort_order || idx}" data-idx="${idx}" min="0">
       <button class="route-del-btn px-2 py-1 text-xs text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-idx="${idx}">&times;</button>
     </div>
@@ -1232,6 +1244,11 @@ function renderRoutesList() {
   container.querySelectorAll('.route-fw').forEach(inp => {
     inp.addEventListener('input', () => {
       editingRoutes[inp.dataset.idx].forward_model = inp.value.trim();
+    });
+  });
+  container.querySelectorAll('.route-converter').forEach(sel => {
+    sel.addEventListener('change', () => {
+      editingRoutes[sel.dataset.idx].protocol_converter = sel.value || null;
     });
   });
   container.querySelectorAll('.route-sort').forEach(inp => {
@@ -1256,7 +1273,7 @@ async function loadModels() {
     const data = await res.json();
     allModelConfigs = data.configs || [];
     renderModels();
-  } catch(e) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="10" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
 }
 
 function renderModels() {
@@ -1281,12 +1298,14 @@ function renderModels() {
     const defaultText = cfg.is_default ? '<span class="text-blue-500 font-medium">是</span>' : '<span class="text-zinc-500">否</span>';
     const upstreamName = cfg.upstream_name || '<span class="text-zinc-400">-</span>';
     const modeText = cfg.use_multi_upstream ? '<span class="text-purple-500 font-medium">多上游</span>' : '<span class="text-zinc-500">单上游</span>';
+    const responsesApiText = cfg.protocol_converter ? `<span class="font-mono text-xs text-blue-600 dark:text-blue-400">${cfg.protocol_converter}</span>` : '<span class="text-zinc-500">无</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${cfg.model_key}</td>
       <td class="px-4 py-2 whitespace-nowrap text-xs">${modeText}</td>
       <td class="px-4 py-2 whitespace-nowrap">${upstreamName}</td>
       <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${cfg.target_base_url || ''}">${cfg.target_base_url || '-'}</td>
       <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${keyDisplay}</td>
+      <td class="px-4 py-2 whitespace-nowrap">${responsesApiText}</td>
       <td class="px-4 py-2 whitespace-nowrap">${defaultText}</td>
       <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
       <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${cfg.updated_at || '-'}</td>
@@ -1309,6 +1328,7 @@ function renderModels() {
       document.getElementById('modelUpstreamSelect').value = cfg.upstream_id || '';
       onUpstreamChange();
       document.getElementById('modelForwardModel').value = cfg.forward_model || '';
+      document.getElementById('modelProtocolConverter').value = cfg.protocol_converter || '';
       document.getElementById('modelIsActive').checked = cfg.is_active;
       document.getElementById('modelIsDefault').checked = cfg.is_default;
       const multi = cfg.use_multi_upstream;
@@ -1323,10 +1343,11 @@ function renderModels() {
             id: r.id,
             upstream_id: r.upstream_id,
             forward_model: r.forward_model || '',
+            protocol_converter: r.protocol_converter || '',
             sort_order: r.sort_order || 0
           }));
           if (editingRoutes.length === 0) {
-            editingRoutes = [{ upstream_id: null, forward_model: '', sort_order: 0 }];
+            editingRoutes = [{ upstream_id: null, forward_model: '', protocol_converter: '', sort_order: 0 }];
           }
           renderRoutesList();
         } catch(e) { console.error('Failed to load routes:', e); }
@@ -1372,7 +1393,7 @@ function onMultiUpstreamChange() {
   document.getElementById('modelSingleFields').style.display = multi ? 'none' : 'block';
   document.getElementById('modelMultiFields').style.display = multi ? 'block' : 'none';
   if (multi && editingRoutes.length === 0) {
-    editingRoutes = [{ upstream_id: null, forward_model: '', sort_order: 0 }];
+    editingRoutes = [{ upstream_id: null, forward_model: '', protocol_converter: '', sort_order: 0 }];
     renderRoutesList();
   }
 }
@@ -1381,7 +1402,7 @@ document.getElementById('modelUpstreamSelect').addEventListener('change', onUpst
 document.getElementById('modelUseMultiUpstream').addEventListener('change', onMultiUpstreamChange);
 document.getElementById('addRouteBtn').addEventListener('click', () => {
   const nextSort = editingRoutes.length > 0 ? Math.max(...editingRoutes.map(r => r.sort_order || 0)) + 1 : 0;
-  editingRoutes.push({ upstream_id: null, forward_model: '', sort_order: nextSort });
+  editingRoutes.push({ upstream_id: null, forward_model: '', protocol_converter: '', sort_order: nextSort });
   renderRoutesList();
 });
 
@@ -1405,6 +1426,7 @@ document.getElementById('createModelBtn').addEventListener('click', () => {
   onUpstreamChange();
   onMultiUpstreamChange();
   document.getElementById('modelForwardModel').value = '';
+  document.getElementById('modelProtocolConverter').value = '';
   document.getElementById('modelIsActive').checked = true;
   document.getElementById('modelIsDefault').checked = false;
   document.getElementById('modelEditError').classList.add('hidden');
@@ -1429,6 +1451,7 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
   const targetBaseUrl = document.getElementById('modelBaseUrl').value.trim();
   const apiKey = document.getElementById('modelApiKey').value;
   const forwardModel = document.getElementById('modelForwardModel').value.trim();
+  const protocolConverter = document.getElementById('modelProtocolConverter').value || null;
   const isActive = document.getElementById('modelIsActive').checked;
   const isDefault = document.getElementById('modelIsDefault').checked;
   const useMultiUpstream = document.getElementById('modelUseMultiUpstream').checked;
@@ -1458,12 +1481,14 @@ document.getElementById('submitModelEdit').addEventListener('click', async () =>
     target_base_url: useMultiUpstream ? '' : targetBaseUrl,
     api_key: useMultiUpstream ? '' : apiKey,
     forward_model: useMultiUpstream ? '' : forwardModel,
+    protocol_converter: protocolConverter,
     is_active: isActive,
     is_default: isDefault,
     use_multi_upstream: useMultiUpstream,
     routes: useMultiUpstream ? editingRoutes.filter(r => r.upstream_id).map(r => ({
       upstream_id: r.upstream_id,
       forward_model: r.forward_model || '',
+      protocol_converter: r.protocol_converter || null,
       sort_order: r.sort_order || 0
     })) : []
   };

@@ -1,5 +1,5 @@
 """
-数据库初始化脚本 — 创建 1.0.0 完整 schema + 种子数据
+数据库初始化脚本 — 创建当前完整 schema + 种子数据
 
 用法:
     python scripts/init_database.py                 # 使用默认 config.yaml
@@ -7,8 +7,13 @@
 
 执行后会:
   1. 创建 schema_version 表
-  2. 检查当前版本，如果是空库 → 执行 v1.0.0 初始化
-  3. v1.0.0 内容：
+  2. 检查当前版本，如果是空库 → 执行基础初始化
+  3. 补齐当前分支新增字段：
+     - llm_calls.previous_response_id
+     - llm_calls.full_context
+     - model_configs.protocol_converter
+     - model_upstream_routes.protocol_converter
+  4. 基础内容：
      - 基础表: llm_calls, users, api_keys, model_configs
      - RBAC 表: roles, menus, role_menus, upstreams
      - 预置菜单、角色、关联关系
@@ -19,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.1.0"
 
 
 def get_pg_conn(config):
@@ -102,7 +107,9 @@ PG_TABLES = [
             original_model TEXT,
             overridden_model TEXT,
             user_id INTEGER,
-            api_key_id INTEGER
+            api_key_id INTEGER,
+            previous_response_id TEXT,
+            full_context TEXT
         )
     """),
     ("users", """
@@ -179,6 +186,7 @@ PG_TABLES = [
             is_active BOOLEAN DEFAULT true,
             is_default BOOLEAN DEFAULT false,
             use_multi_upstream BOOLEAN DEFAULT false,
+            protocol_converter VARCHAR(50),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -189,6 +197,7 @@ PG_TABLES = [
             model_config_id INTEGER NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE,
             upstream_id INTEGER NOT NULL REFERENCES upstreams(id),
             forward_model VARCHAR(200),
+            protocol_converter VARCHAR(50),
             sort_order INTEGER DEFAULT 0,
             is_active BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -218,7 +227,9 @@ SQLITE_TABLES = [
             original_model TEXT,
             overridden_model TEXT,
             user_id INTEGER,
-            api_key_id INTEGER
+            api_key_id INTEGER,
+            previous_response_id TEXT,
+            full_context TEXT
         )
     """),
     ("users", """
@@ -295,6 +306,7 @@ SQLITE_TABLES = [
             is_active INTEGER DEFAULT 1,
             is_default INTEGER DEFAULT 0,
             use_multi_upstream INTEGER DEFAULT 0,
+            protocol_converter TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -305,6 +317,7 @@ SQLITE_TABLES = [
             model_config_id INTEGER NOT NULL REFERENCES model_configs(id) ON DELETE CASCADE,
             upstream_id INTEGER NOT NULL REFERENCES upstreams(id),
             forward_model TEXT,
+            protocol_converter TEXT,
             sort_order INTEGER DEFAULT 0,
             is_active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -473,6 +486,51 @@ def run_v100_sqlite(config):
     conn.close()
 
 
+# ===== v1.1.0 Schema Migration =====
+
+def _pg_add_column(conn, table, column, col_type):
+    """PostgreSQL 安全添加列（忽略已存在）"""
+    cur = conn.cursor()
+    try:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}")
+        conn.commit()
+        print(f"    [v1.1.0] {table}.{column} 已确保存在")
+    finally:
+        cur.close()
+
+
+def _sqlite_add_column(conn, table, column, col_type):
+    """SQLite 安全添加列（忽略已存在）"""
+    cur = conn.cursor()
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        existing_columns = {row[1] for row in cur.fetchall()}
+        if column in existing_columns:
+            print(f"    [v1.1.0] {table}.{column} 已存在，跳过")
+            return
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        conn.commit()
+        print(f"    [v1.1.0] {table}.{column} 已添加")
+    finally:
+        cur.close()
+
+
+def run_v110_pg(conn):
+    """v1.0.0 -> v1.1.0 升级 (PostgreSQL)"""
+    _pg_add_column(conn, "llm_calls", "previous_response_id", "TEXT")
+    _pg_add_column(conn, "llm_calls", "full_context", "TEXT")
+    _pg_add_column(conn, "model_configs", "protocol_converter", "VARCHAR(50)")
+    _pg_add_column(conn, "model_upstream_routes", "protocol_converter", "VARCHAR(50)")
+
+
+def run_v110_sqlite(conn):
+    """v1.0.0 -> v1.1.0 升级 (SQLite)"""
+    _sqlite_add_column(conn, "llm_calls", "previous_response_id", "TEXT")
+    _sqlite_add_column(conn, "llm_calls", "full_context", "TEXT")
+    _sqlite_add_column(conn, "model_configs", "protocol_converter", "TEXT")
+    _sqlite_add_column(conn, "model_upstream_routes", "protocol_converter", "TEXT")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -499,21 +557,30 @@ def main():
 
     print(f"Current version: {version or '(empty)'}")
 
-    if version == CURRENT_VERSION:
-        print(f"\n[v{CURRENT_VERSION}] 数据库已是最新版本，无需操作。")
-        conn.close()
-        return
-
     if version is None:
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
-    else:
+    elif version == CURRENT_VERSION:
+        print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
+    elif version == "1.0.0":
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
-
-    # 执行 v1.0.0
-    if is_pg:
-        run_v100_pg(config)
     else:
-        run_v100_sqlite(config)
+        conn.close()
+        raise RuntimeError(f"不支持的数据库版本: {version}")
+
+    # 执行迁移
+    if version is None:
+        if is_pg:
+            run_v100_pg(config)
+        else:
+            run_v100_sqlite(config)
+
+    # v1.0.0 -> v1.1.0
+    if version in (None, "1.0.0", CURRENT_VERSION):
+        print(f"\n[v1.1.0] 检查/补齐当前分支新增字段...")
+        if is_pg:
+            run_v110_pg(conn)
+        else:
+            run_v110_sqlite(conn)
 
     # 写入版本
     if is_pg:
