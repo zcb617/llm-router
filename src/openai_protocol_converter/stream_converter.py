@@ -181,6 +181,17 @@ class StreamConverter:
             }, separators=(",", ":")))
 
         if tool_calls:
+            # Transition from reasoning to tool_calls: close reasoning first
+            if self._in_reasoning:
+                self._in_reasoning = False
+                events.append(json.dumps({
+                    "type": "response.reasoning_text.done",
+                    "item_id": self.item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": self._reasoning_text,
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
             # Transition from content to tool_calls: close content first
             if self._text_content and not self._message_done:
                 events.append(json.dumps({
@@ -229,66 +240,52 @@ class StreamConverter:
         if self._text_content:
             content_parts.append({"type": "output_text", "text": self._text_content})
 
-        # If message has content and not yet done, close it
-        if self._text_content and not self._message_done:
-            # output_text.done
-            events.append(json.dumps({
-                "type": "response.output_text.done",
-                "item_id": self.item_id,
-                "output_index": 0,
-                "content_index": 1,
-                "text": self._text_content,
-                "logprobs": [],
-                "sequence_number": self._next_seq(),
-            }, separators=(",", ":")))
+        # Close message item if not yet done (covers: has content, no content+no tools, no content+has tools)
+        if not self._message_done:
+            if self._text_content:
+                # output_text.done
+                events.append(json.dumps({
+                    "type": "response.output_text.done",
+                    "item_id": self.item_id,
+                    "output_index": 0,
+                    "content_index": 1,
+                    "text": self._text_content,
+                    "logprobs": [],
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
 
-            # content_part.done for output_text
-            events.append(json.dumps({
-                "type": "response.content_part.done",
-                "item_id": self.item_id,
-                "output_index": 0,
-                "content_index": 1,
-                "part": {"type": "output_text", "text": self._text_content, "annotations": []},
-                "sequence_number": self._next_seq(),
-            }, separators=(",", ":")))
+                # content_part.done for output_text
+                events.append(json.dumps({
+                    "type": "response.content_part.done",
+                    "item_id": self.item_id,
+                    "output_index": 0,
+                    "content_index": 1,
+                    "part": {"type": "output_text", "text": self._text_content, "annotations": []},
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
+            elif not self._tool_calls:
+                # No content and no tool calls: still emit output_text.done (even if empty)
+                events.append(json.dumps({
+                    "type": "response.output_text.done",
+                    "item_id": self.item_id,
+                    "output_index": 0,
+                    "content_index": 1,
+                    "text": self._text_content,
+                    "logprobs": [],
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
 
-            # output_item.done for message
-            events.append(json.dumps({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {
-                    "id": self.item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": content_parts,
-                },
-                "sequence_number": self._next_seq(),
-            }, separators=(",", ":")))
-        elif not self._tool_calls:
-            # No content and no tool calls: still close message item
-            # output_text.done (even if empty)
-            events.append(json.dumps({
-                "type": "response.output_text.done",
-                "item_id": self.item_id,
-                "output_index": 0,
-                "content_index": 1,
-                "text": self._text_content,
-                "logprobs": [],
-                "sequence_number": self._next_seq(),
-            }, separators=(",", ":")))
+                # content_part.done for output_text
+                events.append(json.dumps({
+                    "type": "response.content_part.done",
+                    "item_id": self.item_id,
+                    "output_index": 0,
+                    "content_index": 1,
+                    "part": {"type": "output_text", "text": self._text_content, "annotations": []},
+                    "sequence_number": self._next_seq(),
+                }, separators=(",", ":")))
 
-            # content_part.done for output_text
-            events.append(json.dumps({
-                "type": "response.content_part.done",
-                "item_id": self.item_id,
-                "output_index": 0,
-                "content_index": 1,
-                "part": {"type": "output_text", "text": self._text_content, "annotations": []},
-                "sequence_number": self._next_seq(),
-            }, separators=(",", ":")))
-
-            # output_item.done for message
+            # output_item.done for message (always emitted when closing)
             events.append(json.dumps({
                 "type": "response.output_item.done",
                 "output_index": 0,

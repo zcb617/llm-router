@@ -51,8 +51,34 @@ def _convert_content(content):
     return content
 
 
-def _convert_message(msg: dict) -> dict:
+def _convert_message(msg: dict) -> dict | None:
     """Convert a single Responses API message to Chat Completions format."""
+    msg_type = msg.get("type", "")
+
+    # Responses API function_call_output → Chat Completions role="tool"
+    if msg_type == "function_call_output":
+        return {
+            "role": "tool",
+            "tool_call_id": msg.get("call_id", ""),
+            "content": msg.get("output", ""),
+        }
+
+    # Responses API function_call → Chat Completions role="assistant" + tool_calls
+    if msg_type == "function_call":
+        return {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "",
+            "tool_calls": [{
+                "id": msg.get("call_id", msg.get("id", "")),
+                "type": "function",
+                "function": {
+                    "name": msg.get("name", ""),
+                    "arguments": msg.get("arguments", ""),
+                },
+            }],
+        }
+
     result = {}
     # Role mapping
     role = msg.get("role", "user")
