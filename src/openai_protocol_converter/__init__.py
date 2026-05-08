@@ -1,19 +1,49 @@
-"""OpenAI Protocol Converter — responses API ↔ chat.completions for Kimi 2.6."""
+"""OpenAI Protocol Converter — model-specific responses API ↔ chat.completions.
 
-__all__ = ["convert_request", "convert_response", "StreamConverter", "parse_sse_buffer"]
+Usage (recommended):
+    from src.openai_protocol_converter import get_converter
+    mod = get_converter("kimi2.6")
+    body = mod.convert_request(responses_dict)
+
+Backward-compatible exports are also provided so existing ``proxy.py``
+imports continue to work until they are migrated.
+"""
+
+__all__ = [
+    "get_converter",
+    "convert_request",
+    "convert_response",
+    "StreamConverter",
+    "parse_sse_buffer",
+    "BaseStreamConverter",
+]
 
 
-def __getattr__(name):
-    if name == "convert_request":
-        from .request_converter import convert_request
-        return convert_request
-    if name == "convert_response":
-        from .response_converter import convert_response
-        return convert_response
-    if name == "StreamConverter":
-        from .stream_converter import StreamConverter
-        return StreamConverter
-    if name == "parse_sse_buffer":
-        from .stream_converter import parse_sse_buffer
-        return parse_sse_buffer
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def get_converter(protocol_converter: str | None):
+    """Return the converter module for the given protocol_converter value.
+
+    * ``"kimi2.6"`` (or any string containing *kimi*) → :mod:`.kimi`
+    * ``None`` or anything else → :mod:`.common`
+    """
+    if protocol_converter and "kimi" in protocol_converter.lower():
+        from . import kimi
+        return kimi
+    from . import common
+    return common
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible re-exports (default to generic/common implementations)
+# ---------------------------------------------------------------------------
+
+from .common import convert_request, convert_response, BaseStreamConverter, parse_sse_buffer
+
+# Backward compatibility: ``StreamConverter`` retains the *original* behaviour
+# (Kimi-aware, including ``reasoning_content`` support).  New code that needs
+# a truly generic stream converter should use ``BaseStreamConverter`` or
+# ``get_converter(None).StreamConverter``.
+from .stream_converter import StreamConverter
