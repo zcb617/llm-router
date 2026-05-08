@@ -1130,27 +1130,33 @@ class LLMRouterAddon:
                 params = parse_qs(query_str)
                 limit = int(params.get("limit", [100])[0])
                 offset = int(params.get("offset", [0])[0])
+                search_original = params.get("search_original", [""])[0].strip()
+                search_overridden = params.get("search_overridden", [""])[0].strip()
+
+                # 构建 WHERE 子句和参数
+                where_clauses = []
+                query_args = []
+                if user_id:
+                    where_clauses.append("user_id = {}".format("%s" if is_pg else "?"))
+                    query_args.append(user_id)
+                if search_original:
+                    where_clauses.append("original_model LIKE {}".format("%s" if is_pg else "?"))
+                    query_args.append(f"%{search_original}%")
+                if search_overridden:
+                    where_clauses.append("overridden_model LIKE {}".format("%s" if is_pg else "?"))
+                    query_args.append(f"%{search_overridden}%")
+                where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
                 if is_pg:
-                    if user_id:
-                        cur.execute("SELECT COUNT(*) FROM llm_calls WHERE user_id = %s", (user_id,))
-                        total = cur.fetchone()[0]
-                        cur.execute("SELECT * FROM llm_calls WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s OFFSET %s", (user_id, limit, offset))
-                    else:
-                        cur.execute("SELECT COUNT(*) FROM llm_calls")
-                        total = cur.fetchone()[0]
-                        cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT %s OFFSET %s", (limit, offset))
+                    cur.execute(f"SELECT COUNT(*) FROM llm_calls {where_sql}", tuple(query_args))
+                    total = cur.fetchone()[0]
+                    cur.execute(f"SELECT * FROM llm_calls {where_sql} ORDER BY timestamp DESC LIMIT %s OFFSET %s", tuple(query_args) + (limit, offset))
                     rows = cur.fetchall()
                     calls = [dict(zip([d.name for d in cur.description], r)) for r in rows]
                 else:
-                    if user_id:
-                        cur.execute("SELECT COUNT(*) FROM llm_calls WHERE user_id = ?", (user_id,))
-                        total = cur.fetchone()[0]
-                        cur.execute("SELECT * FROM llm_calls WHERE user_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?", (user_id, limit, offset))
-                    else:
-                        cur.execute("SELECT COUNT(*) FROM llm_calls")
-                        total = cur.fetchone()[0]
-                        cur.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT ? OFFSET ?", (limit, offset))
+                    cur.execute(f"SELECT COUNT(*) FROM llm_calls {where_sql}", tuple(query_args))
+                    total = cur.fetchone()[0]
+                    cur.execute(f"SELECT * FROM llm_calls {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?", tuple(query_args) + (limit, offset))
                     calls = [dict(r) for r in cur.fetchall()]
                 
                 flow.response = http.Response.make(

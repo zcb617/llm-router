@@ -39,6 +39,40 @@
     .json-body { font-family: 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
     .truncate-cell { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .truncate-cell-long { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .logs-table { border-collapse: separate; border-spacing: 0; }
+    .logs-table th,
+    .logs-table td { border-right: 1px solid #e4e4e7; border-bottom: 1px solid #e4e4e7; }
+    .logs-table th:last-child,
+    .logs-table td:last-child { border-right: none; }
+    .dark .logs-table th,
+    .dark .logs-table td { border-color: #3f3f46; }
+    .logs-th { position: relative; }
+    .resize-handle {
+      position: absolute;
+      top: 0;
+      right: -4px;
+      width: 8px;
+      height: 100%;
+      cursor: col-resize;
+      z-index: 20;
+      touch-action: none;
+    }
+    .resize-handle::before {
+      content: '';
+      position: absolute;
+      top: 6px;
+      bottom: 6px;
+      left: 3px;
+      width: 1px;
+      background: transparent;
+      transition: background-color .12s;
+    }
+    .logs-th:hover .resize-handle::before,
+    .resize-handle:hover::before { background: #a1a1aa; }
+    .dark .logs-th:hover .resize-handle::before,
+    .dark .resize-handle:hover::before { background: #71717a; }
+    body.col-resizing,
+    body.col-resizing * { cursor: col-resize !important; user-select: none !important; }
     .top-nav-link { color: #71717a; padding: 4px 8px; border-radius: 6px; transition: background-color .15s, color .15s; }
     .top-nav-link:hover { color: #18181b; background: #f4f4f5; }
     .dark .top-nav-link:hover { color: #f4f4f5; background: #27272a; }
@@ -95,7 +129,8 @@
         <!-- Table -->
         <div id="tableWrapper" class="overflow-hidden rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
           <div class="overflow-auto h-full">
-            <table class="text-sm" style="min-width: 1400px; table-layout: auto;">
+            <table id="logsTable" class="logs-table text-sm" style="width: 1400px; min-width: 1400px; table-layout: fixed;">
+              <colgroup id="logsColGroup"></colgroup>
               <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
                 <tr id="headerRow"></tr>
               </thead>
@@ -664,25 +699,86 @@ const COLUMNS = [
   { key: 'tokens_output', label: '输出Token', default: true, minWidth: '110px' },
 ];
 const STORAGE_KEY = 'llm_router_columns';
+const DEFAULT_MIN_COL_WIDTH = 80;
+const DEFAULT_MAX_COL_WIDTH = 700;
+const LOGS_TABLE_MIN_WIDTH = 1400;
 let logsState = {
   page: 1, pageSize: 20, total: 0,
   sortKey: 'timestamp', sortDir: 'desc',
   searchOriginal: '', searchOverridden: '',
-  columns: COLUMNS.map(c => ({...c, visible: true}))
+  columns: createDefaultColumns()
 };
+let logsResizeState = null;
+let logsSuppressSortClick = false;
 
 function getAuthHeaders() { return { 'Authorization': 'Bearer ' + token }; }
+
+function parsePixelValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = parseInt(value, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return NaN;
+}
+
+function toPixel(value) {
+  return `${Math.round(value)}px`;
+}
+
+function getColumnMinWidth(col) {
+  const parsed = parsePixelValue(col.minWidth);
+  if (Number.isFinite(parsed)) return Math.max(DEFAULT_MIN_COL_WIDTH, parsed);
+  return DEFAULT_MIN_COL_WIDTH;
+}
+
+function getColumnMaxWidth(col) {
+  const parsed = parsePixelValue(col.maxWidth);
+  if (Number.isFinite(parsed)) return Math.max(getColumnMinWidth(col), parsed);
+  return DEFAULT_MAX_COL_WIDTH;
+}
+
+function normalizeColumn(raw, fallback = null) {
+  const base = fallback ? { ...fallback, ...raw } : { ...raw };
+  const minWidth = getColumnMinWidth(base);
+  const widthValue = parsePixelValue(base.width);
+  const width = Number.isFinite(widthValue) ? Math.max(minWidth, widthValue) : minWidth;
+  return {
+    ...base,
+    visible: base.visible !== false,
+    minWidth: toPixel(minWidth),
+    width: toPixel(width),
+  };
+}
+
+function createDefaultColumns() {
+  return COLUMNS.map(col => normalizeColumn({ ...col, visible: true }));
+}
+
+function hydrateColumns(rawColumns) {
+  if (!Array.isArray(rawColumns)) return createDefaultColumns();
+  const templateByKey = new Map(COLUMNS.map(col => [col.key, col]));
+  const result = [];
+  rawColumns.forEach(col => {
+    if (!col || !templateByKey.has(col.key)) return;
+    result.push(normalizeColumn(col, templateByKey.get(col.key)));
+  });
+  COLUMNS.forEach(col => {
+    if (!result.some(c => c.key === col.key)) result.push(normalizeColumn({ ...col, visible: true }));
+  });
+  return result;
+}
 
 function loadColumns() {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved) {
     try {
       const parsed = JSON.parse(saved);
-      logsState.columns = parsed.map(c => ({...c, visible: c.visible !== undefined ? c.visible : true}));
+      logsState.columns = hydrateColumns(parsed);
       return;
     } catch(e) {}
   }
-  logsState.columns = COLUMNS.map(c => ({...c, visible: true}));
+  logsState.columns = createDefaultColumns();
 }
 
 function saveColumns() { localStorage.setItem(STORAGE_KEY, JSON.stringify(logsState.columns)); }
@@ -691,20 +787,118 @@ function getVisibleColumns() {
   return logsState.columns.filter(c => c.visible);
 }
 
+function renderColGroup() {
+  const colGroup = document.getElementById('logsColGroup');
+  const table = document.getElementById('logsTable');
+  if (!colGroup) return;
+  const visible = getVisibleColumns();
+  colGroup.innerHTML = '';
+  let totalWidth = 0;
+  visible.forEach(col => {
+    const width = parsePixelValue(col.width) || getColumnMinWidth(col);
+    const colEl = document.createElement('col');
+    colEl.dataset.colKey = col.key;
+    colEl.style.width = toPixel(width);
+    colEl.style.minWidth = toPixel(width);
+    colGroup.appendChild(colEl);
+    totalWidth += width;
+  });
+  if (table) {
+    table.style.width = toPixel(Math.max(LOGS_TABLE_MIN_WIDTH, totalWidth));
+    table.style.minWidth = toPixel(LOGS_TABLE_MIN_WIDTH);
+  }
+}
+
+function syncColumnWidthInCells(colKey, widthPx) {
+  const width = toPixel(widthPx);
+  const cells = document.querySelectorAll(`#headerRow th[data-col-key="${colKey}"], #tableBody td[data-col-key="${colKey}"], #logsColGroup col[data-col-key="${colKey}"]`);
+  cells.forEach(cell => {
+    cell.style.width = width;
+    cell.style.minWidth = width;
+  });
+}
+
+function updateColumnWidth(colKey, widthPx, persist = true) {
+  const col = logsState.columns.find(item => item.key === colKey);
+  if (!col) return;
+  const nextWidth = Math.min(getColumnMaxWidth(col), Math.max(getColumnMinWidth(col), widthPx));
+  col.width = toPixel(nextWidth);
+  syncColumnWidthInCells(col.key, nextWidth);
+  if (persist) saveColumns();
+}
+
+function startColumnResize(event, colKey, th) {
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  logsSuppressSortClick = true;
+  const col = logsState.columns.find(item => item.key === colKey);
+  if (!col) return;
+  const startWidth = parsePixelValue(col.width) || th.offsetWidth || getColumnMinWidth(col);
+  logsResizeState = {
+    colKey,
+    startX: event.clientX,
+    startWidth,
+  };
+  document.body.classList.add('col-resizing');
+  window.addEventListener('pointermove', onColumnResizeMove);
+  window.addEventListener('pointerup', stopColumnResize);
+  window.addEventListener('pointercancel', stopColumnResize);
+}
+
+function onColumnResizeMove(event) {
+  if (!logsResizeState) return;
+  event.preventDefault();
+  const delta = event.clientX - logsResizeState.startX;
+  updateColumnWidth(logsResizeState.colKey, logsResizeState.startWidth + delta, false);
+}
+
+function stopColumnResize() {
+  if (!logsResizeState) return;
+  saveColumns();
+  logsResizeState = null;
+  document.body.classList.remove('col-resizing');
+  window.removeEventListener('pointermove', onColumnResizeMove);
+  window.removeEventListener('pointerup', stopColumnResize);
+  window.removeEventListener('pointercancel', stopColumnResize);
+  setTimeout(() => { logsSuppressSortClick = false; }, 0);
+}
+
+function attachResizeHandle(th, col) {
+  const handle = document.createElement('div');
+  handle.className = 'resize-handle';
+  handle.title = `拖动调整${col.label}列宽`;
+  handle.addEventListener('pointerdown', event => startColumnResize(event, col.key, th));
+  handle.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  th.appendChild(handle);
+}
+
 function renderHeader() {
   const tr = document.getElementById('headerRow');
   const visible = getVisibleColumns();
   tr.innerHTML = '';
+  renderColGroup();
   visible.forEach(col => {
     const th = document.createElement('th');
-    th.className = 'px-4 py-2 text-left font-medium whitespace-nowrap cursor-pointer select-none';
+    th.className = 'logs-th px-4 py-2 text-left font-medium whitespace-nowrap cursor-pointer select-none';
+    th.dataset.colKey = col.key;
+    th.style.width = col.width;
+    th.style.minWidth = col.width;
     if (logsState.sortKey === col.key) th.classList.add(logsState.sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
-    th.textContent = col.label;
-    th.addEventListener('click', () => {
+    const label = document.createElement('span');
+    label.textContent = col.label;
+    th.appendChild(label);
+    th.addEventListener('click', (event) => {
+      if (event.target.closest('.resize-handle')) return;
+      if (logsSuppressSortClick) return;
       if (logsState.sortKey === col.key) logsState.sortDir = logsState.sortDir === 'asc' ? 'desc' : 'asc';
       else { logsState.sortKey = col.key; logsState.sortDir = 'asc'; }
       loadLogsData();
     });
+    attachResizeHandle(th, col);
     tr.appendChild(th);
   });
 }
@@ -719,8 +913,9 @@ function renderTable(data) {
     visible.forEach(col => {
       const td = document.createElement('td');
       td.className = 'px-4 py-2 whitespace-nowrap';
-      if (col.width) td.style.width = col.width;
-      if (col.minWidth) td.style.minWidth = col.minWidth;
+      td.dataset.colKey = col.key;
+      td.style.width = col.width;
+      td.style.minWidth = col.width;
       let val = row[col.key] ?? '';
       if (col.key === 'timestamp' && val) {
         try {
@@ -825,7 +1020,7 @@ document.getElementById('colSettingsBtn').addEventListener('click', () => {
   document.getElementById('colModal').classList.remove('hidden');
 });
 document.getElementById('colModal').addEventListener('click', (e) => { if (e.target === document.getElementById('colModal')) document.getElementById('colModal').classList.add('hidden'); });
-document.getElementById('colResetBtn').addEventListener('click', () => { logsState.columns = COLUMNS.map(c => ({...c})); saveColumns(); document.getElementById('colModal').classList.add('hidden'); renderHeader(); loadLogsData(); });
+document.getElementById('colResetBtn').addEventListener('click', () => { logsState.columns = createDefaultColumns(); saveColumns(); document.getElementById('colModal').classList.add('hidden'); renderHeader(); loadLogsData(); });
 document.getElementById('colSaveBtn').addEventListener('click', () => { document.querySelectorAll('.col-cb').forEach(cb => { const i = parseInt(cb.dataset.idx); logsState.columns[i].visible = cb.checked; }); saveColumns(); document.getElementById('colModal').classList.add('hidden'); renderHeader(); loadLogsData(); });
 
 // ============ 密钥管理 ============
