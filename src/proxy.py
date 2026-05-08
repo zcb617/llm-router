@@ -851,7 +851,9 @@ class LLMRouterAddon:
                 texts = []
                 for part in item.get("content", []):
                     if part.get("type") == "output_text":
-                        texts.append(part["text"])
+                        text = part.get("text", "")
+                        if text:
+                            texts.append(text)
                     elif part.get("type") == "output_function_call":
                         messages.append({
                             "role": "assistant",
