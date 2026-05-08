@@ -7,10 +7,36 @@ LLM Router 启动脚本
 """
 import sys
 import asyncio
+import logging
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
+
+# 配置日志输出到文件和控制台
+log_dir = Path(__file__).parent / "log"
+log_dir.mkdir(exist_ok=True)
+log_file = log_dir / "llm_router.log"
+
+handler_file = RotatingFileHandler(
+    log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+handler_file.setLevel(logging.INFO)
+handler_file.setFormatter(logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+))
+
+handler_console = logging.StreamHandler()
+handler_console.setLevel(logging.INFO)
+handler_console.setFormatter(logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+))
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[handler_file, handler_console],
+)
 
 from src.config import load_config
 from src.proxy import create_addon
