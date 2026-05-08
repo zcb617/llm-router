@@ -1235,8 +1235,8 @@ class LLMRouterAddon:
                 events, remaining = parse_sse_buffer(buffer)
                 flow.metadata["sse_buffer"] = remaining
                 if chunk:
-                    logger.warning(f"[ProtocolConvert] Raw chunk ({len(chunk)} bytes): {raw_text[:200]!r}")
-                    logger.warning(f"[ProtocolConvert] Parsed {len(events)} events, remaining={len(remaining)}")
+                    logger.debug(f"[ProtocolConvert] Raw chunk ({len(chunk)} bytes): {raw_text[:200]!r}")
+                    logger.debug(f"[ProtocolConvert] Parsed {len(events)} events, remaining={len(remaining)}")
                 output_lines = []
                 # 在第一个有数据的 chunk 到达时，发送前置事件序列
                 if chunk:
@@ -1248,7 +1248,7 @@ class LLMRouterAddon:
                         output_lines.append(f"data: {converted}")
                 if output_lines:
                     result = ("\n\n".join(output_lines) + "\n\n").encode("utf-8")
-                    logger.warning(f"[ProtocolConvert] Sending {len(output_lines)} events ({len(result)} bytes)")
+                    logger.debug(f"[ProtocolConvert] Sending {len(output_lines)} events ({len(result)} bytes)")
                     return result
                 return b""
 
@@ -1302,11 +1302,13 @@ class LLMRouterAddon:
                 try:
                     output_items: list[dict] = []
                     # 构建 message 的 content parts
+                    reasoning_text = "".join(converter._reasoning_parts)
+                    text_content = "".join(converter._text_parts)
                     content_parts: list[dict] = []
-                    if converter._reasoning_text:
-                        content_parts.append({"type": "reasoning_text", "text": converter._reasoning_text})
-                    if converter._text_content:
-                        content_parts.append({"type": "output_text", "text": converter._text_content})
+                    if reasoning_text:
+                        content_parts.append({"type": "reasoning_text", "text": reasoning_text})
+                    if text_content:
+                        content_parts.append({"type": "output_text", "text": text_content})
                     if content_parts:
                         output_items.append({
                             "type": "message",
@@ -1347,14 +1349,13 @@ class LLMRouterAddon:
         model = "gpt-3.5-turbo"  # 默认值
         stream_type = "non_stream"  # 默认非流式
         try:
-            import json
             if captured_req.body:
                 req_data = json.loads(captured_req.body)
                 model = req_data.get("model", "gpt-3.5-turbo")
                 # 判断流式/非流式
                 if req_data.get("stream"):
                     stream_type = "stream"
-        except:
+        except Exception:
             pass
 
         # 首字耗时 = 响应头到达时间 - 请求发送时间
