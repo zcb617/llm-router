@@ -12,6 +12,11 @@ class ProxyConfig:
     listen_port: int
     model_mappings: Dict | None = None  # 保留为空，模型配置改从数据库读取
     default_model: str | None = None  # fallback model when no exact match
+    api_key_cache_ttl_seconds: int = 60
+    api_key_negative_cache_ttl_seconds: int = 10
+    call_save_queue_size: int = 5000
+    call_save_workers: int = 2
+    stream_route_preconnect_timeout_ms: int = 800
 
 
 @dataclass
@@ -60,7 +65,12 @@ def load_config(config_path: str = "config.yaml") -> Config:
     return Config(
         proxy=ProxyConfig(
             listen_port=raw["proxy"]["listen_port"],
-            default_model=raw["proxy"].get("default_model")
+            default_model=raw["proxy"].get("default_model"),
+            api_key_cache_ttl_seconds=int(raw["proxy"].get("api_key_cache_ttl_seconds", 60)),
+            api_key_negative_cache_ttl_seconds=int(raw["proxy"].get("api_key_negative_cache_ttl_seconds", 10)),
+            call_save_queue_size=int(raw["proxy"].get("call_save_queue_size", 5000)),
+            call_save_workers=int(raw["proxy"].get("call_save_workers", 2)),
+            stream_route_preconnect_timeout_ms=int(raw["proxy"].get("stream_route_preconnect_timeout_ms", 800)),
         ),
         database=DatabaseConfig(
             path=db_config.get("path", "./data/llm_calls.db"),

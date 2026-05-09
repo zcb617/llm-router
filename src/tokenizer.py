@@ -5,6 +5,28 @@ import json
 from typing import Optional, Tuple
 
 
+def _safe_int(value) -> int:
+    """Best-effort int conversion."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_usage_tokens(usage) -> Optional[Tuple[int, int]]:
+    """Extract token pair from usage object in either OpenAI/Kimi/Responses shapes."""
+    if not isinstance(usage, dict):
+        return None
+
+    if "prompt_tokens" in usage or "completion_tokens" in usage:
+        return (_safe_int(usage.get("prompt_tokens")), _safe_int(usage.get("completion_tokens")))
+
+    if "input_tokens" in usage or "output_tokens" in usage:
+        return (_safe_int(usage.get("input_tokens")), _safe_int(usage.get("output_tokens")))
+
+    return None
+
+
 def _extract_usage_from_sse(response_body: str) -> Optional[Tuple[int, int]]:
     """从 SSE 格式的响应体中提取 usage 信息。
 
@@ -28,25 +50,24 @@ def _extract_usage_from_sse(response_body: str) -> Optional[Tuple[int, int]]:
 
         # Anthropic 格式: message_start 和 message_stop 中有 usage
         usage = data.get("usage")
-        if usage is None and "message" in data:
-            usage = data["message"].get("usage")
+        if not isinstance(usage, dict):
+            message = data.get("message")
+            if isinstance(message, dict):
+                usage = message.get("usage")
 
-        if usage is None:
+        if not isinstance(usage, dict):
             continue
 
-        # OpenAI 字段名
-        if "prompt_tokens" in usage:
-            if input_tokens is None:
-                input_tokens = usage["prompt_tokens"]
-        if "completion_tokens" in usage:
-            output_tokens = usage["completion_tokens"]
+        if input_tokens is None:
+            if "prompt_tokens" in usage:
+                input_tokens = _safe_int(usage.get("prompt_tokens"))
+            elif "input_tokens" in usage:
+                input_tokens = _safe_int(usage.get("input_tokens"))
 
-        # Anthropic / Responses API 字段名
-        if "input_tokens" in usage:
-            if input_tokens is None:
-                input_tokens = usage["input_tokens"]
-        if "output_tokens" in usage:
-            output_tokens = usage["output_tokens"]
+        if "completion_tokens" in usage:
+            output_tokens = _safe_int(usage.get("completion_tokens"))
+        elif "output_tokens" in usage:
+            output_tokens = _safe_int(usage.get("output_tokens"))
 
     if input_tokens is not None or output_tokens is not None:
         return (input_tokens or 0, output_tokens or 0)
@@ -62,18 +83,15 @@ def count_tokens_from_api_response(response_body: str) -> Optional[Tuple[int, in
     try:
         data = json.loads(response_body)
 
-        # OpenAI兼容格式
-        if "usage" in data:
-            usage = data["usage"]
-            input_tokens = usage.get("prompt_tokens", 0)
-            output_tokens = usage.get("completion_tokens", 0)
-            return (input_tokens, output_tokens)
+        usage_tokens = _extract_usage_tokens(data.get("usage"))
+        if usage_tokens is not None:
+            return usage_tokens
 
-        # Responses API / Anthropic 格式
-        if "usage" in data:
-            usage = data["usage"]
-            if "input_tokens" in usage and "output_tokens" in usage:
-                return (usage["input_tokens"], usage["output_tokens"])
+        message = data.get("message")
+        if isinstance(message, dict):
+            usage_tokens = _extract_usage_tokens(message.get("usage"))
+            if usage_tokens is not None:
+                return usage_tokens
 
         return None
     except (json.JSONDecodeError, KeyError, TypeError):

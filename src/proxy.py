@@ -10,10 +10,11 @@ import asyncio
 import uuid
 import threading
 import time
-import urllib.request
-import urllib.error
+import queue
+import socket
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from src.openai_protocol_converter import parse_sse_buffer
 
@@ -74,6 +75,13 @@ class LLMRouterAddon:
                     )
                 )
 
+        if config is None:
+            from src.config import Config, ProxyConfig, DatabaseConfig
+            config = Config(
+                proxy=ProxyConfig(listen_port=38888, model_mappings={}, default_model=None),
+                database=DatabaseConfig(path="./data/llm_calls.db", postgresql=None),
+            )
+
         self.config = config
 
         # 模型配置缓存（从数据库加载）
@@ -90,6 +98,27 @@ class LLMRouterAddon:
         self._health_check_timer = None
         self._health_check_interval = 60  # 秒
         self._health_check_started = False
+
+        # API key 校验缓存
+        self._api_key_cache = {}
+        self._api_key_cache_lock = threading.Lock()
+        self._api_key_cache_ttl = getattr(self.config.proxy, "api_key_cache_ttl_seconds", 60)
+        self._api_key_negative_ttl = getattr(self.config.proxy, "api_key_negative_cache_ttl_seconds", 10)
+
+        # 调用记录异步落库队列（避免阻塞请求主循环）
+        self._save_queue = queue.Queue(maxsize=max(100, getattr(self.config.proxy, "call_save_queue_size", 5000)))
+        self._save_worker_count = max(1, getattr(self.config.proxy, "call_save_workers", 2))
+        self._save_workers_started = False
+
+        # 上游连接复用客户端（多上游同步转发 + 健康检查）
+        self._http_client = None
+        self._http_client_lock = threading.Lock()
+
+        # 多上游流式预探活超时
+        self._stream_route_preconnect_timeout_s = max(
+            0.1,
+            getattr(self.config.proxy, "stream_route_preconnect_timeout_ms", 800) / 1000.0,
+        )
     
     @property
     def capturer(self):
@@ -111,6 +140,81 @@ class LLMRouterAddon:
                     self.config.database.postgresql
                 )
         return self._storage
+
+    def clear_api_key_cache(self):
+        """清空 API key 缓存（在密钥增删改后调用）。"""
+        with self._api_key_cache_lock:
+            self._api_key_cache.clear()
+
+    def _verify_api_key_cached(self, user_api_key: str) -> Optional[dict]:
+        """带 TTL 的 API key 缓存校验。"""
+        now = time.time()
+        with self._api_key_cache_lock:
+            cached = self._api_key_cache.get(user_api_key)
+            if cached and cached["expires_at"] > now:
+                return cached["value"]
+
+        from src.console_api import verify_api_key
+        key_info = verify_api_key(user_api_key, self.storage)
+        ttl = self._api_key_cache_ttl if key_info else self._api_key_negative_ttl
+        expires_at = now + max(1, ttl)
+
+        with self._api_key_cache_lock:
+            if len(self._api_key_cache) > 10000:
+                self._api_key_cache = {
+                    k: v for k, v in self._api_key_cache.items() if v["expires_at"] > now
+                }
+            self._api_key_cache[user_api_key] = {
+                "value": key_info,
+                "expires_at": expires_at,
+            }
+
+        return key_info
+
+    def _get_http_client(self):
+        if self._http_client is not None:
+            return self._http_client
+
+        with self._http_client_lock:
+            if self._http_client is not None:
+                return self._http_client
+
+            import httpx
+            self._http_client = httpx.Client(
+                timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+                limits=httpx.Limits(max_connections=256, max_keepalive_connections=64),
+                follow_redirects=False,
+                http2=False,
+            )
+            return self._http_client
+
+    def _start_save_workers(self):
+        if self._save_workers_started:
+            return
+        self._save_workers_started = True
+        for idx in range(self._save_worker_count):
+            threading.Thread(
+                target=self._save_worker_loop,
+                name=f"llm-router-save-worker-{idx + 1}",
+                daemon=True,
+            ).start()
+        logger.info(f"Call save workers started: {self._save_worker_count}")
+
+    def _enqueue_call_save(self, payload: dict):
+        try:
+            self._save_queue.put_nowait(payload)
+        except queue.Full:
+            logger.warning("Call save queue is full, dropping one record")
+
+    def _save_worker_loop(self):
+        while True:
+            payload = self._save_queue.get()
+            try:
+                self.storage.save_call_with_user(**payload)
+            except Exception as e:
+                logger.error(f"Failed to save call record in worker: {e}", exc_info=True)
+            finally:
+                self._save_queue.task_done()
 
     def _load_model_configs(self):
         """从数据库加载模型配置到内存缓存"""
@@ -208,18 +312,19 @@ class LLMRouterAddon:
         # 从数据库加载模型配置到内存缓存
         self._load_model_configs()
 
+        # 启动异步落库 worker
+        self._start_save_workers()
+
         # 启动健康检查定时器
         self._start_health_check_timer()
     
     async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
-        from urllib.parse import urlparse
-
         path = flow.request.path
 
         # 处理本地Web UI和控制台API（优先级最高）
         if path.startswith("/web") or path.startswith("/api/") or path == "/health" or path == "/favicon.ico" or path == "/":
-            self._handle_local_api(flow)
+            await asyncio.to_thread(self._handle_local_api, flow)
             return
 
         # === LLM 转发请求：验证 API Key ===
@@ -236,8 +341,7 @@ class LLMRouterAddon:
             return
 
         # 验证 API Key
-        from src.console_api import verify_api_key
-        key_info = verify_api_key(user_api_key, self.storage)
+        key_info = self._verify_api_key_cached(user_api_key)
         if key_info is None:
             flow.response = http.Response.make(
                 403,
@@ -258,7 +362,7 @@ class LLMRouterAddon:
         parsed = urlparse(captured_req.url)
         path = parsed.path
 
-        logger.info(f"Intercepted request: {captured_req.method} {path}")
+        logger.debug(f"Intercepted request: {captured_req.method} {path}")
 
         # 从请求 body 提取 model 参数
         model_name = self._extract_model(captured_req.body)
@@ -273,7 +377,7 @@ class LLMRouterAddon:
             flow.metadata["local_response"] = True
             return
 
-        logger.info(f"Model from body: {model_name}")
+        logger.debug(f"Model from body: {model_name}")
 
         # 匹配 model 映射（从数据库缓存）
         mapping, is_default = self._match_model(model_name)
@@ -284,6 +388,8 @@ class LLMRouterAddon:
                 json.dumps({"error": f"No model mapping for '{model_name}'"}, ensure_ascii=False).encode("utf-8"),
                 {"Content-Type": "application/json"}
             )
+            # 标记为本地响应，避免 responseheaders() 误记录为“上游 404”。
+            flow.metadata["local_response"] = True
             return
 
         if is_default:
@@ -322,13 +428,14 @@ class LLMRouterAddon:
                         flow.metadata["local_response"] = True
                         return
                     body_dict = self._inject_history_into_input(body_dict, previous_id, key_info["id"])
+                flow.metadata["resolved_input_context"] = self._normalize_context_input(body_dict.get("input", ""))
                 # 调用转换器转换请求体
                 from src.openai_protocol_converter import convert_request
                 converted_body = convert_request(body_dict)
                 converted_json = json.dumps(converted_body, ensure_ascii=False)
-                logger.warning(f"[ProtocolConvert] Request converted. Original roles: {[m.get('role') for m in body_dict.get('input', [])]}")
-                logger.warning(f"[ProtocolConvert] Converted roles: {[m.get('role') for m in converted_body.get('messages', [])]}")
-                logger.warning(f"[ProtocolConvert] Converted content types: {[type(m.get('content')).__name__ for m in converted_body.get('messages', [])]}")
+                logger.debug(f"[ProtocolConvert] Request converted. Original roles: {[m.get('role') for m in body_dict.get('input', [])]}")
+                logger.debug(f"[ProtocolConvert] Converted roles: {[m.get('role') for m in converted_body.get('messages', [])]}")
+                logger.debug(f"[ProtocolConvert] Converted content types: {[type(m.get('content')).__name__ for m in converted_body.get('messages', [])]}")
                 # 保存原始请求体（responses API 格式）到 metadata，供 response() 保存到数据库
                 flow.metadata["original_request_body"] = captured_req.body
                 captured_req.body = converted_json
@@ -407,7 +514,7 @@ class LLMRouterAddon:
 
         # 重写URL
         new_url = self.capturer.rewrite_url(flow, target_base_url, path)
-        logger.info(f"Rewritten URL: {new_url}")
+        logger.debug(f"Rewritten URL: {new_url}")
 
         # 更新捕获请求的URL为转发后的真实地址
         captured_req.url = new_url
@@ -521,13 +628,29 @@ class LLMRouterAddon:
             flow.metadata["local_response"] = True
             return
 
-        route = candidate_routes[0]
-        self._apply_multi_upstream_route(flow, route, captured_req, model_name, path)
-        flow.metadata["multi_upstream_native"] = True
-        logger.info(
-            f"Multi-upstream streaming selected upstream {route['upstream_id']}: "
-            f"{route['target_base_url']} for model {model_name}"
+        for route in candidate_routes:
+            if self._is_route_reachable(route.get("target_base_url", "")):
+                self._apply_multi_upstream_route(flow, route, captured_req, model_name, path)
+                flow.metadata["multi_upstream_native"] = True
+                logger.info(
+                    f"Multi-upstream streaming selected upstream {route['upstream_id']}: "
+                    f"{route['target_base_url']} for model {model_name}"
+                )
+                return
+
+            upstream_id = route.get("upstream_id")
+            logger.warning(
+                f"Streaming upstream pre-connect failed: {upstream_id} {route.get('target_base_url', '')}, trying next"
+            )
+            if upstream_id is not None:
+                self.storage.increment_upstream_failures(upstream_id)
+
+        flow.response = http.Response.make(
+            502,
+            json.dumps({"error": "All upstreams unavailable: pre-connect failed"}, ensure_ascii=False).encode("utf-8"),
+            {"Content-Type": "application/json"}
         )
+        flow.metadata["local_response"] = True
 
     def _forward_multi_upstream(self, flow, routes, captured_req, model_name, path):
         """多上游转发：按 sort_order 依次尝试，跳过 unhealthy 上游"""
@@ -545,6 +668,7 @@ class LLMRouterAddon:
         candidate_routes = self._get_candidate_routes(routes, model_name)
 
         last_error = None
+        client = self._get_http_client()
 
         for route in candidate_routes:
             upstream_id = route["upstream_id"]
@@ -553,7 +677,7 @@ class LLMRouterAddon:
             api_key = route.get("api_key", "")
             forward_model = route.get("forward_model", "")
 
-            logger.info(f"Trying upstream {upstream_id}: {target_url} for model {model_name} (fw: {forward_model}, health: {health})")
+            logger.debug(f"Trying upstream {upstream_id}: {target_url} for model {model_name} (fw: {forward_model}, health: {health})")
 
             try:
                 # 准备请求 body
@@ -572,24 +696,22 @@ class LLMRouterAddon:
 
                 # 构建完整 URL
                 full_url = target_url.rstrip("/") + path
-                logger.info(f"Multi-upstream forwarding to: {full_url}")
+                logger.debug(f"Multi-upstream forwarding to: {full_url}")
 
-                # 同步 HTTP 请求
+                # 同步 HTTP 请求（连接复用）
                 req_data = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
-                http_req = urllib.request.Request(
+                resp = client.request(
+                    captured_req.method,
                     full_url,
-                    data=req_data,
+                    content=req_data,
                     headers=req_headers,
-                    method=captured_req.method
                 )
 
-                opener = urllib.request.build_opener()
-                resp = opener.open(http_req, timeout=120)
-
                 upstream_headers_time = time.time()
-                resp_body, first_body_time = self._read_response_body_with_timing(resp)
+                resp_body = resp.content
+                first_body_time = upstream_headers_time if resp_body else None
                 resp_headers = dict(resp.headers)
-                status_code = resp.code
+                status_code = resp.status_code
 
                 # 构建 mitmproxy Response
                 flow.response = http.Response.make(
@@ -598,8 +720,8 @@ class LLMRouterAddon:
                     resp_headers
                 )
 
-                if status_code == 200:
-                    logger.info(f"Multi-upstream success: upstream {upstream_id} returned 200")
+                if 200 <= status_code < 300:
+                    logger.info(f"Multi-upstream success: upstream {upstream_id} returned {status_code}")
                     self.storage.reset_upstream_health(upstream_id)
                     if health == "unhealthy":
                         self.reload_model_configs()
@@ -618,11 +740,6 @@ class LLMRouterAddon:
                     self.storage.increment_upstream_failures(upstream_id)
                     last_error = f"Upstream {upstream_id} returned {status_code}"
 
-            except urllib.error.HTTPError as e:
-                status_code = e.code
-                logger.warning(f"Upstream {upstream_id} HTTP error {status_code}, trying next")
-                self.storage.increment_upstream_failures(upstream_id)
-                last_error = f"Upstream {upstream_id} HTTP {status_code}: {str(e)}"
             except Exception as e:
                 logger.error(f"Upstream {upstream_id} request failed: {e}, trying next")
                 self.storage.increment_upstream_failures(upstream_id)
@@ -637,6 +754,23 @@ class LLMRouterAddon:
             {"Content-Type": "application/json"}
         )
         flow.metadata["local_response"] = True
+
+    def _is_route_reachable(self, target_base_url: str) -> bool:
+        """流式路由预探活：先做 TCP 连通性筛选，降低首路由硬失败概率。"""
+        try:
+            parsed = urlparse(target_base_url)
+            host = parsed.hostname
+            if not host:
+                return False
+            if parsed.port:
+                port = parsed.port
+            else:
+                port = 443 if parsed.scheme == "https" else 80
+
+            with socket.create_connection((host, port), timeout=self._stream_route_preconnect_timeout_s):
+                return True
+        except Exception:
+            return False
 
     @staticmethod
     def _is_stream_request(body: str | None) -> bool:
@@ -812,6 +946,122 @@ class LLMRouterAddon:
             "x-app": "cli",
         }
 
+    @staticmethod
+    def _message_has_text_content(content) -> bool:
+        """判断消息 content 是否含有可发送的文本。"""
+        if isinstance(content, str):
+            return content.strip() != ""
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type in ("input_text", "output_text", "text"):
+                    text = part.get("text", "")
+                    if isinstance(text, str) and text.strip():
+                        return True
+                elif part_type == "refusal":
+                    refusal = part.get("refusal", "")
+                    if isinstance(refusal, str) and refusal.strip():
+                        return True
+        return False
+
+    @staticmethod
+    def _content_parts_to_text(content) -> str:
+        """把 content(parts) 尽量归一成文本。"""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type in ("input_text", "output_text", "text"):
+                    text = part.get("text", "")
+                    if isinstance(text, str):
+                        chunks.append(text)
+                elif part_type == "refusal":
+                    refusal = part.get("refusal", "")
+                    if isinstance(refusal, str):
+                        chunks.append(refusal)
+            return "\n".join([c for c in chunks if c])
+        return ""
+
+    @classmethod
+    def _sanitize_responses_items(cls, items: list) -> list:
+        """清洗 Responses input items，避免上游 strict validator 报错。"""
+        sanitized = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            item_type = normalized.get("type")
+
+            if item_type == "function_call":
+                # function_call item 不应带 content
+                normalized.pop("content", None)
+            elif item_type == "function_call_output":
+                # function_call_output 需要 output；兼容历史 content 写法
+                if "output" not in normalized and "content" in normalized:
+                    normalized["output"] = cls._content_parts_to_text(normalized.get("content"))
+                normalized.pop("content", None)
+            elif item_type == "reasoning":
+                # reasoning 透传时优先保留最小必要字段，避免 content 形态不兼容
+                if "encrypted_content" in normalized:
+                    normalized.pop("content", None)
+
+            # 历史里可能混入 role=assistant,type=function_call 且 content 非空
+            if normalized.get("type") == "function_call":
+                normalized.pop("content", None)
+
+            sanitized.append(normalized)
+        return sanitized
+
+    @classmethod
+    def _normalize_history_messages(cls, messages: list) -> list:
+        """清洗历史消息，避免向上游发送空 assistant 消息。"""
+        normalized = []
+        pending_reasoning: list[str] = []
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+
+            role = msg.get("role")
+            msg_type = msg.get("type")
+            if role != "assistant":
+                normalized.append(msg)
+                continue
+
+            has_tool_calls = bool(msg.get("tool_calls")) or msg_type == "function_call"
+            has_text_content = cls._message_has_text_content(msg.get("content"))
+            reasoning_content = msg.get("reasoning_content", "")
+            if not isinstance(reasoning_content, str):
+                reasoning_content = ""
+
+            if not has_text_content and not has_tool_calls:
+                if reasoning_content:
+                    pending_reasoning.append(reasoning_content)
+                # 空 assistant 直接丢弃，否则 Kimi 会报 role assistant must not be empty
+                continue
+
+            if pending_reasoning:
+                merged_reasoning = "\n".join(
+                    [*pending_reasoning, reasoning_content] if reasoning_content else pending_reasoning
+                )
+                updated_msg = dict(msg)
+                updated_msg["reasoning_content"] = merged_reasoning
+                normalized.append(updated_msg)
+                pending_reasoning = []
+            else:
+                normalized.append(msg)
+
+        if pending_reasoning:
+            logger.debug("[HistoryNormalize] Dropped dangling reasoning-only assistant message")
+
+        return normalized
+
     def _resolve_history(self, previous_id: str, api_key_id: int, visited: set = None) -> list:
         """递归展开 previous_response_id 链，返回完整的 messages 数组。"""
         if visited is None:
@@ -823,6 +1073,15 @@ class LLMRouterAddon:
         history = self.storage.get_call_history(previous_id, api_key_id)
         if not history:
             return []
+
+        full_context = history.get("full_context")
+        if full_context:
+            try:
+                parsed_context = json.loads(full_context)
+                if isinstance(parsed_context, list):
+                    return self._normalize_history_messages(parsed_context)
+            except (TypeError, json.JSONDecodeError):
+                pass
 
         try:
             prev_request = json.loads(history["request_body"])
@@ -849,11 +1108,16 @@ class LLMRouterAddon:
         for item in prev_response.get("output", []):
             if item.get("type") == "message":
                 texts = []
+                reasoning_texts = []
                 for part in item.get("content", []):
                     if part.get("type") == "output_text":
                         text = part.get("text", "")
                         if text:
                             texts.append(text)
+                    elif part.get("type") == "reasoning_text":
+                        reasoning_text = part.get("text", "")
+                        if reasoning_text:
+                            reasoning_texts.append(reasoning_text)
                     elif part.get("type") == "output_function_call":
                         messages.append({
                             "role": "assistant",
@@ -862,10 +1126,28 @@ class LLMRouterAddon:
                             "name": part.get("name", ""),
                             "arguments": part.get("arguments", ""),
                         })
-                if texts:
+                if texts or reasoning_texts:
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": "\n".join(texts),
+                    }
+                    if reasoning_texts:
+                        assistant_message["reasoning_content"] = "\n".join(reasoning_texts)
+                    messages.append(assistant_message)
+            elif item.get("type") == "reasoning":
+                reasoning_texts = []
+                for part in item.get("content", []):
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "reasoning_text":
+                        reasoning_text = part.get("text", "")
+                        if reasoning_text:
+                            reasoning_texts.append(reasoning_text)
+                if reasoning_texts:
                     messages.append({
                         "role": "assistant",
-                        "content": "\n".join(texts)
+                        "content": "",
+                        "reasoning_content": "\n".join(reasoning_texts),
                     })
             elif item.get("type") == "function_call":
                 messages.append({
@@ -876,10 +1158,12 @@ class LLMRouterAddon:
                     "arguments": item.get("arguments", ""),
                 })
 
+        messages = self._normalize_history_messages(messages)
+
         # 诊断日志：打印 _resolve_history 提取的消息（含 call_id）
         for i, m in enumerate(messages):
             cid = m.get("call_id") or m.get("id", "")
-            logger.warning(f"[HistoryResolve] msg[{i}] type={m.get('type','-')} role={m.get('role','-')} call_id={cid}")
+            logger.debug(f"[HistoryResolve] msg[{i}] type={m.get('type','-')} role={m.get('role','-')} call_id={cid}")
 
         return messages
 
@@ -892,16 +1176,119 @@ class LLMRouterAddon:
             if isinstance(current_input, str):
                 messages.append({"role": "user", "content": current_input})
             elif isinstance(current_input, list):
-                messages.extend(current_input)
+                messages.extend(self._sanitize_responses_items(current_input))
+
+        messages = self._normalize_history_messages(messages)
 
         # 诊断日志：打印注入后的完整 input
         for i, m in enumerate(messages):
             cid = m.get("call_id") or m.get("id", "")
-            logger.warning(f"[HistoryInject] input[{i}] type={m.get('type','-')} role={m.get('role','-')} call_id={cid}")
+            logger.debug(f"[HistoryInject] input[{i}] type={m.get('type','-')} role={m.get('role','-')} call_id={cid}")
 
         body_dict["input"] = messages
         body_dict.pop("previous_response_id", None)
         return body_dict
+
+    @staticmethod
+    def _normalize_context_input(input_data) -> list:
+        """把 input 规范成 list[message]，用于 full_context 快速路径。"""
+        if isinstance(input_data, list):
+            return LLMRouterAddon._sanitize_responses_items(input_data)
+        if isinstance(input_data, str):
+            return [{"role": "user", "content": input_data}] if input_data else []
+        return []
+
+    @staticmethod
+    def _extract_context_messages_from_response_body(response_body: str) -> list:
+        """从 Responses API 响应体提取可复用的 assistant 消息上下文。"""
+        if not response_body:
+            return []
+
+        try:
+            data = json.loads(response_body)
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+        output = data.get("output", [])
+        if not isinstance(output, list):
+            return []
+
+        messages = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get("type")
+            if item_type == "message":
+                texts = []
+                reasoning_texts = []
+                for part in item.get("content", []):
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "output_text":
+                        text = part.get("text", "")
+                        if text:
+                            texts.append(text)
+                    elif part.get("type") == "reasoning_text":
+                        reasoning_text = part.get("text", "")
+                        if reasoning_text:
+                            reasoning_texts.append(reasoning_text)
+                    elif part.get("type") == "output_function_call":
+                        messages.append({
+                            "role": "assistant",
+                            "type": "function_call",
+                            "call_id": part.get("call_id") or part.get("id", ""),
+                            "name": part.get("name", ""),
+                            "arguments": part.get("arguments", ""),
+                        })
+                if texts or reasoning_texts:
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": "\n".join(texts),
+                    }
+                    if reasoning_texts:
+                        assistant_message["reasoning_content"] = "\n".join(reasoning_texts)
+                    messages.append(assistant_message)
+            elif item_type == "reasoning":
+                reasoning_texts = []
+                for part in item.get("content", []):
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "reasoning_text":
+                        reasoning_text = part.get("text", "")
+                        if reasoning_text:
+                            reasoning_texts.append(reasoning_text)
+                if reasoning_texts:
+                    messages.append({
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "\n".join(reasoning_texts),
+                    })
+            elif item_type == "function_call":
+                messages.append({
+                    "role": "assistant",
+                    "type": "function_call",
+                    "call_id": item.get("call_id") or item.get("id", ""),
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments", ""),
+                })
+
+        return LLMRouterAddon._normalize_history_messages(messages)
+
+    def _build_full_context_for_save(self, flow, captured_resp) -> Optional[str]:
+        """仅在协议转换链路下构建 full_context，供下一轮 previous_response_id 直接命中。"""
+        if not flow.metadata.get("needs_protocol_conversion"):
+            return None
+
+        base_context = flow.metadata.get("resolved_input_context")
+        if not isinstance(base_context, list):
+            base_context = []
+
+        assistant_messages = self._extract_context_messages_from_response_body(captured_resp.body or "")
+        full_context_messages = self._normalize_history_messages(list(base_context) + assistant_messages)
+        if not full_context_messages:
+            return None
+        return json.dumps(full_context_messages, ensure_ascii=False)
 
     def _get_roo_headers(self, flow):
         """获取 Roo Code 特征 headers（不修改 flow）"""
@@ -957,25 +1344,25 @@ class LLMRouterAddon:
 
             recovered = False
             last_error = None
+            client = self._get_http_client()
             for check_url, check_body, check_headers in self._build_health_check_requests(target_url, model_info):
-                req = urllib.request.Request(
-                    check_url,
-                    data=check_body.encode("utf-8"),
-                    headers=check_headers,
-                    method="POST"
-                )
-
                 try:
-                    opener = urllib.request.build_opener()
-                    resp = opener.open(req, timeout=30)
-                    if 200 <= resp.code < 300:
+                    resp = client.post(
+                        check_url,
+                        content=check_body.encode("utf-8"),
+                        headers=check_headers,
+                        timeout=30.0,
+                    )
+                    if 200 <= resp.status_code < 300:
                         self.storage.reset_upstream_health(upstream_id)
-                        logger.info(f"Health check: upstream {upstream_name} recovered ({resp.code}) via {check_url}")
+                        logger.info(
+                            f"Health check: upstream {upstream_name} recovered ({resp.status_code}) via {check_url}"
+                        )
                         # 重载模型缓存以更新路由健康状态
                         self.reload_model_configs()
                         recovered = True
                         break
-                    last_error = f"status {resp.code} via {check_url}"
+                    last_error = f"status {resp.status_code} via {check_url}"
                 except Exception as e:
                     last_error = f"{e} via {check_url}"
 
@@ -1060,6 +1447,9 @@ class LLMRouterAddon:
                 else:
                     flow.response = http.Response.make(404, b"Model square page not found", {"Content-Type": "text/plain"})
                 return
+
+            if path.startswith("/api/calls") or path == "/api/stats":
+                self.storage._ensure_hot_path_indexes()
 
             # 根据配置连接数据库（同步）
             if self.config.database.postgresql:
@@ -1304,43 +1694,69 @@ class LLMRouterAddon:
                 try:
                     output_items: list[dict] = []
                     # 构建 message 的 content parts
-                    reasoning_text = "".join(converter._reasoning_parts)
-                    text_content = "".join(converter._text_parts)
-                    content_parts: list[dict] = []
+                    reasoning_text = getattr(converter, "_reasoning_text", "")
+                    if not reasoning_text:
+                        reasoning_text = "".join(getattr(converter, "_reasoning_parts", []))
+                    text_content = getattr(converter, "_text_content", "")
+                    if not text_content:
+                        text_content = "".join(getattr(converter, "_text_parts", []))
                     if reasoning_text:
-                        content_parts.append({"type": "reasoning_text", "text": reasoning_text})
-                    if text_content:
-                        content_parts.append({"type": "output_text", "text": text_content})
-                    if content_parts:
                         output_items.append({
+                            "id": getattr(converter, "_reasoning_item_id", ""),
+                            "type": "reasoning",
+                            "status": "completed",
+                            "summary": [],
+                            "content": [{"type": "reasoning_text", "text": reasoning_text}],
+                        })
+                    if text_content:
+                        output_items.append({
+                            "id": getattr(converter, "item_id", ""),
                             "type": "message",
                             "role": "assistant",
-                            "content": content_parts,
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": text_content, "annotations": []}],
                         })
                     # 构建 function_call 项
                     for _idx, tc in converter._tool_calls.items():
-                        if tc.get("id"):
+                        if tc.get("item_id"):
                             output_items.append({
+                                "id": tc.get("item_id", ""),
                                 "type": "function_call",
-                                "call_id": tc["id"],
+                                "status": "completed",
+                                "call_id": tc.get("call_id", ""),
                                 "name": tc.get("name", ""),
                                 "arguments": tc.get("arguments", ""),
                             })
                     responses_resp = {
                         "id": captured_req.call_id,
                         "object": "response",
+                        "created_at": int(getattr(converter, "created_at", time.time())),
+                        "completed_at": int(time.time()),
                         "model": flow.metadata.get("overridden_model", flow.metadata.get("original_model", "unknown")),
                         "status": "completed",
+                        "error": None,
+                        "incomplete_details": None,
+                        "instructions": None,
+                        "max_output_tokens": None,
                         "output": output_items,
+                        "parallel_tool_calls": True,
+                        "previous_response_id": None,
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "temperature": 1,
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": None,
+                        "metadata": {},
                     }
                     captured_resp.body = json.dumps(responses_resp, ensure_ascii=False)
-                    logger.info(f"[ProtocolConvert] Stream response rebuilt for history: {len(output_items)} output items")
+                    logger.debug(f"[ProtocolConvert] Stream response rebuilt for history: {len(output_items)} output items")
                 except Exception as e:
                     logger.error(f"Failed to rebuild stream response for history: {e}")
 
         self._update_native_multi_upstream_health(flow, captured_resp.status_code)
 
-        logger.info(
+        logger.debug(
             f"Response captured: "
             f"status={captured_resp.status_code}, "
             f"duration={captured_resp.duration_ms}ms"
@@ -1373,7 +1789,7 @@ class LLMRouterAddon:
             response_body=captured_resp.body
         )
 
-        logger.info(
+        logger.debug(
             f"Token calculation: "
             f"input={tokens_input}, output={tokens_output}, source={token_source}, "
             f"stream={stream_type}, first_token_ms={first_token_ms}"
@@ -1383,72 +1799,34 @@ class LLMRouterAddon:
         user_id = flow.metadata.get("user_id")
         api_key_id = flow.metadata.get("api_key_id")
         previous_response_id = flow.metadata.get("previous_response_id")
+        full_context = self._build_full_context_for_save(flow, captured_resp)
         # 如果有协议转换，保存原始请求体（responses API 格式）
         original_request_body = flow.metadata.get("original_request_body")
         if original_request_body:
             captured_req.body = original_request_body
-        asyncio.create_task(
-            self._save_call(
-                captured_req=captured_req,
-                captured_resp=captured_resp,
-                tokens_input=tokens_input,
-                tokens_output=tokens_output,
-                token_source=token_source,
-                stream_type=stream_type,
-                first_token_ms=first_token_ms,
-                original_model=captured_req.original_model,
-                overridden_model=captured_req.overridden_model,
-                call_id=captured_req.call_id,
-                user_id=user_id,
-                api_key_id=api_key_id,
-                previous_response_id=previous_response_id
-            )
-        )
 
-    async def _save_call(
-        self,
-        captured_req,
-        captured_resp,
-        tokens_input: int,
-        tokens_output: int,
-        token_source: str,
-        stream_type: str = "non_stream",
-        first_token_ms: Optional[int] = None,
-        original_model: str = None,
-        overridden_model: str = None,
-        call_id: str = None,
-        user_id: Optional[int] = None,
-        api_key_id: Optional[int] = None,
-        previous_response_id: Optional[str] = None,
-        full_context: Optional[str] = None
-    ):
-        """保存调用记录到数据库"""
-        try:
-            self.storage.save_call_with_user(
-                call_id=call_id,
-                timestamp=captured_req.timestamp,
-                url=captured_req.url,
-                method=captured_req.method,
-                request_headers=captured_req.headers,
-                request_body=captured_req.body or "",
-                response_headers=captured_resp.headers,
-                response_body=captured_resp.body or "",
-                duration_ms=captured_resp.duration_ms,
-                tokens_input=tokens_input,
-                tokens_output=tokens_output,
-                token_source=token_source,
-                stream_type=stream_type,
-                first_token_ms=first_token_ms,
-                original_model=original_model,
-                overridden_model=overridden_model,
-                user_id=user_id,
-                api_key_id=api_key_id,
-                previous_response_id=previous_response_id,
-                full_context=full_context
-            )
-            logger.info("Call record saved to database")
-        except Exception as e:
-            logger.error(f"Failed to save call record: {e}", exc_info=True)
+        self._enqueue_call_save({
+            "call_id": captured_req.call_id,
+            "timestamp": captured_req.timestamp,
+            "url": captured_req.url,
+            "method": captured_req.method,
+            "request_headers": captured_req.headers,
+            "request_body": captured_req.body or "",
+            "response_headers": captured_resp.headers,
+            "response_body": captured_resp.body or "",
+            "duration_ms": captured_resp.duration_ms,
+            "tokens_input": tokens_input,
+            "tokens_output": tokens_output,
+            "token_source": token_source,
+            "stream_type": stream_type,
+            "first_token_ms": first_token_ms,
+            "original_model": captured_req.original_model,
+            "overridden_model": captured_req.overridden_model,
+            "user_id": user_id,
+            "api_key_id": api_key_id,
+            "previous_response_id": previous_response_id,
+            "full_context": full_context,
+        })
 
     def error(self, flow: http.HTTPFlow):
         """上游连接/传输错误时标记当前多上游路由失败。"""
@@ -1473,6 +1851,25 @@ class LLMRouterAddon:
         else:
             logger.warning(f"Multi-upstream native upstream {upstream_id} returned {status_code}")
             self.storage.increment_upstream_failures(upstream_id)
+
+    def done(self):
+        """mitmproxy addon 退出时释放资源。"""
+        # 给落库队列一个短暂排空窗口，避免最后几条记录丢失。
+        deadline = time.time() + 2.0
+        while not self._save_queue.empty() and time.time() < deadline:
+            time.sleep(0.05)
+
+        if self._http_client is not None:
+            try:
+                self._http_client.close()
+            except Exception:
+                pass
+
+        if self._external_storage is None and self._storage is not None:
+            try:
+                self._storage.close()
+            except Exception:
+                pass
 
 
 # mitmdump加载时需要的addons变量

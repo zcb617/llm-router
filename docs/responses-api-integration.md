@@ -69,9 +69,9 @@ OpenAI 在 2025 年推出了 **Responses API**（新协议），与原有的 **C
 
 | 组件 | 位置 | 职责 |
 |------|------|------|
-| `convert_request()` | `src/openai_protocol_converter/request_converter.py` | Responses API → Chat Completions 请求转换 |
-| `convert_response()` | `src/openai_protocol_converter/response_converter.py` | Chat Completions → Responses API 非流式响应转换 |
-| `StreamConverter` | `src/openai_protocol_converter/stream_converter.py` | SSE 流式响应逐事件转换 |
+| `convert_request()` | `kimi-open-responses/src/openai_protocol_converter/request_converter.py` | Responses API → Chat Completions 请求转换 |
+| `convert_response()` | `kimi-open-responses/src/openai_protocol_converter/response_converter.py` | Chat Completions → Responses API 非流式响应转换 |
+| `StreamConverter` | `kimi-open-responses/src/openai_protocol_converter/stream_converter.py` | SSE 流式响应逐事件转换 |
 | `_resolve_history()` | `src/proxy.py` | 递归展开 `previous_response_id` 链 |
 | `_inject_history_into_input()` | `src/proxy.py` | 将历史消息注入当前请求 |
 | `_parse_sse_buffer()` | `src/proxy.py` | SSE 事件解析（处理跨 chunk） |

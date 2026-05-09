@@ -2,6 +2,11 @@ proxy:
   listen_port: 38888
   # default_model: "qwen3-coder-plus"  # 可选：当请求的模型未在 model_configs 中匹配时，使用此默认模型
   # 模型配置请在控制台「模型配置」菜单中管理，不再在此文件中配置
+  # api_key_cache_ttl_seconds: 60            # API Key 正向缓存（秒）
+  # api_key_negative_cache_ttl_seconds: 10   # API Key 负向缓存（秒）
+  # call_save_queue_size: 5000               # 调用记录异步落库队列长度
+  # call_save_workers: 2                     # 调用记录异步落库 worker 数量
+  # stream_route_preconnect_timeout_ms: 800  # 多上游流式预探活超时（毫秒）
 
 database:
   path: "./data/llm_calls.db"

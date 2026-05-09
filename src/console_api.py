@@ -332,6 +332,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         expires_at = date.today() + timedelta(days=expire_days)
 
         key_id = storage.create_api_key(payload["user_id"], name, key_value, expires_at)
+        if addon:
+            addon.clear_api_key_cache()
 
         _json_response(flow, 200, {
             "message": "密钥创建成功",
@@ -356,6 +358,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
         deleted = storage.delete_api_key(payload["user_id"], key_id)
         if deleted:
+            if addon:
+                addon.clear_api_key_cache()
             _json_response(flow, 200, {"message": "密钥删除成功"})
         else:
             _json_response(flow, 404, {"error": "密钥不存在或无权删除"})

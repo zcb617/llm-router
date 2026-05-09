@@ -36,7 +36,7 @@ class TestConvertRequest:
         }
         result = convert_request(req)
         assert result["temperature"] == 0.5
-        assert result["max_tokens"] == 100
+        assert result["max_completion_tokens"] == 100
         assert result["top_p"] == 0.9
         assert result["stream"] is True
 
@@ -94,10 +94,10 @@ class TestConvertResponse:
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
         }
         result = convert_response(chat_resp)
-        content = result["output"][0]["content"][0]
-        assert content["type"] == "output_function_call"
-        assert content["call_id"] == "call-123"
-        assert content["name"] == "get_weather"
+        output_item = result["output"][0]
+        assert output_item["type"] == "function_call"
+        assert output_item["call_id"] == "call-123"
+        assert output_item["name"] == "get_weather"
 
 
 class TestStreamConverter:
@@ -115,12 +115,13 @@ class TestStreamConverter:
         """Kimi returns reasoning_content before content."""
         converter = StreamConverter("resp-123", "kimi-k2.6")
         results = converter.process_event(json.dumps({"choices": [{"delta": {"reasoning_content": "Think"}}]}))
-        assert len(results) == 2
-        assert json.loads(results[0])["type"] == "response.content_part.added"
-        assert json.loads(results[0])["part"]["type"] == "reasoning_text"
-        assert json.loads(results[1])["type"] == "response.reasoning_text.delta"
-        assert json.loads(results[1])["delta"] == "Think"
-        assert json.loads(results[1])["content_index"] == 0
+        assert len(results) == 3
+        assert json.loads(results[0])["type"] == "response.output_item.added"
+        assert json.loads(results[1])["type"] == "response.content_part.added"
+        assert json.loads(results[1])["part"]["type"] == "reasoning_text"
+        assert json.loads(results[2])["type"] == "response.reasoning_text.delta"
+        assert json.loads(results[2])["delta"] == "Think"
+        assert json.loads(results[2])["content_index"] == 0
 
     def test_reasoning_to_content_transition(self):
         """Transition from reasoning to content emits reasoning_text.done."""
@@ -130,11 +131,12 @@ class TestStreamConverter:
         types = [json.loads(r)["type"] for r in results]
         assert types == [
             "response.reasoning_text.done",
+            "response.output_item.done",
             "response.content_part.added",
             "response.output_text.delta",
         ]
-        assert json.loads(results[2])["delta"] == "B"
-        assert json.loads(results[2])["content_index"] == 1
+        assert json.loads(results[3])["delta"] == "B"
+        assert json.loads(results[3])["content_index"] == 0
 
     def test_content_without_reasoning(self):
         """Non-reasoning model: content directly."""
@@ -164,11 +166,13 @@ class TestStreamConverter:
         assert json.loads(results[0])["logprobs"] == []
         completed = json.loads(results[-1])
         assert completed["response"]["status"] == "completed"
-        content = completed["response"]["output"][0]["content"]
-        assert content[0]["type"] == "reasoning_text"
-        assert content[0]["text"] == "R"
-        assert content[1]["type"] == "output_text"
-        assert content[1]["text"] == "C"
+        output = completed["response"]["output"]
+        assert output[0]["type"] == "reasoning"
+        assert output[0]["content"][0]["type"] == "reasoning_text"
+        assert output[0]["content"][0]["text"] == "R"
+        assert output[1]["type"] == "message"
+        assert output[1]["content"][0]["type"] == "output_text"
+        assert output[1]["content"][0]["text"] == "C"
 
     def test_done_without_reasoning(self):
         """[DONE] without reasoning omits reasoning events."""
@@ -396,7 +400,7 @@ class TestConvertRequestTools:
             "tools": [{"type": "plugin", "name": "web_search"}],
         }
         result = convert_request(req)
-        assert result["tools"][0]["type"] == "plugin"
+        assert "tools" not in result
 
 
 class TestConvertRequestMessages:
@@ -557,9 +561,8 @@ class TestResolveHistory:
     def test_resolve_history_extracts_output_function_call_from_message(self):
         """_resolve_history must extract output_function_call nested in message content.
 
-        response_converter.py generates function_call as output_function_call inside
-        message content (not as a standalone output item). This test verifies that
-        _resolve_history correctly extracts them.
+        This is a compatibility path for historical data that still stores
+        output_function_call nested inside message content.
         """
         import sys
         from unittest.mock import MagicMock
@@ -601,6 +604,84 @@ class TestResolveHistory:
             assert messages[1]["call_id"] == "shell_command:1"
             assert messages[1]["name"] == "shell_command"
             assert messages[2] == {"role": "assistant", "content": "OK"}
+        finally:
+            del sys.modules["mitmproxy"]
+            del sys.modules["mitmproxy.addonmanager"]
+
+    def test_resolve_history_merges_reasoning_without_empty_assistant(self):
+        """reasoning item should merge into next assistant message, not emit empty assistant."""
+        import sys
+        from unittest.mock import MagicMock
+
+        mock_mitmproxy = MagicMock()
+        sys.modules["mitmproxy"] = mock_mitmproxy
+        sys.modules["mitmproxy.addonmanager"] = mock_mitmproxy.addonmanager
+        try:
+            from src.proxy import LLMRouterAddon
+
+            class MockStorage:
+                def get_call_history(self, call_id, api_key_id):
+                    return {
+                        "request_body": json.dumps({
+                            "input": [{"role": "user", "content": "Hello"}]
+                        }),
+                        "response_body": json.dumps({
+                            "output": [
+                                {
+                                    "type": "reasoning",
+                                    "content": [{"type": "reasoning_text", "text": "R"}],
+                                },
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "A"}],
+                                },
+                            ]
+                        }),
+                    }
+
+            addon = LLMRouterAddon()
+            addon._storage = MockStorage()
+            messages = addon._resolve_history("prev-id", 1)
+
+            assert len(messages) == 2
+            assert messages[0] == {"role": "user", "content": "Hello"}
+            assert messages[1]["role"] == "assistant"
+            assert messages[1]["content"] == "A"
+            assert messages[1]["reasoning_content"] == "R"
+        finally:
+            del sys.modules["mitmproxy"]
+            del sys.modules["mitmproxy.addonmanager"]
+
+    def test_sanitize_responses_items_function_call_shapes(self):
+        """function_call/function_call_output items should be sanitized for strict validators."""
+        import sys
+        from unittest.mock import MagicMock
+
+        mock_mitmproxy = MagicMock()
+        sys.modules["mitmproxy"] = mock_mitmproxy
+        sys.modules["mitmproxy.addonmanager"] = mock_mitmproxy.addonmanager
+        try:
+            from src.proxy import LLMRouterAddon
+
+            items = [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "foo",
+                    "arguments": "{}",
+                    "content": [{"type": "output_text", "text": "should-be-removed"}],
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "content": [{"type": "output_text", "text": "tool-result"}],
+                },
+            ]
+            sanitized = LLMRouterAddon._sanitize_responses_items(items)
+            assert "content" not in sanitized[0]
+            assert sanitized[1]["output"] == "tool-result"
+            assert "content" not in sanitized[1]
         finally:
             del sys.modules["mitmproxy"]
             del sys.modules["mitmproxy.addonmanager"]

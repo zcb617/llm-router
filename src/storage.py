@@ -2,6 +2,7 @@
 SQLite/PostgreSQL存储模块 - 异步写入调用记录
 """
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 from datetime import date
@@ -17,25 +18,94 @@ class CallStorage:
         self.postgresql = postgresql
         self._initialized = False
         self._use_postgres = postgresql is not None
+        self._pg_pool = None
+        self._index_ready = False
+        self._index_lock = threading.Lock()
+
+        if self._use_postgres:
+            import psycopg2.pool
+            self._pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=20,
+                host=self.postgresql.host,
+                port=self.postgresql.port,
+                user=self.postgresql.user,
+                password=self.postgresql.password,
+                database=self.postgresql.dbname,
+            )
 
     # ========== PostgreSQL 辅助方法 ==========
 
     def _pg_conn(self):
         """获取 PostgreSQL 连接，返回 (conn, cur)"""
-        import psycopg2
-        conn = psycopg2.connect(
-            host=self.postgresql.host, port=self.postgresql.port,
-            user=self.postgresql.user, password=self.postgresql.password,
-            database=self.postgresql.dbname
-        )
+        if self._pg_pool is not None:
+            conn = self._pg_pool.getconn()
+        else:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=self.postgresql.host, port=self.postgresql.port,
+                user=self.postgresql.user, password=self.postgresql.password,
+                database=self.postgresql.dbname
+            )
         return conn, conn.cursor()
 
     def _pg_close(self, conn, cur, commit: bool = False):
         """关闭 PostgreSQL 连接"""
-        if commit:
-            conn.commit()
-        cur.close()
-        conn.close()
+        try:
+            if commit:
+                conn.commit()
+            elif self._pg_pool is not None:
+                conn.rollback()
+        except Exception:
+            pass
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            if self._pg_pool is not None:
+                self._pg_pool.putconn(conn)
+            else:
+                conn.close()
+
+    def _ensure_hot_path_indexes(self):
+        """为高频查询/写入路径补齐索引（存在即跳过）。"""
+        if self._index_ready:
+            return
+
+        with self._index_lock:
+            if self._index_ready:
+                return
+
+            conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+            try:
+                if self.postgresql:
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_lookup ON api_keys (key, is_active, expires_at)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_call_id_api_key ON llm_calls (call_id, api_key_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_user_ts ON llm_calls (user_id, timestamp DESC)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_models_ts ON llm_calls (original_model, overridden_model, timestamp DESC)")
+                else:
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_lookup ON api_keys (key, is_active, expires_at)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_call_id_api_key ON llm_calls (call_id, api_key_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_user_ts ON llm_calls (user_id, timestamp DESC)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_models_ts ON llm_calls (original_model, overridden_model, timestamp DESC)")
+
+                if self.postgresql:
+                    conn.commit()
+                else:
+                    conn.commit()
+                self._index_ready = True
+            except Exception:
+                # 表可能尚未初始化，后续请求会重试补索引。
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            finally:
+                if self.postgresql:
+                    self._pg_close(conn, cur)
+                else:
+                    self._sqlite_close(conn, cur)
 
     def _sqlite_conn(self, row_factory: bool = False):
         """获取 SQLite 连接，返回 (conn, cur)"""
@@ -47,9 +117,20 @@ class CallStorage:
 
     def _sqlite_close(self, conn, cur, commit: bool = False):
         """关闭 SQLite 连接"""
-        if commit:
-            conn.commit()
-        conn.close()
+        try:
+            if commit:
+                conn.commit()
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            conn.close()
+
+    def close(self):
+        """释放底层连接资源。"""
+        if self._pg_pool is not None:
+            self._pg_pool.closeall()
 
     # ========== 异步方法 ==========
 
@@ -446,6 +527,7 @@ class CallStorage:
     def verify_api_key(self, key: str) -> Optional[dict]:
         """验证 API Key，返回 {id, user_id} 或 None"""
         from datetime import date
+        self._ensure_hot_path_indexes()
         today = date.today().isoformat()
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -501,6 +583,7 @@ class CallStorage:
         previous_response_id: Optional[str] = None, full_context: Optional[str] = None
     ):
         """保存调用记录（带用户和 API Key 关联）"""
+        self._ensure_hot_path_indexes()
         args = (
             call_id, timestamp, url, method,
             json.dumps(request_headers, ensure_ascii=False),
@@ -551,6 +634,7 @@ class CallStorage:
         返回 llm_calls 记录（包含 request_body 和 response_body），
         如果找不到或不属于该 api_key_id，返回 None。
         """
+        self._ensure_hot_path_indexes()
         sql = (
             "SELECT request_body, response_body, full_context FROM llm_calls "
             "WHERE call_id = %s AND api_key_id = %s"
