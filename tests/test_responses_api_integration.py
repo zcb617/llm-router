@@ -597,13 +597,14 @@ class TestResolveHistory:
             addon._storage = MockStorage()
             messages = addon._resolve_history("prev-id", 1)
 
-            # Should have user message + function_call + assistant text
-            assert len(messages) == 3
+            # Should have user message + assistant message (content + tool_calls)
+            assert len(messages) == 2
             assert messages[0] == {"role": "user", "content": "Run a command"}
-            assert messages[1]["type"] == "function_call"
-            assert messages[1]["call_id"] == "shell_command:1"
-            assert messages[1]["name"] == "shell_command"
-            assert messages[2] == {"role": "assistant", "content": "OK"}
+            assert messages[1]["role"] == "assistant"
+            assert messages[1]["content"] == "OK"
+            assert len(messages[1]["tool_calls"]) == 1
+            assert messages[1]["tool_calls"][0]["id"] == "shell_command:1"
+            assert messages[1]["tool_calls"][0]["function"]["name"] == "shell_command"
         finally:
             del sys.modules["mitmproxy"]
             del sys.modules["mitmproxy.addonmanager"]

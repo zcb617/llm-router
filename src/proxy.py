@@ -1111,6 +1111,7 @@ class LLMRouterAddon:
             if item.get("type") == "message":
                 texts = []
                 reasoning_texts = []
+                tool_calls = []
                 for part in item.get("content", []):
                     if part.get("type") == "output_text":
                         text = part.get("text", "")
@@ -1121,14 +1122,24 @@ class LLMRouterAddon:
                         if reasoning_text:
                             reasoning_texts.append(reasoning_text)
                     elif part.get("type") == "output_function_call":
-                        messages.append({
-                            "role": "assistant",
-                            "type": "function_call",
-                            "call_id": part.get("call_id") or part.get("id", ""),
-                            "name": part.get("name", ""),
-                            "arguments": part.get("arguments", ""),
+                        tool_calls.append({
+                            "id": part.get("call_id") or part.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": part.get("name", ""),
+                                "arguments": part.get("arguments", ""),
+                            },
                         })
-                if texts or reasoning_texts:
+                if tool_calls:
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": "\n".join(texts) if texts else None,
+                        "tool_calls": tool_calls,
+                    }
+                    if reasoning_texts:
+                        assistant_message["reasoning_content"] = "\n".join(reasoning_texts)
+                    messages.append(assistant_message)
+                elif texts or reasoning_texts:
                     assistant_message = {
                         "role": "assistant",
                         "content": "\n".join(texts),
@@ -1224,6 +1235,7 @@ class LLMRouterAddon:
             if item_type == "message":
                 texts = []
                 reasoning_texts = []
+                tool_calls = []
                 for part in item.get("content", []):
                     if not isinstance(part, dict):
                         continue
@@ -1236,14 +1248,24 @@ class LLMRouterAddon:
                         if reasoning_text:
                             reasoning_texts.append(reasoning_text)
                     elif part.get("type") == "output_function_call":
-                        messages.append({
-                            "role": "assistant",
-                            "type": "function_call",
-                            "call_id": part.get("call_id") or part.get("id", ""),
-                            "name": part.get("name", ""),
-                            "arguments": part.get("arguments", ""),
+                        tool_calls.append({
+                            "id": part.get("call_id") or part.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": part.get("name", ""),
+                                "arguments": part.get("arguments", ""),
+                            },
                         })
-                if texts or reasoning_texts:
+                if tool_calls:
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": "\n".join(texts) if texts else None,
+                        "tool_calls": tool_calls,
+                    }
+                    if reasoning_texts:
+                        assistant_message["reasoning_content"] = "\n".join(reasoning_texts)
+                    messages.append(assistant_message)
+                elif texts or reasoning_texts:
                     assistant_message = {
                         "role": "assistant",
                         "content": "\n".join(texts),
