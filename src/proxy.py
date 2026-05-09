@@ -1719,6 +1719,7 @@ class LLMRouterAddon:
             if converter:
                 try:
                     output_items: list[dict] = []
+                    stream_usage = getattr(converter, "_usage", None)
                     # 构建 message 的 content parts
                     reasoning_text = getattr(converter, "_reasoning_text", "")
                     if not reasoning_text:
@@ -1772,7 +1773,7 @@ class LLMRouterAddon:
                         "temperature": 1,
                         "top_p": 1,
                         "truncation": "disabled",
-                        "usage": None,
+                        "usage": stream_usage,
                         "metadata": {},
                     }
                     final_responses_body = json.dumps(responses_resp, ensure_ascii=False)
