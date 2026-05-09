@@ -1884,6 +1884,78 @@ class LLMRouterAddon:
             f"resp_status={resp_status}, has_stream_chunks={has_stream_chunks}, "
             f"call_id={call_id}, original={original_model}, overridden={overridden_model}"
         )
+
+        # 兜底保存：客户端断开但上游已正常响应时，用累积的流式数据保存记录
+        if captured_req and resp_status is not None and 200 <= resp_status < 300 and has_stream_chunks:
+            from src.tokenizer import calculate_tokens, extract_cached_hit_tokens, extract_cache_miss_tokens
+            import json
+            import time
+
+            streamed_chunks = flow.metadata.get("streamed_response_chunks", [])
+            response_body = "".join(
+                c.decode("utf-8", errors="replace") if isinstance(c, bytes) else str(c)
+                for c in streamed_chunks
+            )
+            duration_ms = int((time.time() - captured_req.start_time) * 1000)
+            response_headers = dict(flow.response.headers) if flow.response else {}
+            stream_type = "stream"
+            first_token_time = flow.metadata.get("first_token_time")
+            first_token_ms = None
+            if first_token_time:
+                first_token_ms = int((first_token_time - captured_req.start_time) * 1000)
+
+            model = original_model or "unknown"
+            try:
+                if captured_req.body:
+                    req_data = json.loads(captured_req.body)
+                    model = req_data.get("model", model)
+            except Exception:
+                pass
+
+            tokens_input, tokens_output, token_source = calculate_tokens(
+                model=model,
+                request_body=captured_req.body,
+                response_body=response_body
+            )
+            cached_hit_tokens = extract_cached_hit_tokens(response_body)
+            cache_miss_tokens = extract_cache_miss_tokens(response_body)
+            tokens_per_second = None
+            if tokens_output and tokens_output > 0 and duration_ms and duration_ms > 0:
+                tokens_per_second = round(tokens_output / (duration_ms / 1000), 2)
+
+            logger.warning(
+                f"[ERROR_SAVE] Client disconnected, saving fallback record for call_id={call_id}, "
+                f"input={tokens_input}, output={tokens_output}, cached={cached_hit_tokens}, "
+                f"miss={cache_miss_tokens}, speed={tokens_per_second}"
+            )
+
+            self._enqueue_call_save({
+                "call_id": captured_req.call_id,
+                "timestamp": captured_req.timestamp,
+                "url": captured_req.url,
+                "method": captured_req.method,
+                "request_headers": captured_req.headers,
+                "request_body": captured_req.body or "",
+                "response_headers": response_headers,
+                "response_body": response_body,
+                "final_responses_body": None,
+                "duration_ms": duration_ms,
+                "tokens_input": tokens_input,
+                "tokens_output": tokens_output,
+                "cached_hit_tokens": cached_hit_tokens,
+                "cache_miss_tokens": cache_miss_tokens,
+                "tokens_per_second": tokens_per_second,
+                "token_source": token_source,
+                "stream_type": stream_type,
+                "first_token_ms": first_token_ms,
+                "original_model": captured_req.original_model,
+                "overridden_model": captured_req.overridden_model,
+                "user_id": flow.metadata.get("user_id"),
+                "api_key_id": flow.metadata.get("api_key_id"),
+                "previous_response_id": flow.metadata.get("previous_response_id"),
+                "full_context": None,
+            })
+
         if not is_multi:
             return
         upstream_id = flow.metadata.get("multi_upstream_id")
