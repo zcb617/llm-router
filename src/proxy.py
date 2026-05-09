@@ -1083,9 +1083,11 @@ class LLMRouterAddon:
             except (TypeError, json.JSONDecodeError):
                 pass
 
+        history_response_body = history.get("final_responses_body") or history.get("response_body")
+
         try:
             prev_request = json.loads(history["request_body"])
-            prev_response = json.loads(history["response_body"])
+            prev_response = json.loads(history_response_body)
         except (json.JSONDecodeError, TypeError):
             return []
 
@@ -1275,7 +1277,7 @@ class LLMRouterAddon:
 
         return LLMRouterAddon._normalize_history_messages(messages)
 
-    def _build_full_context_for_save(self, flow, captured_resp) -> Optional[str]:
+    def _build_full_context_for_save(self, flow, captured_resp, final_responses_body: Optional[str] = None) -> Optional[str]:
         """仅在协议转换链路下构建 full_context，供下一轮 previous_response_id 直接命中。"""
         if not flow.metadata.get("needs_protocol_conversion"):
             return None
@@ -1284,7 +1286,8 @@ class LLMRouterAddon:
         if not isinstance(base_context, list):
             base_context = []
 
-        assistant_messages = self._extract_context_messages_from_response_body(captured_resp.body or "")
+        source_body = final_responses_body if isinstance(final_responses_body, str) else (captured_resp.body or "")
+        assistant_messages = self._extract_context_messages_from_response_body(source_body)
         full_context_messages = self._normalize_history_messages(list(base_context) + assistant_messages)
         if not full_context_messages:
             return None
@@ -1668,6 +1671,7 @@ class LLMRouterAddon:
 
         # 捕获响应数据
         captured_resp = self.capturer.capture_response(flow, captured_req)
+        final_responses_body = None
 
         # 协议转换：非流式响应
         needs_conversion = flow.metadata.get("needs_protocol_conversion")
@@ -1682,7 +1686,7 @@ class LLMRouterAddon:
                 responses_resp["id"] = captured_req.call_id
                 new_body = json.dumps(responses_resp, ensure_ascii=False)
                 flow.response.content = new_body.encode("utf-8")
-                captured_resp.body = new_body
+                final_responses_body = new_body
                 flow.response.headers["Content-Length"] = str(len(new_body.encode("utf-8")))
             except Exception as e:
                 logger.error(f"Response conversion failed: {e}")
@@ -1749,7 +1753,7 @@ class LLMRouterAddon:
                         "usage": None,
                         "metadata": {},
                     }
-                    captured_resp.body = json.dumps(responses_resp, ensure_ascii=False)
+                    final_responses_body = json.dumps(responses_resp, ensure_ascii=False)
                     logger.debug(f"[ProtocolConvert] Stream response rebuilt for history: {len(output_items)} output items")
                 except Exception as e:
                     logger.error(f"Failed to rebuild stream response for history: {e}")
@@ -1799,7 +1803,11 @@ class LLMRouterAddon:
         user_id = flow.metadata.get("user_id")
         api_key_id = flow.metadata.get("api_key_id")
         previous_response_id = flow.metadata.get("previous_response_id")
-        full_context = self._build_full_context_for_save(flow, captured_resp)
+        full_context = self._build_full_context_for_save(
+            flow,
+            captured_resp,
+            final_responses_body=final_responses_body,
+        )
         # 如果有协议转换，保存原始请求体（responses API 格式）
         original_request_body = flow.metadata.get("original_request_body")
         if original_request_body:
@@ -1814,6 +1822,7 @@ class LLMRouterAddon:
             "request_body": captured_req.body or "",
             "response_headers": captured_resp.headers,
             "response_body": captured_resp.body or "",
+            "final_responses_body": final_responses_body,
             "duration_ms": captured_resp.duration_ms,
             "tokens_input": tokens_input,
             "tokens_output": tokens_output,

@@ -685,3 +685,48 @@ class TestResolveHistory:
         finally:
             del sys.modules["mitmproxy"]
             del sys.modules["mitmproxy.addonmanager"]
+
+    def test_resolve_history_prefers_final_responses_body(self):
+        """When present, final_responses_body should be used for context extraction."""
+        import sys
+        from unittest.mock import MagicMock
+
+        mock_mitmproxy = MagicMock()
+        sys.modules["mitmproxy"] = mock_mitmproxy
+        sys.modules["mitmproxy.addonmanager"] = mock_mitmproxy.addonmanager
+        try:
+            from src.proxy import LLMRouterAddon
+
+            class MockStorage:
+                def get_call_history(self, call_id, api_key_id):
+                    return {
+                        "request_body": json.dumps({
+                            "input": [{"role": "user", "content": "Hi"}]
+                        }),
+                        # 原始上游 chat.completions 格式（没有 output）
+                        "response_body": json.dumps({
+                            "choices": [{"message": {"role": "assistant", "content": "raw"}}]
+                        }),
+                        # 结构化 Responses 格式
+                        "final_responses_body": json.dumps({
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "final"}]
+                                }
+                            ]
+                        }),
+                    }
+
+            addon = LLMRouterAddon()
+            addon._storage = MockStorage()
+            messages = addon._resolve_history("prev-id", 1)
+
+            assert messages == [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "final"},
+            ]
+        finally:
+            del sys.modules["mitmproxy"]
+            del sys.modules["mitmproxy.addonmanager"]

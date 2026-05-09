@@ -21,6 +21,8 @@ class CallStorage:
         self._pg_pool = None
         self._index_ready = False
         self._index_lock = threading.Lock()
+        self._llm_calls_schema_ready = False
+        self._llm_calls_schema_lock = threading.Lock()
 
         if self._use_postgres:
             import psycopg2.pool
@@ -107,6 +109,38 @@ class CallStorage:
                 else:
                     self._sqlite_close(conn, cur)
 
+    def _ensure_llm_calls_schema_extensions(self):
+        """确保 llm_calls 扩展字段存在（存在即跳过）。"""
+        if self._llm_calls_schema_ready:
+            return
+
+        with self._llm_calls_schema_lock:
+            if self._llm_calls_schema_ready:
+                return
+
+            conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+            try:
+                if self.postgresql:
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS final_responses_body TEXT")
+                else:
+                    cur.execute("PRAGMA table_info(llm_calls)")
+                    existing_columns = {row[1] for row in cur.fetchall()}
+                    if "final_responses_body" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN final_responses_body TEXT")
+
+                conn.commit()
+                self._llm_calls_schema_ready = True
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            finally:
+                if self.postgresql:
+                    self._pg_close(conn, cur)
+                else:
+                    self._sqlite_close(conn, cur)
+
     def _sqlite_conn(self, row_factory: bool = False):
         """获取 SQLite 连接，返回 (conn, cur)"""
         import sqlite3
@@ -164,6 +198,7 @@ class CallStorage:
                         request_body TEXT,
                         response_headers JSON,
                         response_body TEXT,
+                        final_responses_body TEXT,
                         duration_ms INTEGER,
                         tokens_input INTEGER,
                         tokens_output INTEGER,
@@ -193,6 +228,7 @@ class CallStorage:
                         request_body TEXT,
                         response_headers TEXT,
                         response_body TEXT,
+                        final_responses_body TEXT,
                         duration_ms INTEGER,
                         tokens_input INTEGER,
                         tokens_output INTEGER,
@@ -224,10 +260,12 @@ class CallStorage:
         stream_type: str = "non_stream",
         first_token_ms: Optional[int] = None,
         original_model: str = None,
-        overridden_model: str = None
+        overridden_model: str = None,
+        final_responses_body: Optional[str] = None,
     ):
         """保存一次LLM调用记录"""
         await self.initialize()
+        self._ensure_llm_calls_schema_extensions()
 
         if self._use_postgres:
             conn = await self._get_pg_conn()
@@ -236,17 +274,18 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body,
+                        response_headers, response_body, final_responses_body,
                         duration_ms, tokens_input, tokens_output, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 """,
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
                     request_body,
                     json.dumps(response_headers, ensure_ascii=False),
                     response_body,
+                    final_responses_body,
                     duration_ms, tokens_input, tokens_output, token_source,
                     stream_type, first_token_ms,
                     original_model, overridden_model
@@ -260,17 +299,18 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body,
+                        response_headers, response_body, final_responses_body,
                         duration_ms, tokens_input, tokens_output, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
                     request_body,
                     json.dumps(response_headers, ensure_ascii=False),
                     response_body,
+                    final_responses_body,
                     duration_ms, tokens_input, tokens_output, token_source,
                     stream_type, first_token_ms,
                     original_model, overridden_model
@@ -357,6 +397,10 @@ class CallStorage:
                 cur.execute("ALTER TABLE llm_calls ADD COLUMN api_key_id INTEGER")
             except Exception:
                 pass
+            try:
+                cur.execute("ALTER TABLE llm_calls ADD COLUMN final_responses_body TEXT")
+            except Exception:
+                pass
             conn.commit()
         else:
             import sqlite3
@@ -389,6 +433,10 @@ class CallStorage:
                 pass
             try:
                 db_cur.execute("ALTER TABLE llm_calls ADD COLUMN api_key_id INTEGER")
+            except Exception:
+                pass
+            try:
+                db_cur.execute("ALTER TABLE llm_calls ADD COLUMN final_responses_body TEXT")
             except Exception:
                 pass
             db_conn.commit()
@@ -580,9 +628,11 @@ class CallStorage:
         stream_type: str = "non_stream", first_token_ms: Optional[int] = None,
         original_model: str = None, overridden_model: str = None,
         user_id: Optional[int] = None, api_key_id: Optional[int] = None,
-        previous_response_id: Optional[str] = None, full_context: Optional[str] = None
+        previous_response_id: Optional[str] = None, full_context: Optional[str] = None,
+        final_responses_body: Optional[str] = None,
     ):
         """保存调用记录（带用户和 API Key 关联）"""
+        self._ensure_llm_calls_schema_extensions()
         self._ensure_hot_path_indexes()
         args = (
             call_id, timestamp, url, method,
@@ -590,6 +640,7 @@ class CallStorage:
             request_body,
             json.dumps(response_headers, ensure_ascii=False),
             response_body,
+            final_responses_body,
             duration_ms, tokens_input, tokens_output, token_source,
             stream_type, first_token_ms,
             original_model, overridden_model, user_id, api_key_id,
@@ -602,12 +653,12 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body,
+                        response_headers, response_body, final_responses_body,
                         duration_ms, tokens_input, tokens_output, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -618,12 +669,12 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body,
+                        response_headers, response_body, final_responses_body,
                         duration_ms, tokens_input, tokens_output, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
@@ -631,15 +682,15 @@ class CallStorage:
     def get_call_history(self, call_id: str, api_key_id: int) -> Optional[dict]:
         """查询历史调用记录，按 api_key_id 隔离。
 
-        返回 llm_calls 记录（包含 request_body 和 response_body），
+        返回 llm_calls 记录（包含 request_body/response_body/final_responses_body），
         如果找不到或不属于该 api_key_id，返回 None。
         """
         self._ensure_hot_path_indexes()
         sql = (
-            "SELECT request_body, response_body, full_context FROM llm_calls "
+            "SELECT request_body, response_body, final_responses_body, full_context FROM llm_calls "
             "WHERE call_id = %s AND api_key_id = %s"
         ) if self.postgresql else (
-            "SELECT request_body, response_body, full_context FROM llm_calls "
+            "SELECT request_body, response_body, final_responses_body, full_context FROM llm_calls "
             "WHERE call_id = ? AND api_key_id = ?"
         )
         if self.postgresql:
@@ -651,7 +702,8 @@ class CallStorage:
                     return {
                         "request_body": row[0],
                         "response_body": row[1],
-                        "full_context": row[2]
+                        "final_responses_body": row[2],
+                        "full_context": row[3]
                     }
                 return None
             finally:

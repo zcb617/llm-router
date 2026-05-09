@@ -11,6 +11,7 @@
   3. 补齐当前分支新增字段：
      - llm_calls.previous_response_id
      - llm_calls.full_context
+     - llm_calls.final_responses_body
      - model_configs.protocol_converter
      - model_upstream_routes.protocol_converter
   4. 基础内容：
@@ -98,6 +99,7 @@ PG_TABLES = [
             request_body TEXT,
             response_headers JSON,
             response_body TEXT,
+            final_responses_body TEXT,
             duration_ms INTEGER,
             tokens_input INTEGER,
             tokens_output INTEGER,
@@ -218,6 +220,7 @@ SQLITE_TABLES = [
             request_body TEXT,
             response_headers TEXT,
             response_body TEXT,
+            final_responses_body TEXT,
             duration_ms INTEGER,
             tokens_input INTEGER,
             tokens_output INTEGER,
@@ -519,6 +522,7 @@ def run_v110_pg(conn):
     """v1.0.0 -> v1.1.0 升级 (PostgreSQL)"""
     _pg_add_column(conn, "llm_calls", "previous_response_id", "TEXT")
     _pg_add_column(conn, "llm_calls", "full_context", "TEXT")
+    _pg_add_column(conn, "llm_calls", "final_responses_body", "TEXT")
     _pg_add_column(conn, "model_configs", "protocol_converter", "VARCHAR(50)")
     _pg_add_column(conn, "model_upstream_routes", "protocol_converter", "VARCHAR(50)")
 
@@ -527,6 +531,7 @@ def run_v110_sqlite(conn):
     """v1.0.0 -> v1.1.0 升级 (SQLite)"""
     _sqlite_add_column(conn, "llm_calls", "previous_response_id", "TEXT")
     _sqlite_add_column(conn, "llm_calls", "full_context", "TEXT")
+    _sqlite_add_column(conn, "llm_calls", "final_responses_body", "TEXT")
     _sqlite_add_column(conn, "model_configs", "protocol_converter", "TEXT")
     _sqlite_add_column(conn, "model_upstream_routes", "protocol_converter", "TEXT")
 
