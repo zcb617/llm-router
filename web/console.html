@@ -343,6 +343,77 @@
         </div>
         <div id="rolesEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无角色</div>
       </div>
+      <!-- ==================== 用量统计面板 ==================== -->
+      <div id="usage_statsPanel" class="hidden flex flex-col flex-1 min-h-0">
+        <!-- 顶部统计卡片 -->
+        <div class="grid grid-cols-3 gap-4 mb-6">
+          <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+            <div class="text-sm text-zinc-500 mb-1">今日总消耗</div>
+            <div id="statDayTotal" class="text-2xl font-bold mb-2">0</div>
+            <div class="text-xs text-zinc-400 flex flex-wrap gap-x-3 gap-y-1">
+              <span title="调用次数" class="inline-flex items-center gap-1 text-blue-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg><span id="statDayCalls" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="缓存未中" class="inline-flex items-center gap-1 text-amber-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span id="statDayMiss" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="缓存命中" class="inline-flex items-center gap-1 text-emerald-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span id="statDayHit" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="输出" class="inline-flex items-center gap-1 text-rose-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg><span id="statDayOut" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+            </div>
+          </div>
+          <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+            <div class="text-sm text-zinc-500 mb-1">本周总消耗</div>
+            <div id="statWeekTotal" class="text-2xl font-bold mb-2">0</div>
+            <div class="text-xs text-zinc-400 flex flex-wrap gap-x-3 gap-y-1">
+              <span title="调用次数" class="inline-flex items-center gap-1 text-blue-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg><span id="statWeekCalls" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="缓存未中" class="inline-flex items-center gap-1 text-amber-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span id="statWeekMiss" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="缓存命中" class="inline-flex items-center gap-1 text-emerald-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span id="statWeekHit" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="输出" class="inline-flex items-center gap-1 text-rose-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg><span id="statWeekOut" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+            </div>
+          </div>
+          <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+            <div class="text-sm text-zinc-500 mb-1">本月总消耗</div>
+            <div id="statMonthTotal" class="text-2xl font-bold mb-2">0</div>
+            <div class="text-xs text-zinc-400 flex flex-wrap gap-x-3 gap-y-1">
+              <span title="调用次数" class="inline-flex items-center gap-1 text-blue-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg><span id="statMonthCalls" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="缓存未中" class="inline-flex items-center gap-1 text-amber-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span id="statMonthMiss" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="缓存命中" class="inline-flex items-center gap-1 text-emerald-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span id="statMonthHit" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+              <span title="输出" class="inline-flex items-center gap-1 text-rose-500"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg><span id="statMonthOut" class="text-zinc-600 dark:text-zinc-300 font-medium">0</span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 模型明细表格 -->
+        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <table id="usage_statsTable" class="text-sm w-full" style="table-layout: auto; min-width: 900px;">
+            <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+              <tr>
+                <th rowspan="3" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700" style="min-width:160px;">模型名称</th>
+                <th colspan="4" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700">今日</th>
+                <th colspan="4" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700">本周</th>
+                <th colspan="4" class="px-4 py-2 text-center font-medium whitespace-nowrap">本月</th>
+              </tr>
+              <tr>
+                <th rowspan="2" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-blue-500" title="调用次数"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg><span>调用</span></span></th>
+                <th colspan="3" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700">Token 消耗</th>
+                <th rowspan="2" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-blue-500" title="调用次数"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg><span>调用</span></span></th>
+                <th colspan="3" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700">Token 消耗</th>
+                <th rowspan="2" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-blue-500" title="调用次数"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg><span>调用</span></span></th>
+                <th colspan="3" class="px-4 py-2 text-center font-medium whitespace-nowrap">Token 消耗</th>
+              </tr>
+              <tr>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-amber-500" title="缓存未中"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>未中</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-emerald-500" title="缓存命中"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>命中</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-rose-500" title="输出"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg><span>输出</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-amber-500" title="缓存未中"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>未中</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-emerald-500" title="缓存命中"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>命中</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-rose-500" title="输出"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg><span>输出</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-amber-500" title="缓存未中"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>未中</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700"><span class="inline-flex items-center justify-center gap-1 text-emerald-500" title="缓存命中"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>命中</span></span></th>
+                <th class="px-4 py-2 text-center font-medium whitespace-nowrap"><span class="inline-flex items-center justify-center gap-1 text-rose-500" title="输出"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg><span>输出</span></span></th>
+              </tr>
+            </thead>
+            <tbody id="usage_statsTableBody"></tbody>
+          </table>
+        </div>
+        <div id="usage_statsEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无用量数据</div>
+      </div>
     </main>
   </div>
 
@@ -667,7 +738,7 @@ function switchPage(page) {
     }
   });
   // 显示/隐藏面板
-  ['logsPanel', 'keysPanel', 'upstreamsPanel', 'modelsPanel', 'usersPanel', 'rolesPanel'].forEach(id => {
+  ['logsPanel', 'keysPanel', 'upstreamsPanel', 'modelsPanel', 'usersPanel', 'rolesPanel', 'usage_statsPanel'].forEach(id => {
     const panel = document.getElementById(id);
     if (panel) {
       if (id === page + 'Panel') {
@@ -685,6 +756,8 @@ function switchPage(page) {
   if (page === 'models') loadModels();
   if (page === 'users') loadUsers();
   if (page === 'roles') loadRoles();
+  if (page === 'usage_stats') loadUsageStats();
+  if (page === 'usage_stats') loadUsageStats();
 }
 
 // ============ 调用日志（复用 index.html 逻辑） ============
@@ -2048,6 +2121,157 @@ document.getElementById('roleResetBtn').addEventListener('click', () => {
   renderRoles();
 });
 document.getElementById('roleSearchName').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderRoles(); });
+
+// ============ 用量统计 ============
+async function loadUsageStats() {
+  try {
+    const res = await fetch('/api/usage_stats', { headers: getAuthHeaders() });
+    if (!res.ok) {
+      const data = await res.json();
+      alert(data.error || '加载用量统计失败');
+      return;
+    }
+    const stats = await res.json();
+    renderUsageStats(stats);
+  } catch(e) {
+    console.error('加载用量统计失败:', e);
+  }
+}
+
+function renderUsageStats(stats) {
+  // 顶部卡片
+  document.getElementById('statDayTotal').textContent = (stats.day?.total_tokens || 0).toLocaleString();
+  document.getElementById('statDayCalls').textContent = (stats.day?.calls || 0).toLocaleString();
+  document.getElementById('statDayMiss').textContent = (stats.day?.cache_miss_tokens || 0).toLocaleString();
+  document.getElementById('statDayHit').textContent = (stats.day?.cached_hit_tokens || 0).toLocaleString();
+  document.getElementById('statDayOut').textContent = (stats.day?.tokens_output || 0).toLocaleString();
+
+  document.getElementById('statWeekTotal').textContent = (stats.week?.total_tokens || 0).toLocaleString();
+  document.getElementById('statWeekCalls').textContent = (stats.week?.calls || 0).toLocaleString();
+  document.getElementById('statWeekMiss').textContent = (stats.week?.cache_miss_tokens || 0).toLocaleString();
+  document.getElementById('statWeekHit').textContent = (stats.week?.cached_hit_tokens || 0).toLocaleString();
+  document.getElementById('statWeekOut').textContent = (stats.week?.tokens_output || 0).toLocaleString();
+
+  document.getElementById('statMonthTotal').textContent = (stats.month?.total_tokens || 0).toLocaleString();
+  document.getElementById('statMonthCalls').textContent = (stats.month?.calls || 0).toLocaleString();
+  document.getElementById('statMonthMiss').textContent = (stats.month?.cache_miss_tokens || 0).toLocaleString();
+  document.getElementById('statMonthHit').textContent = (stats.month?.cached_hit_tokens || 0).toLocaleString();
+  document.getElementById('statMonthOut').textContent = (stats.month?.tokens_output || 0).toLocaleString();
+
+  // 表格
+  const tbody = document.getElementById('usage_statsTableBody');
+  const empty = document.getElementById('usage_statsEmpty');
+  const table = document.getElementById('usage_statsTable');
+  const models = stats.models || [];
+
+  tbody.innerHTML = '';
+  if (models.length === 0) {
+    empty.classList.remove('hidden');
+    table.classList.add('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  table.classList.remove('hidden');
+
+  models.forEach(m => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap font-mono text-sm border-r border-zinc-200 dark:border-zinc-800">${escapeHtml(m.original_model || 'unknown')}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.calls || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.cache_miss_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.cached_hit_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.tokens_output || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.calls || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.cache_miss_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.cached_hit_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.tokens_output || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.calls || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.cache_miss_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.cached_hit_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center">${(m.month?.tokens_output || 0).toLocaleString()}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ============ 用量统计 ============
+async function loadUsageStats() {
+  try {
+    const res = await fetch('/api/usage_stats', { headers: getAuthHeaders() });
+    if (!res.ok) {
+      const data = await res.json();
+      alert(data.error || '加载用量统计失败');
+      return;
+    }
+    const stats = await res.json();
+    renderUsageStats(stats);
+  } catch(e) {
+    console.error('加载用量统计失败:', e);
+  }
+}
+
+function renderUsageStats(stats) {
+  document.getElementById('statDayTotal').textContent = (stats.day?.total_tokens || 0).toLocaleString();
+  document.getElementById('statDayCalls').textContent = (stats.day?.calls || 0).toLocaleString();
+  document.getElementById('statDayMiss').textContent = (stats.day?.cache_miss_tokens || 0).toLocaleString();
+  document.getElementById('statDayHit').textContent = (stats.day?.cached_hit_tokens || 0).toLocaleString();
+  document.getElementById('statDayOut').textContent = (stats.day?.tokens_output || 0).toLocaleString();
+  document.getElementById('statWeekTotal').textContent = (stats.week?.total_tokens || 0).toLocaleString();
+  document.getElementById('statWeekCalls').textContent = (stats.week?.calls || 0).toLocaleString();
+  document.getElementById('statWeekMiss').textContent = (stats.week?.cache_miss_tokens || 0).toLocaleString();
+  document.getElementById('statWeekHit').textContent = (stats.week?.cached_hit_tokens || 0).toLocaleString();
+  document.getElementById('statWeekOut').textContent = (stats.week?.tokens_output || 0).toLocaleString();
+  document.getElementById('statMonthTotal').textContent = (stats.month?.total_tokens || 0).toLocaleString();
+  document.getElementById('statMonthCalls').textContent = (stats.month?.calls || 0).toLocaleString();
+  document.getElementById('statMonthMiss').textContent = (stats.month?.cache_miss_tokens || 0).toLocaleString();
+  document.getElementById('statMonthHit').textContent = (stats.month?.cached_hit_tokens || 0).toLocaleString();
+  document.getElementById('statMonthOut').textContent = (stats.month?.tokens_output || 0).toLocaleString();
+  const tbody = document.getElementById('usage_statsTableBody');
+  const empty = document.getElementById('usage_statsEmpty');
+  const table = document.getElementById('usage_statsTable');
+  const models = stats.models || [];
+  tbody.innerHTML = '';
+  if (models.length === 0) {
+    empty.classList.remove('hidden');
+    table.classList.add('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  table.classList.remove('hidden');
+  models.forEach(m => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap font-mono text-sm border-r border-zinc-200 dark:border-zinc-800">${escapeHtml(m.original_model || 'unknown')}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.calls || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.cache_miss_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.cached_hit_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.tokens_output || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.calls || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.cache_miss_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.cached_hit_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.tokens_output || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.calls || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.cache_miss_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.cached_hit_tokens || 0).toLocaleString()}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-center">${(m.month?.tokens_output || 0).toLocaleString()}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
 </script>
 </body>
 </html>

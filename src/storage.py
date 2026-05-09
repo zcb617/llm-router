@@ -2045,6 +2045,140 @@ class CallStorage:
         """将上游标记为 healthy，重置连续失败计数"""
         self.update_upstream(upstream_id, health_status='healthy', consecutive_failures=0 if self.postgresql else 0)
 
+    def get_user_usage_stats(self, user_id: int) -> dict:
+        """获取用户用量统计：今日、本周、本月，以及各模型的明细。"""
+        from datetime import datetime, date, timedelta
+
+        today = date.today()
+        today_start = datetime(today.year, today.month, today.day).isoformat()
+
+        # 本周一
+        weekday = today.weekday()
+        monday = today - timedelta(days=weekday)
+        week_start = datetime(monday.year, monday.month, monday.day).isoformat()
+
+        # 本月1日
+        month_start = datetime(today.year, today.month, 1).isoformat()
+
+        def _make_result(calls, cached_hit, cache_miss, tokens_output):
+            total = (cached_hit or 0) + (cache_miss or 0) + (tokens_output or 0)
+            return {
+                "calls": calls or 0,
+                "cached_hit_tokens": cached_hit or 0,
+                "cache_miss_tokens": cache_miss or 0,
+                "tokens_output": tokens_output or 0,
+                "total_tokens": total,
+            }
+
+        def _run_query(conn, cur, period_start):
+            if self.postgresql:
+                cur.execute("""
+                    SELECT
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
+                    FROM llm_calls
+                    WHERE user_id = %s AND timestamp >= %s
+                """, (user_id, period_start))
+            else:
+                cur.execute("""
+                    SELECT
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
+                    FROM llm_calls
+                    WHERE user_id = ? AND timestamp >= ?
+                """, (user_id, period_start))
+            row = cur.fetchone()
+            return _make_result(row[0], row[1], row[2], row[3])
+
+        def _run_model_query(conn, cur, period_start):
+            if self.postgresql:
+                cur.execute("""
+                    SELECT
+                        original_model,
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
+                    FROM llm_calls
+                    WHERE user_id = %s AND timestamp >= %s
+                    GROUP BY original_model
+                    ORDER BY calls DESC
+                """, (user_id, period_start))
+            else:
+                cur.execute("""
+                    SELECT
+                        original_model,
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
+                    FROM llm_calls
+                    WHERE user_id = ? AND timestamp >= ?
+                    GROUP BY original_model
+                    ORDER BY calls DESC
+                """, (user_id, period_start))
+            rows = cur.fetchall()
+            result = []
+            for row in rows:
+                result.append({
+                    "original_model": row[0] or "unknown",
+                    "calls": row[1] or 0,
+                    "cached_hit_tokens": row[2] or 0,
+                    "cache_miss_tokens": row[3] or 0,
+                    "tokens_output": row[4] or 0,
+                })
+            return result
+
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+        else:
+            conn, cur = self._sqlite_conn()
+
+        try:
+            day = _run_query(conn, cur, today_start)
+            week = _run_query(conn, cur, week_start)
+            month = _run_query(conn, cur, month_start)
+
+            day_models = _run_model_query(conn, cur, today_start)
+            week_models = _run_model_query(conn, cur, week_start)
+            month_models = _run_model_query(conn, cur, month_start)
+
+            # 合并三个周期的模型数据
+            model_map = {}
+            for m in day_models:
+                model_map.setdefault(m["original_model"], {})["day"] = m
+            for m in week_models:
+                model_map.setdefault(m["original_model"], {})["week"] = m
+            for m in month_models:
+                model_map.setdefault(m["original_model"], {})["month"] = m
+
+            models = []
+            for name in sorted(model_map.keys()):
+                m = model_map[name]
+                models.append({
+                    "original_model": name,
+                    "day": m.get("day", {"calls": 0, "cached_hit_tokens": 0, "cache_miss_tokens": 0, "tokens_output": 0}),
+                    "week": m.get("week", {"calls": 0, "cached_hit_tokens": 0, "cache_miss_tokens": 0, "tokens_output": 0}),
+                    "month": m.get("month", {"calls": 0, "cached_hit_tokens": 0, "cache_miss_tokens": 0, "tokens_output": 0}),
+                })
+
+            return {
+                "day": day,
+                "week": week,
+                "month": month,
+                "models": models,
+            }
+        finally:
+            if self.postgresql:
+                self._pg_close(conn, cur)
+            else:
+                self._sqlite_close(conn, cur)
+
+
     def increment_upstream_failures(self, upstream_id: int, max_failures: int = 3):
         """递增上游连续失败计数，达阈值时标记为 unhealthy"""
         if self.postgresql:

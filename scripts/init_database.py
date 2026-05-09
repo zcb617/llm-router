@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.0"
+CURRENT_VERSION = "1.1.1"
 
 
 def get_pg_conn(config):
@@ -337,6 +337,7 @@ SQLITE_TABLES = [
 
 SEED_DATA = {
     "menus": [
+        {"code": "usage_stats", "name": "用量统计", "icon": "📊", "sort_order": 0},
         {"code": "logs", "name": "调用日志", "icon": "📋", "sort_order": 1},
         {"code": "keys", "name": "密钥管理", "icon": "🔑", "sort_order": 2},
         {"code": "upstreams", "name": "上游管理", "icon": "🔗", "sort_order": 3},
@@ -349,8 +350,8 @@ SEED_DATA = {
         {"name": "viewer", "description": "普通用户，仅查看日志和密钥"},
     ],
     "role_menus": {
-        "admin": ["logs", "keys", "upstreams", "models", "users", "roles"],
-        "viewer": ["logs", "keys"],
+        "admin": ["usage_stats", "logs", "keys", "upstreams", "models", "users", "roles"],
+        "viewer": ["usage_stats", "logs", "keys"],
     },
 }
 
@@ -548,6 +549,81 @@ def run_v110_sqlite(conn):
     _sqlite_add_column(conn, "model_upstream_routes", "protocol_converter", "TEXT")
 
 
+
+def run_v111_pg(conn):
+    """v1.1.0 -> v1.1.1 升级 (PostgreSQL): 添加用量统计菜单和权限"""
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM menus WHERE code = %s", ("usage_stats",))
+        if cur.fetchone() is None:
+            cur.execute(
+                "INSERT INTO menus (code, name, icon, sort_order) VALUES (%s, %s, %s, %s)",
+                ("usage_stats", "用量统计", "📊", 0)
+            )
+            print("    [v1.1.1] 插入菜单: usage_stats (用量统计)")
+        else:
+            print("    [v1.1.1] 菜单 usage_stats 已存在，跳过")
+
+        cur.execute("SELECT id, code FROM menus")
+        menu_map = {row[1]: row[0] for row in cur.fetchall()}
+
+        cur.execute("SELECT id, name FROM roles")
+        role_map = {row[1]: row[0] for row in cur.fetchall()}
+
+        for role_name, menu_codes in [("admin", ["usage_stats"]), ("viewer", ["usage_stats"])]:
+            role_id = role_map.get(role_name)
+            if role_id is None:
+                continue
+            for code in menu_codes:
+                cur.execute(
+                    "INSERT INTO role_menus (role_id, menu_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (role_id, menu_map[code])
+                )
+        conn.commit()
+        print("    [v1.1.1] 角色菜单权限已更新")
+    finally:
+        cur.close()
+
+
+def run_v111_sqlite(conn):
+    """v1.1.0 -> v1.1.1 升级 (SQLite): 添加用量统计菜单和权限"""
+    import sqlite3
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM menus WHERE code = ?", ("usage_stats",))
+        if cur.fetchone() is None:
+            cur.execute(
+                "INSERT INTO menus (code, name, icon, sort_order) VALUES (?, ?, ?, ?)",
+                ("usage_stats", "用量统计", "📊", 0)
+            )
+            print("    [v1.1.1] 插入菜单: usage_stats (用量统计)")
+        else:
+            print("    [v1.1.1] 菜单 usage_stats 已存在，跳过")
+
+        cur.execute("SELECT id, code FROM menus")
+        menu_map = {row[1]: row[0] for row in cur.fetchall()}
+
+        cur.execute("SELECT id, name FROM roles")
+        role_map = {row[1]: row[0] for row in cur.fetchall()}
+
+        for role_name, menu_codes in [("admin", ["usage_stats"]), ("viewer", ["usage_stats"])]:
+            role_id = role_map.get(role_name)
+            if role_id is None:
+                continue
+            for code in menu_codes:
+                try:
+                    cur.execute(
+                        "INSERT INTO role_menus (role_id, menu_id) VALUES (?, ?)",
+                        (role_id, menu_map[code])
+                    )
+                except sqlite3.IntegrityError:
+                    pass
+        conn.commit()
+        print("    [v1.1.1] 角色菜单权限已更新")
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -578,7 +654,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version == "1.0.0":
+    elif version in ("1.0.0", "1.1.0"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -599,6 +675,14 @@ def main():
         else:
             run_v110_sqlite(conn)
 
+
+    # v1.1.0 -> v1.1.1
+    if version in (None, "1.0.0", "1.1.0", CURRENT_VERSION):
+        print(f"\n[v1.1.1] 检查/补齐用量统计菜单和权限...")
+        if is_pg:
+            run_v111_pg(conn)
+        else:
+            run_v111_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

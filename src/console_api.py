@@ -863,6 +863,19 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         _json_response(flow, 200, {"message": "角色菜单更新成功"})
         return True
 
+    # ========== 用量统计 API ==========
+
+    # GET /api/usage_stats - 当前用户用量统计
+    if path == "/api/usage_stats" and flow.request.method == "GET":
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+
+        stats = storage.get_user_usage_stats(payload["user_id"])
+        _json_response(flow, 200, stats)
+        return True
+
+
     # 未匹配任何路由
     return False
 
