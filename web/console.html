@@ -405,6 +405,9 @@
           <div><span class="text-zinc-500">首字耗时:</span> <span id="dFirstToken" class="ml-1"></span></div>
           <div><span class="text-zinc-500">流式类型:</span> <span id="dStreamType" class="ml-1"></span></div>
           <div><span class="text-zinc-500">Token:</span> <span id="dTokens" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">缓存命中Token:</span> <span id="dCached" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">缓存未命中Token:</span> <span id="dCacheMiss" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">生成速度:</span> <span id="dSpeed" class="ml-1"></span></div>
         </div>
         <div>
           <h3 class="font-semibold mb-1 text-sm">请求头</h3>
@@ -697,6 +700,9 @@ const COLUMNS = [
   { key: 'stream_type', label: '流式类型', default: true, minWidth: '100px' },
   { key: 'tokens_input', label: '输入Token', default: true, minWidth: '100px' },
   { key: 'tokens_output', label: '输出Token', default: true, minWidth: '110px' },
+  { key: 'cached_hit_tokens', label: '缓存命中Token', default: true, minWidth: '120px' },
+  { key: 'cache_miss_tokens', label: '缓存未命中Token', default: true, minWidth: '120px' },
+  { key: 'tokens_per_second', label: '生成速度(t/s)', default: true, minWidth: '120px' },
 ];
 const STORAGE_KEY = 'llm_router_columns';
 const DEFAULT_MIN_COL_WIDTH = 80;
@@ -980,6 +986,9 @@ function showDetail(row) {
   document.getElementById('dFirstToken').textContent = row.first_token_ms ? row.first_token_ms + ' ms' : '-';
   document.getElementById('dStreamType').textContent = row.stream_type === 'stream' ? '流式' : '非流式';
   document.getElementById('dTokens').textContent = `输入: ${row.tokens_input ?? 0}, 输出: ${row.tokens_output ?? 0}`;
+  document.getElementById('dCached').textContent = row.cached_hit_tokens != null ? row.cached_hit_tokens : '-';
+  document.getElementById('dCacheMiss').textContent = row.cache_miss_tokens != null ? row.cache_miss_tokens : '-';
+  document.getElementById('dSpeed').textContent = row.tokens_per_second != null ? row.tokens_per_second + ' t/s' : '-';
   try { document.getElementById('dReqHeaders').textContent = JSON.stringify(JSON.parse(row.request_headers || '{}'), null, 2); } catch { document.getElementById('dReqHeaders').textContent = row.request_headers || ''; }
   try { document.getElementById('dReqBody').textContent = JSON.stringify(JSON.parse(row.request_body || '{}'), null, 2); } catch { document.getElementById('dReqBody').textContent = row.request_body || ''; }
   try { document.getElementById('dResHeaders').textContent = JSON.stringify(JSON.parse(row.response_headers || '{}'), null, 2); } catch { document.getElementById('dResHeaders').textContent = row.response_headers || ''; }

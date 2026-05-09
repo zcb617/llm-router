@@ -103,6 +103,9 @@ PG_TABLES = [
             duration_ms INTEGER,
             tokens_input INTEGER,
             tokens_output INTEGER,
+            cached_hit_tokens INTEGER,
+            cache_miss_tokens INTEGER,
+            tokens_per_second REAL,
             token_source TEXT,
             stream_type TEXT,
             first_token_ms INTEGER,
@@ -224,6 +227,9 @@ SQLITE_TABLES = [
             duration_ms INTEGER,
             tokens_input INTEGER,
             tokens_output INTEGER,
+            cached_hit_tokens INTEGER,
+            cache_miss_tokens INTEGER,
+            tokens_per_second REAL,
             token_source TEXT,
             stream_type TEXT,
             first_token_ms INTEGER,
@@ -523,6 +529,9 @@ def run_v110_pg(conn):
     _pg_add_column(conn, "llm_calls", "previous_response_id", "TEXT")
     _pg_add_column(conn, "llm_calls", "full_context", "TEXT")
     _pg_add_column(conn, "llm_calls", "final_responses_body", "TEXT")
+    _pg_add_column(conn, "llm_calls", "cached_hit_tokens", "INTEGER")
+    _pg_add_column(conn, "llm_calls", "cache_miss_tokens", "INTEGER")
+    _pg_add_column(conn, "llm_calls", "tokens_per_second", "REAL")
     _pg_add_column(conn, "model_configs", "protocol_converter", "VARCHAR(50)")
     _pg_add_column(conn, "model_upstream_routes", "protocol_converter", "VARCHAR(50)")
 
@@ -532,6 +541,9 @@ def run_v110_sqlite(conn):
     _sqlite_add_column(conn, "llm_calls", "previous_response_id", "TEXT")
     _sqlite_add_column(conn, "llm_calls", "full_context", "TEXT")
     _sqlite_add_column(conn, "llm_calls", "final_responses_body", "TEXT")
+    _sqlite_add_column(conn, "llm_calls", "cached_hit_tokens", "INTEGER")
+    _sqlite_add_column(conn, "llm_calls", "cache_miss_tokens", "INTEGER")
+    _sqlite_add_column(conn, "llm_calls", "tokens_per_second", "REAL")
     _sqlite_add_column(conn, "model_configs", "protocol_converter", "TEXT")
     _sqlite_add_column(conn, "model_upstream_routes", "protocol_converter", "TEXT")
 

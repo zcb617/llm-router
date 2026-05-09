@@ -122,11 +122,20 @@ class CallStorage:
             try:
                 if self.postgresql:
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS final_responses_body TEXT")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS cached_hit_tokens INTEGER")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS cache_miss_tokens INTEGER")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS tokens_per_second REAL")
                 else:
                     cur.execute("PRAGMA table_info(llm_calls)")
                     existing_columns = {row[1] for row in cur.fetchall()}
                     if "final_responses_body" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN final_responses_body TEXT")
+                    if "cached_hit_tokens" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN cached_hit_tokens INTEGER")
+                    if "cache_miss_tokens" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN cache_miss_tokens INTEGER")
+                    if "tokens_per_second" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN tokens_per_second REAL")
 
                 conn.commit()
                 self._llm_calls_schema_ready = True
@@ -262,6 +271,9 @@ class CallStorage:
         original_model: str = None,
         overridden_model: str = None,
         final_responses_body: Optional[str] = None,
+        cached_hit_tokens: Optional[int] = None,
+        cache_miss_tokens: Optional[int] = None,
+        tokens_per_second: Optional[float] = None,
     ):
         """保存一次LLM调用记录"""
         await self.initialize()
@@ -275,10 +287,10 @@ class CallStorage:
                         call_id, timestamp, url, method,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body,
-                        duration_ms, tokens_input, tokens_output, token_source,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
                 """,
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
@@ -286,7 +298,7 @@ class CallStorage:
                     json.dumps(response_headers, ensure_ascii=False),
                     response_body,
                     final_responses_body,
-                    duration_ms, tokens_input, tokens_output, token_source,
+                    duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                     stream_type, first_token_ms,
                     original_model, overridden_model
                 )
@@ -300,10 +312,10 @@ class CallStorage:
                         call_id, timestamp, url, method,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body,
-                        duration_ms, tokens_input, tokens_output, token_source,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
@@ -311,7 +323,7 @@ class CallStorage:
                     json.dumps(response_headers, ensure_ascii=False),
                     response_body,
                     final_responses_body,
-                    duration_ms, tokens_input, tokens_output, token_source,
+                    duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                     stream_type, first_token_ms,
                     original_model, overridden_model
                 ))
@@ -630,6 +642,9 @@ class CallStorage:
         user_id: Optional[int] = None, api_key_id: Optional[int] = None,
         previous_response_id: Optional[str] = None, full_context: Optional[str] = None,
         final_responses_body: Optional[str] = None,
+        cached_hit_tokens: Optional[int] = None,
+        cache_miss_tokens: Optional[int] = None,
+        tokens_per_second: Optional[float] = None,
     ):
         """保存调用记录（带用户和 API Key 关联）"""
         self._ensure_llm_calls_schema_extensions()
@@ -641,7 +656,7 @@ class CallStorage:
             json.dumps(response_headers, ensure_ascii=False),
             response_body,
             final_responses_body,
-            duration_ms, tokens_input, tokens_output, token_source,
+            duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
             stream_type, first_token_ms,
             original_model, overridden_model, user_id, api_key_id,
             previous_response_id, full_context
@@ -654,11 +669,11 @@ class CallStorage:
                         call_id, timestamp, url, method,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body,
-                        duration_ms, tokens_input, tokens_output, token_source,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -670,11 +685,11 @@ class CallStorage:
                         call_id, timestamp, url, method,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body,
-                        duration_ms, tokens_input, tokens_output, token_source,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)

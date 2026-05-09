@@ -13,6 +13,164 @@ def _safe_int(value) -> int:
         return 0
 
 
+def _extract_cached_hit_tokens(usage) -> Optional[int]:
+    """Extract cached hit tokens from usage object.
+    兼容格式:
+      - OpenAI/Kimi: usage.prompt_tokens_details.cached_tokens
+      - Claude: usage.cache_read_input_tokens 或 usage.cached_tokens
+    """
+    if not isinstance(usage, dict):
+        return None
+    # OpenAI / Kimi 格式
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        val = details.get("cached_tokens")
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                pass
+    # Claude 格式 (cache_read_input_tokens 比 cached_tokens 更精确)
+    val = usage.get("cache_read_input_tokens")
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            pass
+    # Claude 兜底 / 旧格式
+    val = usage.get("cached_tokens")
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _extract_cached_hit_from_sse(response_body: str) -> Optional[int]:
+    """从 SSE 响应体中提取 cached_hit_tokens。取最后一个出现的值（SSE 中最终事件汇总完整 usage）。"""
+    last_val = None
+    for line in response_body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if not data_str:
+            continue
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            message = data.get("message")
+            if isinstance(message, dict):
+                usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        val = _extract_cached_hit_tokens(usage)
+        if val is not None:
+            last_val = val
+    return last_val
+
+
+def _extract_cache_miss_tokens(usage) -> Optional[int]:
+    """Extract cache miss tokens (total input minus cache hit).
+    兼容格式:
+      - Claude: prompt_tokens - cache_read_input_tokens
+      - OpenAI/Kimi: prompt_tokens - cached_tokens
+    """
+    if not isinstance(usage, dict):
+        return None
+    # Claude 格式
+    prompt_tokens = usage.get("prompt_tokens")
+    cache_read = usage.get("cache_read_input_tokens")
+    if prompt_tokens is not None and cache_read is not None:
+        try:
+            return max(0, int(prompt_tokens) - int(cache_read))
+        except (TypeError, ValueError):
+            pass
+    # OpenAI / Kimi 格式
+    cached_tokens = usage.get("cached_tokens")
+    if prompt_tokens is not None and cached_tokens is not None:
+        try:
+            return max(0, int(prompt_tokens) - int(cached_tokens))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _extract_cache_miss_from_sse(response_body: str) -> Optional[int]:
+    """从 SSE 响应体中提取 cache_miss_tokens。取最后一个出现的值。"""
+    last_val = None
+    for line in response_body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if not data_str:
+            continue
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            message = data.get("message")
+            if isinstance(message, dict):
+                usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        val = _extract_cache_miss_tokens(usage)
+        if val is not None:
+            last_val = val
+    return last_val
+
+
+def extract_cache_miss_tokens(response_body: str) -> Optional[int]:
+    """从API响应中提取缓存未命中(创建)token数量
+    返回: cache_miss_tokens 或 None
+    """
+    # 先尝试解析为纯 JSON
+    try:
+        data = json.loads(response_body)
+        val = _extract_cache_miss_tokens(data.get("usage"))
+        if val is not None:
+            return val
+        message = data.get("message")
+        if isinstance(message, dict):
+            val = _extract_cache_miss_tokens(message.get("usage"))
+            if val is not None:
+                return val
+        return None
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    # 不是纯 JSON，尝试 SSE 格式解析
+    return _extract_cache_miss_from_sse(response_body)
+
+
+def extract_cached_hit_tokens(response_body: str) -> Optional[int]:
+    """从API响应中提取缓存命中token数量
+    返回: cached_hit_tokens 或 None
+    """
+    # 先尝试解析为纯 JSON
+    try:
+        data = json.loads(response_body)
+        val = _extract_cached_hit_tokens(data.get("usage"))
+        if val is not None:
+            return val
+        message = data.get("message")
+        if isinstance(message, dict):
+            val = _extract_cached_hit_tokens(message.get("usage"))
+            if val is not None:
+                return val
+        return None
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    # 不是纯 JSON，尝试 SSE 格式解析
+    return _extract_cached_hit_from_sse(response_body)
+
+
 def _extract_usage_tokens(usage) -> Optional[Tuple[int, int]]:
     """Extract token pair from usage object in either OpenAI/Kimi/Responses shapes."""
     if not isinstance(usage, dict):

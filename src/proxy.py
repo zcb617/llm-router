@@ -1675,7 +1675,7 @@ class LLMRouterAddon:
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
-        from src.tokenizer import calculate_tokens
+        from src.tokenizer import calculate_tokens, extract_cached_hit_tokens, extract_cache_miss_tokens
 
         # 跳过本地响应的请求（探活、查询API等）
         if flow.metadata.get("local_response"):
@@ -1814,11 +1814,17 @@ class LLMRouterAddon:
             request_body=captured_req.body,
             response_body=captured_resp.body
         )
+        cached_hit_tokens = extract_cached_hit_tokens(captured_resp.body or "")
+        cache_miss_tokens = extract_cache_miss_tokens(captured_resp.body or "")
+        tokens_per_second = None
+        if tokens_output and tokens_output > 0 and captured_resp.duration_ms and captured_resp.duration_ms > 0:
+            tokens_per_second = round(tokens_output / (captured_resp.duration_ms / 1000), 2)
 
         logger.debug(
             f"Token calculation: "
             f"input={tokens_input}, output={tokens_output}, source={token_source}, "
-            f"stream={stream_type}, first_token_ms={first_token_ms}"
+            f"stream={stream_type}, first_token_ms={first_token_ms}, "
+            f"cached={cached_hit_tokens}, miss={cache_miss_tokens}, speed={tokens_per_second}"
         )
 
         # 异步保存到数据库
@@ -1848,6 +1854,9 @@ class LLMRouterAddon:
             "duration_ms": captured_resp.duration_ms,
             "tokens_input": tokens_input,
             "tokens_output": tokens_output,
+            "cached_hit_tokens": cached_hit_tokens,
+            "cache_miss_tokens": cache_miss_tokens,
+            "tokens_per_second": tokens_per_second,
             "token_source": token_source,
             "stream_type": stream_type,
             "first_token_ms": first_token_ms,
@@ -1861,13 +1870,26 @@ class LLMRouterAddon:
 
     def error(self, flow: http.HTTPFlow):
         """上游连接/传输错误时标记当前多上游路由失败。"""
-        if not flow.metadata.get("multi_upstream_native"):
+        # 诊断日志：记录所有错误场景，无论是否多上游
+        captured_req = self._pop_pending_request(flow)
+        resp_status = getattr(flow.response, "status_code", None) if flow.response else None
+        has_stream_chunks = bool(flow.metadata.get("streamed_response_chunks"))
+        call_id = flow.metadata.get("call_id")
+        original_model = flow.metadata.get("original_model")
+        overridden_model = flow.metadata.get("overridden_model")
+        is_multi = flow.metadata.get("multi_upstream_native")
+        logger.warning(
+            f"[ERROR_DIAG] error={flow.error}, "
+            f"is_multi={is_multi}, captured_req={'YES' if captured_req else 'NO'}, "
+            f"resp_status={resp_status}, has_stream_chunks={has_stream_chunks}, "
+            f"call_id={call_id}, original={original_model}, overridden={overridden_model}"
+        )
+        if not is_multi:
             return
         upstream_id = flow.metadata.get("multi_upstream_id")
         if upstream_id is None:
             return
         logger.warning(f"Multi-upstream native request failed for upstream {upstream_id}: {flow.error}")
-        self._pop_pending_request(flow)
         self.storage.increment_upstream_failures(upstream_id)
 
     def _update_native_multi_upstream_health(self, flow, status_code: int):
