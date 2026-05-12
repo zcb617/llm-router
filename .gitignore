@@ -29,3 +29,6 @@ certs/
 *.log
 log/
 .mcp.json
+
+#kimi-cli
+kimi-cli/

@@ -1,0 +1,36 @@
+services:
+  llm-router:
+    # 镜像构建上下文。这里用当前目录的 Dockerfile 构建。
+    build: .
+
+    # 容器名称，便于 docker logs / docker exec 定位。
+    container_name: llm-router
+
+    # 端口映射：宿主机38888 -> 容器38888。
+    ports:
+      - "38888:38888"
+
+    # 数据卷挂载说明：
+    # 1) config.yaml 只读挂载，避免容器内误改配置；
+    # 2) data/certs/log 持久化到宿主机；
+    # 3) 把宿主机 kimi-cli 的凭据目录挂进容器，供 OAuth 读取和刷新 token。
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./certs:/app/certs
+      - ./log:/app/log
+      - /home/zhangcb/.kimi:/home/zhangcb/.kimi
+
+    # 自动重启策略：除非手动 stop，否则异常退出会自动拉起。
+    restart: unless-stopped
+
+    environment:
+      # 容器时区，用于日志时间显示。
+      - TZ=Asia/Shanghai
+
+      # 路由器数据库路径（容器内路径）。
+      - DB_PATH=./data/llm_calls.db
+
+      # 指定 kimi-cli OAuth 凭据目录。
+      # 程序会在该目录下找 credentials/kimi-code.json。
+      - KIMI_SHARE_DIR=/home/zhangcb/.kimi

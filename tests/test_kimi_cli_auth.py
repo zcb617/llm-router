@@ -87,19 +87,19 @@ def test_resolve_access_token_prefers_file_token(monkeypatch, tmp_path: Path):
     assert token == "access-from-file"
 
 
-def test_resolve_access_token_falls_back_to_api_key(monkeypatch, tmp_path: Path):
+def test_resolve_access_token_without_local_token_returns_empty(monkeypatch, tmp_path: Path):
     repo_root = _prepare_kimi_clone(tmp_path)
     monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path / "share"))
 
     manager = KimiCliAuthManager(repo_root)
     token = manager.resolve_access_token(
         auth_mode="kimi_cli_oauth",
-        api_key="fallback-api-key",
+        api_key="ignored-api-key",
         oauth_key="oauth/kimi-code",
         oauth_host="https://auth.kimi.com",
     )
 
-    assert token == "fallback-api-key"
+    assert token == ""
 
 
 def test_resolve_access_token_refreshes_when_near_expiry(monkeypatch, tmp_path: Path):
@@ -169,3 +169,135 @@ def test_resolve_access_token_refresh_failure_uses_existing_access(monkeypatch, 
     )
 
     assert token == "old-access"
+
+
+def test_resolve_access_token_refresh_failure_expired_returns_empty(monkeypatch, tmp_path: Path):
+    repo_root = _prepare_kimi_clone(tmp_path)
+    share_dir = tmp_path / "share"
+    cred_dir = share_dir / "credentials"
+    cred_dir.mkdir(parents=True)
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+
+    token_payload = {
+        "access_token": "expired-access",
+        "refresh_token": "refresh-token",
+        "expires_at": time.time() - 10,
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "kimi-code",
+    }
+    (cred_dir / "kimi-code.json").write_text(json.dumps(token_payload), encoding="utf-8")
+
+    manager = KimiCliAuthManager(repo_root)
+    monkeypatch.setattr(manager, "_refresh_token", lambda *_args, **_kwargs: None)
+    token = manager.resolve_access_token(
+        auth_mode="kimi_cli_oauth",
+        api_key="ignored",
+        oauth_key="oauth/kimi-code",
+        oauth_host="https://auth.kimi.com",
+    )
+
+    assert token == ""
+
+
+def test_inspect_local_token_returns_unavailable_when_missing(monkeypatch, tmp_path: Path):
+    repo_root = _prepare_kimi_clone(tmp_path)
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path / "share"))
+    manager = KimiCliAuthManager(repo_root)
+
+    status = manager.inspect_local_token("oauth/kimi-code")
+
+    assert status["available"] is False
+    assert status["reason"] == "token_file_not_found_or_invalid"
+    assert status["path"].endswith("/credentials/kimi-code.json")
+
+
+def test_inspect_local_token_returns_available_when_token_exists(monkeypatch, tmp_path: Path):
+    repo_root = _prepare_kimi_clone(tmp_path)
+    share_dir = tmp_path / "share"
+    cred_dir = share_dir / "credentials"
+    cred_dir.mkdir(parents=True)
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+
+    token_payload = {
+        "access_token": "access-from-file",
+        "refresh_token": "refresh-token",
+        "expires_at": time.time() + 3600,
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "kimi-code",
+    }
+    (cred_dir / "kimi-code.json").write_text(json.dumps(token_payload), encoding="utf-8")
+    manager = KimiCliAuthManager(repo_root)
+
+    status = manager.inspect_local_token("oauth/kimi-code")
+
+    assert status["available"] is True
+    assert status["reason"] == "ok"
+    assert status["has_refresh_token"] is True
+
+
+def test_inspect_local_token_refreshes_when_expiring(monkeypatch, tmp_path: Path):
+    repo_root = _prepare_kimi_clone(tmp_path)
+    share_dir = tmp_path / "share"
+    cred_dir = share_dir / "credentials"
+    cred_dir.mkdir(parents=True)
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+
+    token_payload = {
+        "access_token": "old-access",
+        "refresh_token": "refresh-token",
+        "expires_at": time.time() + 60,
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "kimi-code",
+    }
+    (cred_dir / "kimi-code.json").write_text(json.dumps(token_payload), encoding="utf-8")
+    manager = KimiCliAuthManager(repo_root)
+
+    monkeypatch.setattr(
+        manager,
+        "_refresh_token",
+        lambda *_args, **_kwargs: OAuthToken(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            expires_at=time.time() + 3600,
+            expires_in=3600,
+            token_type="Bearer",
+            scope="kimi-code",
+        ),
+    )
+
+    status = manager.inspect_local_token("oauth/kimi-code", refresh_if_needed=True)
+
+    assert status["available"] is True
+    assert status["reason"] == "ok_refreshed"
+    assert status["refresh_attempted"] is True
+    assert status["seconds_to_expiry"] is not None and status["seconds_to_expiry"] > 3000
+
+
+def test_inspect_local_token_expired_refresh_failure_returns_unavailable(monkeypatch, tmp_path: Path):
+    repo_root = _prepare_kimi_clone(tmp_path)
+    share_dir = tmp_path / "share"
+    cred_dir = share_dir / "credentials"
+    cred_dir.mkdir(parents=True)
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+
+    token_payload = {
+        "access_token": "expired-access",
+        "refresh_token": "refresh-token",
+        "expires_at": time.time() - 30,
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "kimi-code",
+    }
+    (cred_dir / "kimi-code.json").write_text(json.dumps(token_payload), encoding="utf-8")
+    manager = KimiCliAuthManager(repo_root)
+    monkeypatch.setattr(manager, "_refresh_token", lambda *_args, **_kwargs: None)
+
+    status = manager.inspect_local_token("oauth/kimi-code", refresh_if_needed=True)
+
+    assert status["available"] is False
+    assert status["reason"] == "expired_and_refresh_failed"
+    assert status["refresh_attempted"] is True
+    assert status["seconds_to_expiry"] is not None and status["seconds_to_expiry"] <= 0

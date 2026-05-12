@@ -523,7 +523,7 @@
           <input id="upstreamName" type="text" required placeholder="如：Moonshot"
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
         </div>
-        <div>
+        <div id="upstreamBaseUrlWrap">
           <label class="block text-sm font-medium mb-1">基础 URL <span class="text-red-500">*</span></label>
           <input id="upstreamBaseUrl" type="text" required placeholder="https://api.moonshot.cn/v1"
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
@@ -536,7 +536,7 @@
             <option value="kimi_cli_oauth">kimi-cli auth（专用通道）</option>
           </select>
         </div>
-        <div>
+        <div id="upstreamApiKeyWrap">
           <label id="upstreamApiKeyLabel" class="block text-sm font-medium mb-1">API Key</label>
           <div class="flex gap-2">
             <input id="upstreamApiKey" type="password" placeholder="sk-xxxx"
@@ -545,15 +545,9 @@
           </div>
         </div>
         <div id="upstreamOauthConfig" class="hidden space-y-4">
-          <div>
-            <label class="block text-sm font-medium mb-1">OAuth Key</label>
-            <input id="upstreamOauthKey" type="text" placeholder="oauth/kimi-code"
-              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
-          </div>
-          <div>
-            <label class="block text-sm font-medium mb-1">OAuth Host</label>
-            <input id="upstreamOauthHost" type="text" placeholder="https://auth.kimi.com"
-              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          <div class="flex items-center gap-2">
+            <button id="checkKimiTokenBtn" type="button" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition whitespace-nowrap">检测本机 token</button>
+            <span id="upstreamOauthTokenStatus" class="text-xs text-zinc-500"></span>
           </div>
           <div class="text-xs text-zinc-500">
             使用该模式时，走专用转发通道，并按当前 kimi-cli 头部全集严格构造请求。
@@ -568,11 +562,11 @@
           <input id="upstreamIsActive" type="checkbox" checked class="w-4 h-4">
           <label for="upstreamIsActive" class="text-sm">启用</label>
         </div>
-        <div class="flex items-center gap-2">
+        <div id="upstreamClaudeFeaturesWrap" class="flex items-center gap-2">
           <input id="upstreamUseClaudeFeatures" type="checkbox" class="w-4 h-4">
           <label for="upstreamUseClaudeFeatures" class="text-sm">启用 Claude Code 特征 <span class="text-zinc-400 text-xs">(注入 Claude Code 专用请求头)</span></label>
         </div>
-        <div class="flex items-center gap-2">
+        <div id="upstreamRooFeaturesWrap" class="flex items-center gap-2">
           <input id="upstreamUseRooFeatures" type="checkbox" class="w-4 h-4">
           <label for="upstreamUseRooFeatures" class="text-sm">启用 Roo Code 特征 <span class="text-zinc-400 text-xs">(注入 Roo Code 专用请求头)</span></label>
         </div>
@@ -1275,7 +1269,7 @@ async function loadUpstreams() {
     const data = await res.json();
     allUpstreams = data.upstreams || [];
     renderUpstreams();
-  } catch(e) { tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="99" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
 }
 
 function renderUpstreams() {
@@ -1297,6 +1291,7 @@ function renderUpstreams() {
     const statusClass = u.is_active ? 'text-green-500' : 'text-red-500';
     const statusText = u.is_active ? '启用' : '禁用';
     const authMode = u.auth_mode || 'api_key';
+    const displayBaseUrl = authMode === 'kimi_cli_oauth' ? '-' : (u.target_base_url || '-');
     const authBadge = authMode === 'kimi_cli_oauth'
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">kimi-cli auth</span>'
       : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">api_key</span>';
@@ -1311,7 +1306,7 @@ function renderUpstreams() {
       : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300">正常</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-medium">${u.name}</td>
-      <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${u.target_base_url}">${u.target_base_url}</td>
+      <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${displayBaseUrl}">${displayBaseUrl}</td>
       <td class="px-4 py-2 whitespace-nowrap">${authBadge}</td>
       <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${u.api_key_masked || '****'}</td>
       <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${u.description || '-'}</td>
@@ -1330,6 +1325,10 @@ function renderUpstreams() {
   bindUpstreamTableEvents();
 }
 
+const KIMI_OAUTH_DEFAULT_KEY = 'oauth/kimi-code';
+const KIMI_OAUTH_DEFAULT_HOST = 'https://auth.kimi.com';
+const KIMI_OAUTH_DEFAULT_BASE_URL = 'https://api.kimi.com';
+
 function bindUpstreamTableEvents() {
   const tbody = document.getElementById('upstreamsTableBody');
   tbody.querySelectorAll('.edit-upstream-btn').forEach(btn => {
@@ -1346,6 +1345,7 @@ function bindUpstreamTableEvents() {
       document.getElementById('upstreamUseRooFeatures').checked = u.use_roo_features || false;
       document.getElementById('upstreamAuthMode').value = u.auth_mode || 'api_key';
       document.getElementById('upstreamEditError').classList.add('hidden');
+      setUpstreamOauthTokenStatus('');
 
       // 获取完整 upstream 数据（含完整 api_key）
       try {
@@ -1353,12 +1353,8 @@ function bindUpstreamTableEvents() {
         const full = await res.json();
         document.getElementById('upstreamApiKey').value = full.api_key || '';
         document.getElementById('upstreamAuthMode').value = full.auth_mode || 'api_key';
-        document.getElementById('upstreamOauthKey').value = full.oauth_key || 'oauth/kimi-code';
-        document.getElementById('upstreamOauthHost').value = full.oauth_host || 'https://auth.kimi.com';
       } catch(e) {
         document.getElementById('upstreamApiKey').value = '';
-        document.getElementById('upstreamOauthKey').value = 'oauth/kimi-code';
-        document.getElementById('upstreamOauthHost').value = 'https://auth.kimi.com';
       }
       syncUpstreamAuthModeFields();
 
@@ -1389,13 +1385,12 @@ document.getElementById('createUpstreamBtn').addEventListener('click', () => {
   document.getElementById('upstreamBaseUrl').value = '';
   document.getElementById('upstreamApiKey').value = '';
   document.getElementById('upstreamAuthMode').value = 'api_key';
-  document.getElementById('upstreamOauthKey').value = 'oauth/kimi-code';
-  document.getElementById('upstreamOauthHost').value = 'https://auth.kimi.com';
   document.getElementById('upstreamDescription').value = '';
   document.getElementById('upstreamIsActive').checked = true;
   document.getElementById('upstreamUseClaudeFeatures').checked = false;
   document.getElementById('upstreamUseRooFeatures').checked = false;
   document.getElementById('upstreamEditError').classList.add('hidden');
+  setUpstreamOauthTokenStatus('');
   syncUpstreamAuthModeFields();
   document.getElementById('upstreamEditModal').classList.remove('hidden');
 });
@@ -1428,40 +1423,102 @@ document.getElementById('upstreamEditModal').addEventListener('click', (e) => {
 function syncUpstreamAuthModeFields() {
   const mode = document.getElementById('upstreamAuthMode').value || 'api_key';
   const oauthWrap = document.getElementById('upstreamOauthConfig');
+  const baseUrlWrap = document.getElementById('upstreamBaseUrlWrap');
+  const baseUrlInput = document.getElementById('upstreamBaseUrl');
+  const apiWrap = document.getElementById('upstreamApiKeyWrap');
+  const claudeFeaturesWrap = document.getElementById('upstreamClaudeFeaturesWrap');
+  const rooFeaturesWrap = document.getElementById('upstreamRooFeaturesWrap');
+  const claudeFeatureInput = document.getElementById('upstreamUseClaudeFeatures');
+  const rooFeatureInput = document.getElementById('upstreamUseRooFeatures');
   const apiLabel = document.getElementById('upstreamApiKeyLabel');
   if (mode === 'kimi_cli_oauth') {
     oauthWrap.classList.remove('hidden');
-    if (apiLabel) apiLabel.textContent = 'API Key（可选兜底）';
+    baseUrlWrap.classList.add('hidden');
+    baseUrlInput.required = false;
+    apiWrap.classList.add('hidden');
+    claudeFeaturesWrap.classList.add('hidden');
+    rooFeaturesWrap.classList.add('hidden');
+    claudeFeatureInput.checked = false;
+    rooFeatureInput.checked = false;
+    if (apiLabel) apiLabel.textContent = 'API Key';
   } else {
     oauthWrap.classList.add('hidden');
+    baseUrlWrap.classList.remove('hidden');
+    baseUrlInput.required = true;
+    apiWrap.classList.remove('hidden');
+    claudeFeaturesWrap.classList.remove('hidden');
+    rooFeaturesWrap.classList.remove('hidden');
     if (apiLabel) apiLabel.textContent = 'API Key';
   }
+  setUpstreamOauthTokenStatus('');
 }
 
 document.getElementById('upstreamAuthMode').addEventListener('change', syncUpstreamAuthModeFields);
+
+function setUpstreamOauthTokenStatus(message, isError = false) {
+  const node = document.getElementById('upstreamOauthTokenStatus');
+  if (!node) return;
+  node.textContent = message || '';
+  node.className = 'text-xs ' + (isError ? 'text-red-500' : 'text-green-600');
+  if (!message) node.className = 'text-xs text-zinc-500';
+}
+
+document.getElementById('checkKimiTokenBtn').addEventListener('click', async () => {
+  const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
+  if (authMode !== 'kimi_cli_oauth') {
+    setUpstreamOauthTokenStatus('请先选择 kimi-cli auth 认证方式', true);
+    return;
+  }
+  setUpstreamOauthTokenStatus('检测中...');
+  try {
+    const res = await fetch('/api/upstreams/kimi-token/check', {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ oauth_key: KIMI_OAUTH_DEFAULT_KEY })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      const ttl = data.seconds_to_expiry != null ? `，剩余 ${data.seconds_to_expiry}s` : '';
+      setUpstreamOauthTokenStatus(`可用（${data.path}${ttl}）`);
+    } else {
+      const msg = data.error || '本机 token 不可用';
+      const detail = data.path ? `（${data.path}）` : '';
+      setUpstreamOauthTokenStatus(msg + detail, true);
+    }
+  } catch (e) {
+    setUpstreamOauthTokenStatus('检测失败: ' + e.message, true);
+  }
+});
 
 document.getElementById('submitUpstreamEdit').addEventListener('click', async () => {
   const name = document.getElementById('upstreamName').value.trim();
   const targetBaseUrl = document.getElementById('upstreamBaseUrl').value.trim();
   const apiKey = document.getElementById('upstreamApiKey').value;
   const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
-  const oauthKey = document.getElementById('upstreamOauthKey').value.trim() || 'oauth/kimi-code';
-  const oauthHost = document.getElementById('upstreamOauthHost').value.trim() || 'https://auth.kimi.com';
+  const isKimiOauth = authMode === 'kimi_cli_oauth';
+  const oauthKey = KIMI_OAUTH_DEFAULT_KEY;
+  const oauthHost = KIMI_OAUTH_DEFAULT_HOST;
+  const effectiveApiKey = isKimiOauth ? '' : apiKey;
+  const effectiveTargetBaseUrl = isKimiOauth
+    ? (targetBaseUrl || KIMI_OAUTH_DEFAULT_BASE_URL)
+    : targetBaseUrl;
   const description = document.getElementById('upstreamDescription').value.trim();
   const isActive = document.getElementById('upstreamIsActive').checked;
-  const useClaudeFeatures = document.getElementById('upstreamUseClaudeFeatures').checked;
-  const useRooFeatures = document.getElementById('upstreamUseRooFeatures').checked;
+  const useClaudeFeatures = isKimiOauth ? false : document.getElementById('upstreamUseClaudeFeatures').checked;
+  const useRooFeatures = isKimiOauth ? false : document.getElementById('upstreamUseRooFeatures').checked;
 
-  if (!name || !targetBaseUrl) {
-    document.getElementById('upstreamEditError').textContent = '名称和基础 URL 不能为空';
+  if (!name || (!isKimiOauth && !targetBaseUrl)) {
+    document.getElementById('upstreamEditError').textContent = isKimiOauth
+      ? '上游名称不能为空'
+      : '名称和基础 URL 不能为空';
     document.getElementById('upstreamEditError').classList.remove('hidden');
     return;
   }
 
   const body = {
     name,
-    target_base_url: targetBaseUrl,
-    api_key: apiKey,
+    target_base_url: effectiveTargetBaseUrl,
+    api_key: effectiveApiKey,
     auth_mode: authMode,
     oauth_key: oauthKey,
     oauth_host: oauthHost,
