@@ -236,7 +236,7 @@ def test_apply_multi_upstream_route_uses_kimi_headers_when_route_is_kimi_oauth()
         "/v1/chat/completions",
     )
 
-    assert flow.request.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert flow.request.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
     assert list(flow.request.headers.keys()) == [
         "Host",
         "Accept-Encoding",
@@ -271,7 +271,7 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
         "/v1/chat/completions",
     )
 
-    assert flow.request.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert flow.request.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
     assert list(flow.request.headers.keys()) == [
         "Host",
         "Accept-Encoding",
@@ -323,14 +323,14 @@ def test_forward_single_upstream_kimi_cli_rewrites_url_and_syncs_flow():
         "/v1/chat/completions",
     )
 
-    assert sent["url"] == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert sent["url"] == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
     assert sent["method"] == "POST"
     assert sent["headers"][0][0] == "Host"
-    assert flow.request.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert flow.request.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
     assert flow.request.headers["Authorization"] == "Bearer oauth-token"
     assert b'"model": "kimi-k2"' in flow.request.content
     assert flow.response["status"] == 200
-    assert captured_req.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert captured_req.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
 
 
 def test_feature_detection_identifies_roo_client_headers():
@@ -437,7 +437,7 @@ def test_forward_multi_upstream_kimi_cli_syncs_body_and_flow_headers():
     )
 
     assert sent["method"] == "POST"
-    assert sent["url"] == "https://api.kimi.com/v1/chat/completions"
+    assert sent["url"] == "https://api.kimi.com/coding/v1/chat/completions"
     assert sent["headers"][0][0] == "Host"
     assert flow.request.headers["Authorization"] == "Bearer oauth-token"
     assert flow.response["status"] == 200

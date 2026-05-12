@@ -4,6 +4,7 @@
 import json
 import sys
 import types
+from pathlib import Path
 
 mitmproxy_stub = types.ModuleType("mitmproxy")
 http_stub = types.ModuleType("mitmproxy.http")
@@ -223,3 +224,147 @@ def test_available_models_returns_enabled_models_without_api_keys():
     assert payload["models"][1]["routes"][0]["use_roo_features"] is True
     assert "api_key" not in json.dumps(payload, ensure_ascii=False)
     assert "sk-" not in json.dumps(payload, ensure_ascii=False)
+
+
+class DummyUpstreamStorage:
+    def __init__(self):
+        self.created = None
+        self.updated = None
+        self.next_id = 99
+
+    def get_upstream(self, upstream_id):
+        return {
+            "id": upstream_id,
+            "name": "u",
+            "target_base_url": "https://api.example.com/v1",
+            "api_key": "old-key",
+            "auth_mode": "api_key",
+            "oauth_key": "oauth/kimi-code",
+            "oauth_host": "https://auth.kimi.com",
+            "description": "",
+            "is_active": True,
+            "use_claude_features": False,
+            "use_roo_features": False,
+        }
+
+    def create_upstream(self, **kwargs):
+        self.created = kwargs
+        return self.next_id
+
+    def update_upstream(self, **kwargs):
+        self.updated = kwargs
+        return True
+
+
+def test_create_kimi_oauth_upstream_clears_api_key(monkeypatch):
+    monkeypatch.delenv("KIMI_CODE_BASE_URL", raising=False)
+    flow = DummyFlow("POST", {
+        "name": "kimi",
+        "target_base_url": "https://should-be-ignored.example/v1",
+        "api_key": "should-be-cleared",
+        "auth_mode": "kimi_cli_oauth",
+        "use_claude_features": True,
+        "use_roo_features": True,
+    })
+    storage = DummyUpstreamStorage()
+
+    handled = handle_console_api(flow, storage, "/api/upstreams")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.created["auth_mode"] == "kimi_cli_oauth"
+    assert storage.created["api_key"] == ""
+    assert storage.created["target_base_url"] == "https://api.kimi.com/coding/v1"
+    assert storage.created["oauth_key"] == "oauth/kimi-code"
+    assert storage.created["oauth_host"] == "https://auth.kimi.com"
+    assert storage.created["use_claude_features"] is False
+    assert storage.created["use_roo_features"] is False
+
+
+def test_update_kimi_oauth_upstream_forces_api_key_empty(monkeypatch):
+    monkeypatch.delenv("KIMI_CODE_BASE_URL", raising=False)
+    flow = DummyFlow("PUT", {
+        "name": "kimi-updated",
+        "target_base_url": "https://should-be-ignored.example/v1",
+        "auth_mode": "kimi_cli_oauth",
+        "api_key": "should-be-cleared",
+        "use_claude_features": True,
+        "use_roo_features": True,
+    })
+    storage = DummyUpstreamStorage()
+
+    handled = handle_console_api(flow, storage, "/api/upstreams/7")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.updated["upstream_id"] == 7
+    assert storage.updated["auth_mode"] == "kimi_cli_oauth"
+    assert storage.updated["api_key"] == ""
+    assert storage.updated["target_base_url"] == "https://api.kimi.com/coding/v1"
+    assert storage.updated["oauth_key"] == "oauth/kimi-code"
+    assert storage.updated["oauth_host"] == "https://auth.kimi.com"
+    assert storage.updated["use_claude_features"] is False
+    assert storage.updated["use_roo_features"] is False
+
+
+def test_check_kimi_token_endpoint_success(monkeypatch, tmp_path: Path):
+    class FakeManager:
+        def __init__(self, _project_root):
+            pass
+
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False):
+            assert oauth_key == "oauth/kimi-code"
+            assert oauth_host == "https://auth.kimi.com"
+            assert refresh_if_needed is True
+            return {
+                "available": True,
+                "path": "/home/test/.kimi/credentials/kimi-code.json",
+                "reason": "ok",
+                "expires_at": 1234567890,
+                "seconds_to_expiry": 3600,
+                "has_refresh_token": True,
+                "refresh_attempted": False,
+            }
+
+    fake_module = types.SimpleNamespace(KimiCliAuthManager=FakeManager)
+    monkeypatch.setitem(sys.modules, "src.kimi_cli_auth", fake_module)
+    flow = DummyFlow("POST", {"oauth_key": "oauth/kimi-code"})
+
+    handled = handle_console_api(flow, DummyUpstreamStorage(), "/api/upstreams/kimi-token/check")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert payload["available"] is True
+    assert payload["reason"] == "ok"
+
+
+def test_check_kimi_token_endpoint_failure(monkeypatch):
+    class FakeManager:
+        def __init__(self, _project_root):
+            pass
+
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False):
+            assert oauth_key == "oauth/kimi-code"
+            assert oauth_host == "https://auth.kimi.com"
+            assert refresh_if_needed is True
+            return {
+                "available": False,
+                "path": "/home/test/.kimi/credentials/kimi-code.json",
+                "reason": "token_file_not_found_or_invalid",
+                "expires_at": None,
+                "seconds_to_expiry": None,
+                "has_refresh_token": False,
+                "refresh_attempted": False,
+            }
+
+    fake_module = types.SimpleNamespace(KimiCliAuthManager=FakeManager)
+    monkeypatch.setitem(sys.modules, "src.kimi_cli_auth", fake_module)
+    flow = DummyFlow("POST", {"oauth_key": "oauth/kimi-code"})
+
+    handled = handle_console_api(flow, DummyUpstreamStorage(), "/api/upstreams/kimi-token/check")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert payload["reason"] == "token_file_not_found_or_invalid"

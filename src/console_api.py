@@ -5,9 +5,16 @@
 import json
 import re
 import secrets
+from pathlib import Path
 from datetime import datetime, date, timedelta
 from typing import Optional
 from urllib.parse import parse_qs, urlencode
+
+from src.kimi_cli_auth import (
+    KIMI_CLI_OAUTH_BASE_URL,
+    KIMI_DEFAULT_OAUTH_HOST,
+    KIMI_DEFAULT_OAUTH_KEY,
+)
 
 
 _MODEL_CONFIG_PATH_RE = re.compile(r'^/api/models/(\d+)$')
@@ -112,6 +119,10 @@ def _validate_model_config_target(upstream_id, target_base_url: str, use_multi_u
     if not upstream_id and not target_base_url:
         return "请选择上游或填写目标 URL"
     return None
+
+
+def _default_kimi_oauth_base_url() -> str:
+    return KIMI_CLI_OAUTH_BASE_URL
 
 
 def _extract_model_routes(body: dict) -> tuple[list, Optional[str]]:
@@ -377,6 +388,27 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         _json_response(flow, 200, {"upstreams": upstreams})
         return True
 
+    # POST /api/upstreams/kimi-token/check - 检测服务器本机 kimi-cli token
+    if path == "/api/upstreams/kimi-token/check" and flow.request.method == "POST":
+        body = _extract_body(flow) or {}
+        oauth_key = (body.get("oauth_key") or KIMI_DEFAULT_OAUTH_KEY).strip()
+        if not oauth_key:
+            oauth_key = KIMI_DEFAULT_OAUTH_KEY
+        oauth_host = (body.get("oauth_host") or KIMI_DEFAULT_OAUTH_HOST).strip()
+        if not oauth_host:
+            oauth_host = KIMI_DEFAULT_OAUTH_HOST
+        try:
+            from src.kimi_cli_auth import KimiCliAuthManager
+            manager = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
+            status = manager.inspect_local_token(oauth_key, oauth_host, refresh_if_needed=True)
+            if status.get("available"):
+                _json_response(flow, 200, {"message": "检测成功：本机 token 可用", **status})
+            else:
+                _json_response(flow, 400, {"error": "检测失败：本机 token 不可用", **status})
+        except Exception as e:
+            _json_response(flow, 500, {"error": f"检测失败: {e}"})
+        return True
+
     # GET /api/upstreams/{id} - 获取单个上游（返回完整 api_key）
     if path.startswith("/api/upstreams/") and flow.request.method == "GET":
         try:
@@ -406,14 +438,24 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         use_claude_features = body.get("use_claude_features", False)
         use_roo_features = body.get("use_roo_features", False)
         auth_mode = (body.get("auth_mode") or "api_key").strip()
-        oauth_key = (body.get("oauth_key") or "oauth/kimi-code").strip()
-        oauth_host = (body.get("oauth_host") or "https://auth.kimi.com").strip()
+        oauth_key = (body.get("oauth_key") or KIMI_DEFAULT_OAUTH_KEY).strip()
+        oauth_host = (body.get("oauth_host") or KIMI_DEFAULT_OAUTH_HOST).strip()
 
         if auth_mode not in ("api_key", "kimi_cli_oauth"):
             _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key 或 kimi_cli_oauth"})
             return True
+        if auth_mode == "kimi_cli_oauth":
+            api_key = ""
+            target_base_url = _default_kimi_oauth_base_url()
+            use_claude_features = False
+            use_roo_features = False
+            oauth_key = KIMI_DEFAULT_OAUTH_KEY
+            oauth_host = KIMI_DEFAULT_OAUTH_HOST
 
-        if not name or not target_base_url:
+        if not name:
+            _json_response(flow, 400, {"error": "名称不能为空"})
+            return True
+        if auth_mode != "kimi_cli_oauth" and not target_base_url:
             _json_response(flow, 400, {"error": "名称和基础 URL 不能为空"})
             return True
 
@@ -453,18 +495,38 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         if auth_mode is not None and auth_mode not in ("api_key", "kimi_cli_oauth"):
             _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key 或 kimi_cli_oauth"})
             return True
-        oauth_key = body.get("oauth_key")
-        if oauth_key is not None:
-            oauth_key = oauth_key.strip() or "oauth/kimi-code"
-        oauth_host = body.get("oauth_host")
-        if oauth_host is not None:
-            oauth_host = oauth_host.strip() or "https://auth.kimi.com"
+
+        effective_auth_mode = auth_mode if auth_mode is not None else (existing.get("auth_mode") or "api_key")
+        api_key_value = body.get("api_key")
+        raw_target_base_url = body.get("target_base_url")
+        target_base_url = raw_target_base_url
+        if isinstance(target_base_url, str):
+            target_base_url = target_base_url.strip()
+
+        if effective_auth_mode == "kimi_cli_oauth":
+            api_key_value = ""
+            target_base_url = _default_kimi_oauth_base_url()
+            body["use_claude_features"] = False
+            body["use_roo_features"] = False
+            oauth_key = KIMI_DEFAULT_OAUTH_KEY
+            oauth_host = KIMI_DEFAULT_OAUTH_HOST
+        else:
+            if isinstance(raw_target_base_url, str) and not target_base_url:
+                _json_response(flow, 400, {"error": "基础 URL 不能为空"})
+                return True
+
+            oauth_key = body.get("oauth_key")
+            if oauth_key is not None:
+                oauth_key = oauth_key.strip() or KIMI_DEFAULT_OAUTH_KEY
+            oauth_host = body.get("oauth_host")
+            if oauth_host is not None:
+                oauth_host = oauth_host.strip() or KIMI_DEFAULT_OAUTH_HOST
 
         updated = storage.update_upstream(
             upstream_id=upstream_id,
             name=body.get("name"),
-            target_base_url=body.get("target_base_url"),
-            api_key=body.get("api_key"),
+            target_base_url=target_base_url,
+            api_key=api_key_value,
             description=body.get("description"),
             is_active=body.get("is_active"),
             use_claude_features=body.get("use_claude_features"),

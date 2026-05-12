@@ -19,6 +19,7 @@ import httpx
 
 KIMI_DEFAULT_OAUTH_KEY = "oauth/kimi-code"
 KIMI_DEFAULT_OAUTH_HOST = "https://auth.kimi.com"
+KIMI_CLI_OAUTH_BASE_URL = "https://api.kimi.com/coding/v1"
 
 
 def _ascii_header_value(value: str, *, fallback: str = "unknown") -> str:
@@ -302,27 +303,110 @@ class KimiCliAuthManager:
         if auth_mode != "kimi_cli_oauth":
             return api_key or ""
 
-        fallback = api_key or ""
         oauth_key = (oauth_key or KIMI_DEFAULT_OAUTH_KEY).strip() or KIMI_DEFAULT_OAUTH_KEY
         oauth_host = (oauth_host or KIMI_DEFAULT_OAUTH_HOST).strip() or KIMI_DEFAULT_OAUTH_HOST
 
         with self._lock:
             token = self._load_token(oauth_key)
             if token is None:
-                return fallback
+                return ""
 
             now = time.time()
-            if token.expires_at > now and token.expires_at - now >= _refresh_threshold(token.expires_in):
-                return token.access_token or fallback
+            seconds_to_expiry = None
+            if token.expires_at and token.expires_at > 0:
+                seconds_to_expiry = token.expires_at - now
+
+            if token.access_token and (
+                seconds_to_expiry is None or seconds_to_expiry >= _refresh_threshold(token.expires_in)
+            ):
+                return token.access_token or ""
 
             if token.refresh_token:
                 refreshed = self._refresh_token(oauth_key, oauth_host, token.refresh_token)
                 if refreshed and refreshed.access_token:
                     return refreshed.access_token
 
-            if token.access_token:
+            if token.access_token and (seconds_to_expiry is None or seconds_to_expiry > 0):
                 return token.access_token
-            return fallback
+            return ""
+
+    def inspect_local_token(
+        self,
+        oauth_key: str,
+        oauth_host: str = KIMI_DEFAULT_OAUTH_HOST,
+        *,
+        refresh_if_needed: bool = False,
+    ) -> dict:
+        """Inspect local kimi-cli credential token file without exposing secrets."""
+        oauth_key = (oauth_key or KIMI_DEFAULT_OAUTH_KEY).strip() or KIMI_DEFAULT_OAUTH_KEY
+        oauth_host = (oauth_host or KIMI_DEFAULT_OAUTH_HOST).strip() or KIMI_DEFAULT_OAUTH_HOST
+        path = self._credentials_path(oauth_key)
+        with self._lock:
+            token = self._load_token(oauth_key)
+            now = time.time()
+
+            if token is None:
+                return {
+                    "available": False,
+                    "path": str(path),
+                    "reason": "token_file_not_found_or_invalid",
+                    "expires_at": None,
+                    "seconds_to_expiry": None,
+                    "has_refresh_token": False,
+                    "refresh_attempted": False,
+                }
+
+            seconds_to_expiry = None
+            if token.expires_at and token.expires_at > 0:
+                seconds_to_expiry = token.expires_at - now
+            threshold = _refresh_threshold(token.expires_in)
+            should_refresh = bool(
+                token.refresh_token
+                and refresh_if_needed
+                and (
+                    seconds_to_expiry is None
+                    or seconds_to_expiry < threshold
+                )
+            )
+            refreshed = False
+
+            if should_refresh:
+                refreshed_token = self._refresh_token(oauth_key, oauth_host, token.refresh_token)
+                if refreshed_token and refreshed_token.access_token:
+                    token = refreshed_token
+                    now = time.time()
+                    seconds_to_expiry = token.expires_at - now if token.expires_at and token.expires_at > 0 else None
+                    threshold = _refresh_threshold(token.expires_in)
+                    refreshed = True
+
+            available = bool(token.access_token)
+            reason = "ok" if available else "empty_access_token"
+
+            if seconds_to_expiry is not None:
+                if seconds_to_expiry <= 0:
+                    available = False
+                    if token.refresh_token:
+                        reason = "expired_and_refresh_failed" if should_refresh and not refreshed else "expired"
+                    else:
+                        reason = "expired_no_refresh_token"
+                elif should_refresh and not refreshed:
+                    reason = "refresh_failed_but_still_valid"
+                elif refreshed:
+                    reason = "ok_refreshed"
+                elif seconds_to_expiry < threshold:
+                    reason = "expiring_soon"
+            elif refreshed:
+                reason = "ok_refreshed"
+
+            return {
+                "available": available,
+                "path": str(path),
+                "reason": reason,
+                "expires_at": token.expires_at or None,
+                "seconds_to_expiry": int(seconds_to_expiry) if seconds_to_expiry is not None else None,
+                "has_refresh_token": bool(token.refresh_token),
+                "refresh_attempted": should_refresh,
+            }
 
     def build_full_headers(
         self,

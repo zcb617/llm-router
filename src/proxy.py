@@ -17,7 +17,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from src.openai_protocol_converter import parse_sse_buffer
-from src.kimi_cli_auth import KimiCliAuthManager
+from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 
 logger = logging.getLogger(__name__)
 
@@ -193,11 +193,26 @@ class LLMRouterAddon:
     def _is_kimi_cli_auth(self, cfg: dict) -> bool:
         return self._kimi_cli_auth.is_kimi_cli_auth(cfg or {})
 
+    def _resolve_target_base_url(self, cfg: dict) -> str:
+        if self._is_kimi_cli_auth(cfg):
+            return KIMI_CLI_OAUTH_BASE_URL
+        return cfg.get("target_base_url", "")
+
+    @staticmethod
+    def _normalize_path_for_base(target_base_url: str, path: str) -> str:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        base = (target_base_url or "").rstrip("/")
+        if normalized_path.startswith("/v1/") and base.lower().endswith("/v1"):
+            return normalized_path[len("/v1"):]
+        return normalized_path
+
     def _build_kimi_cli_headers(self, full_url: str, cfg: dict) -> list[tuple[str, str]]:
         auth_mode = (cfg.get("auth_mode") or "api_key")
+        if auth_mode != "kimi_cli_oauth":
+            raise RuntimeError(f"Invalid auth_mode for kimi header builder: {auth_mode}")
         access_token = self._kimi_cli_auth.resolve_access_token(
             auth_mode=auth_mode,
-            api_key=cfg.get("api_key", "") or "",
+            api_key="",
             oauth_key=cfg.get("oauth_key") or "oauth/kimi-code",
             oauth_host=cfg.get("oauth_host") or "https://auth.kimi.com",
         )
@@ -263,11 +278,17 @@ class LLMRouterAddon:
                 mk = r["model_key"]
                 if mk not in routes_by_model:
                     routes_by_model[mk] = []
+                auth_mode = r.get("auth_mode") or "api_key"
+                target_base_url = (
+                    KIMI_CLI_OAUTH_BASE_URL
+                    if auth_mode == "kimi_cli_oauth"
+                    else r["target_base_url"]
+                )
                 routes_by_model[mk].append({
                     "upstream_id": r["upstream_id"],
-                    "target_base_url": r["target_base_url"],
+                    "target_base_url": target_base_url,
                     "api_key": r.get("api_key", ""),
-                    "auth_mode": r.get("auth_mode") or "api_key",
+                    "auth_mode": auth_mode,
                     "oauth_key": r.get("oauth_key") or "oauth/kimi-code",
                     "oauth_host": r.get("oauth_host") or "https://auth.kimi.com",
                     "forward_model": r.get("forward_model", ""),
@@ -292,15 +313,18 @@ class LLMRouterAddon:
                         # 单上游模式（原有逻辑）
                         target_base_url = cfg.get("target_base_url", "")
                         api_key = cfg.get("api_key", "")
+                        auth_mode = cfg.get("auth_mode") or "api_key"
                         forward_model = (cfg.get("forward_model") or "").strip()
 
-                        if not target_base_url:
+                        if auth_mode == "kimi_cli_oauth":
+                            target_base_url = KIMI_CLI_OAUTH_BASE_URL
+                        elif not target_base_url:
                             continue
 
                         self._model_cache[mk] = {
                             "target_base_url": target_base_url,
                             "api_key": api_key,
-                            "auth_mode": cfg.get("auth_mode") or "api_key",
+                            "auth_mode": auth_mode,
                             "oauth_key": cfg.get("oauth_key") or "oauth/kimi-code",
                             "oauth_host": cfg.get("oauth_host") or "https://auth.kimi.com",
                             "forward_model": forward_model,
@@ -516,7 +540,7 @@ class LLMRouterAddon:
             return
 
         # === 单上游模式（原有逻辑） ===
-        target_base_url = mapping["target_base_url"]
+        target_base_url = self._resolve_target_base_url(mapping)
         logger.info(f"Model mapping: {model_name} -> {target_base_url}")
 
         # kimi-cli auth 专用通道：流式请求走原生转发，非流式请求走专用同步通道。
@@ -684,20 +708,21 @@ class LLMRouterAddon:
 
         last_error = "pre-connect failed"
         for route in candidate_routes:
-            if self._is_route_reachable(route.get("target_base_url", "")):
+            target_url = self._resolve_target_base_url(route)
+            if self._is_route_reachable(target_url):
                 try:
                     self._apply_multi_upstream_route(flow, route, captured_req, model_name, path)
                     flow.metadata["multi_upstream_native"] = True
                     logger.info(
                         f"Multi-upstream streaming selected upstream {route['upstream_id']}: "
-                        f"{route['target_base_url']} for model {model_name}"
+                        f"{target_url} for model {model_name}"
                     )
                     return
                 except Exception as e:
                     upstream_id = route.get("upstream_id")
                     last_error = f"{upstream_id}: {e}"
                     logger.warning(
-                        f"Streaming upstream apply failed: {upstream_id} {route.get('target_base_url', '')}: {e}, trying next"
+                        f"Streaming upstream apply failed: {upstream_id} {target_url}: {e}, trying next"
                     )
                     if upstream_id is not None:
                         self.storage.increment_upstream_failures(upstream_id)
@@ -706,7 +731,7 @@ class LLMRouterAddon:
             upstream_id = route.get("upstream_id")
             last_error = f"{upstream_id}: pre-connect failed"
             logger.warning(
-                f"Streaming upstream pre-connect failed: {upstream_id} {route.get('target_base_url', '')}, trying next"
+                f"Streaming upstream pre-connect failed: {upstream_id} {target_url}, trying next"
             )
             if upstream_id is not None:
                 self.storage.increment_upstream_failures(upstream_id)
@@ -721,13 +746,14 @@ class LLMRouterAddon:
     def _apply_single_upstream_kimi_cli_route(self, flow, mapping, captured_req, model_name, path):
         """单上游 kimi-cli auth 流式通道：走 mitmproxy 原生转发，但使用专用头模板。"""
         try:
-            target_url = mapping["target_base_url"]
+            target_url = self._resolve_target_base_url(mapping)
             forward_model = mapping.get("forward_model", "")
             req_body = captured_req.body
             if forward_model:
                 req_body = self._replace_model_in_body(req_body, forward_model)
 
-            new_url = self.capturer.rewrite_url(flow, target_url, path)
+            normalized_path = self._normalize_path_for_base(target_url, path)
+            new_url = self.capturer.rewrite_url(flow, target_url, normalized_path)
             req_headers = self._build_kimi_cli_headers(new_url, mapping)
             self._apply_ordered_headers_to_flow(flow, req_headers)
 
@@ -752,7 +778,7 @@ class LLMRouterAddon:
 
     def _forward_single_upstream_kimi_cli(self, flow, mapping, captured_req, model_name, path):
         """kimi-cli auth 单上游非流式专用通道：严格复刻 kimi-cli 头部模板。"""
-        target_url = mapping["target_base_url"]
+        target_url = self._resolve_target_base_url(mapping)
         forward_model = mapping.get("forward_model", "")
         client = self._get_http_client()
 
@@ -761,7 +787,8 @@ class LLMRouterAddon:
             if forward_model:
                 req_body = self._replace_model_in_body(req_body, forward_model)
 
-            full_url = self.capturer.rewrite_url(flow, target_url, path)
+            normalized_path = self._normalize_path_for_base(target_url, path)
+            full_url = self.capturer.rewrite_url(flow, target_url, normalized_path)
             req_data = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
             req_headers = self._build_kimi_cli_headers(full_url, mapping)
             self._apply_ordered_headers_to_flow(flow, req_headers)
@@ -817,7 +844,7 @@ class LLMRouterAddon:
         for route in candidate_routes:
             upstream_id = route["upstream_id"]
             health = route.get("health_status", "healthy")
-            target_url = route["target_base_url"]
+            target_url = self._resolve_target_base_url(route)
             api_key = route.get("api_key", "")
             forward_model = route.get("forward_model", "")
 
@@ -830,7 +857,10 @@ class LLMRouterAddon:
                     req_body = self._replace_model_in_body(req_body, forward_model)
 
                 # 构建完整 URL
-                full_url = target_url.rstrip("/") + path
+                if self._is_kimi_cli_auth(route):
+                    full_url = self._join_api_path(target_url, path)
+                else:
+                    full_url = target_url.rstrip("/") + path
                 logger.debug(f"Multi-upstream forwarding to: {full_url}")
 
                 # 同步 HTTP 请求（连接复用）
@@ -956,7 +986,7 @@ class LLMRouterAddon:
     def _apply_multi_upstream_route(self, flow, route, captured_req, model_name, path):
         """把当前 flow 改写到选中的多上游路由。"""
         upstream_id = route["upstream_id"]
-        target_url = route["target_base_url"]
+        target_url = self._resolve_target_base_url(route)
         api_key = route.get("api_key", "")
         forward_model = route.get("forward_model", "")
 
@@ -964,7 +994,8 @@ class LLMRouterAddon:
         if forward_model:
             req_body = self._replace_model_in_body(req_body, forward_model)
 
-        new_url = self.capturer.rewrite_url(flow, target_url, path)
+        normalized_path = self._normalize_path_for_base(target_url, path) if self._is_kimi_cli_auth(route) else path
+        new_url = self.capturer.rewrite_url(flow, target_url, normalized_path)
         logger.info(f"Multi-upstream rewritten URL: {new_url}")
 
         if self._is_kimi_cli_auth(route):
@@ -1063,6 +1094,9 @@ class LLMRouterAddon:
 
     def _build_health_check_requests(self, target_base_url: str, model_info: dict) -> list[tuple[str, str, dict]]:
         """基于模型配置和匹配上游构造健康检查候选请求。"""
+        if self._is_kimi_cli_auth(model_info):
+            target_base_url = KIMI_CLI_OAUTH_BASE_URL
+
         model = model_info.get("forward_model") or model_info.get("model_key") or "gpt-3.5-turbo"
 
         openai_body = json.dumps({
@@ -1534,13 +1568,15 @@ class LLMRouterAddon:
             upstream_name = upstream.get("name", "unknown")
             target_url = upstream.get("target_base_url", "")
 
-            if not target_url:
-                continue
-
             # 随机找一个关联此上游的模型用于健康检查
             model_info = self.storage.get_random_model_for_upstream(upstream_id)
             if model_info is None:
                 logger.info(f"Health check: no model found for upstream {upstream_name}, skipping")
+                continue
+
+            if self._is_kimi_cli_auth(model_info):
+                target_url = KIMI_CLI_OAUTH_BASE_URL
+            if not target_url:
                 continue
 
             recovered = False
