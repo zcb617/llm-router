@@ -14,6 +14,9 @@
      - llm_calls.final_responses_body
      - model_configs.protocol_converter
      - model_upstream_routes.protocol_converter
+     - upstreams.auth_mode
+     - upstreams.oauth_key
+     - upstreams.oauth_host
   4. 基础内容：
      - 基础表: llm_calls, users, api_keys, model_configs
      - RBAC 表: roles, menus, role_menus, upstreams
@@ -25,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.1"
+CURRENT_VERSION = "1.1.2"
 
 
 def get_pg_conn(config):
@@ -169,6 +172,9 @@ PG_TABLES = [
             name VARCHAR(100) UNIQUE NOT NULL,
             target_base_url VARCHAR(500) NOT NULL,
             api_key VARCHAR(500),
+            auth_mode VARCHAR(32) DEFAULT 'api_key',
+            oauth_key VARCHAR(100) DEFAULT 'oauth/kimi-code',
+            oauth_host VARCHAR(200) DEFAULT 'https://auth.kimi.com',
             is_active BOOLEAN DEFAULT true,
             description VARCHAR(200),
             use_claude_features BOOLEAN DEFAULT false,
@@ -293,6 +299,9 @@ SQLITE_TABLES = [
             name TEXT UNIQUE NOT NULL,
             target_base_url TEXT NOT NULL,
             api_key TEXT,
+            auth_mode TEXT DEFAULT 'api_key',
+            oauth_key TEXT DEFAULT 'oauth/kimi-code',
+            oauth_host TEXT DEFAULT 'https://auth.kimi.com',
             is_active INTEGER DEFAULT 1,
             description TEXT,
             use_claude_features INTEGER DEFAULT 0,
@@ -624,6 +633,20 @@ def run_v111_sqlite(conn):
         cur.close()
 
 
+def run_v112_pg(conn):
+    """v1.1.1 -> v1.1.2 升级 (PostgreSQL): 上游新增 kimi-cli auth 字段"""
+    _pg_add_column(conn, "upstreams", "auth_mode", "VARCHAR(32) DEFAULT 'api_key'")
+    _pg_add_column(conn, "upstreams", "oauth_key", "VARCHAR(100) DEFAULT 'oauth/kimi-code'")
+    _pg_add_column(conn, "upstreams", "oauth_host", "VARCHAR(200) DEFAULT 'https://auth.kimi.com'")
+
+
+def run_v112_sqlite(conn):
+    """v1.1.1 -> v1.1.2 升级 (SQLite): 上游新增 kimi-cli auth 字段"""
+    _sqlite_add_column(conn, "upstreams", "auth_mode", "TEXT DEFAULT 'api_key'")
+    _sqlite_add_column(conn, "upstreams", "oauth_key", "TEXT DEFAULT 'oauth/kimi-code'")
+    _sqlite_add_column(conn, "upstreams", "oauth_host", "TEXT DEFAULT 'https://auth.kimi.com'")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -654,7 +677,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -683,6 +706,13 @@ def main():
             run_v111_pg(conn)
         else:
             run_v111_sqlite(conn)
+    # v1.1.1 -> v1.1.2
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", CURRENT_VERSION):
+        print(f"\n[v1.1.2] 检查/补齐上游 kimi-cli auth 字段...")
+        if is_pg:
+            run_v112_pg(conn)
+        else:
+            run_v112_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

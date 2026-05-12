@@ -11,6 +11,15 @@ mitmproxy_stub = types.ModuleType("mitmproxy")
 http_stub = types.ModuleType("mitmproxy.http")
 addonmanager_stub = types.ModuleType("mitmproxy.addonmanager")
 http_stub.HTTPFlow = type("HTTPFlow", (), {})
+
+
+class ResponseStub:
+    @staticmethod
+    def make(status, content=b"", headers=None):
+        return {"status": status, "content": content, "headers": headers or {}}
+
+
+http_stub.Response = ResponseStub
 addonmanager_stub.Loader = type("Loader", (), {})
 mitmproxy_stub.http = http_stub
 mitmproxy_stub.addonmanager = addonmanager_stub
@@ -23,10 +32,42 @@ from src.capture import CapturedRequest, DataCapturer
 
 
 def _make_addon_for_route_tests():
+    class DummyKimiAuth:
+        @staticmethod
+        def is_kimi_cli_auth(config):
+            return (config.get("auth_mode") or "api_key") == "kimi_cli_oauth"
+
+        @staticmethod
+        def resolve_access_token(*, auth_mode, api_key, oauth_key, oauth_host):
+            if auth_mode == "kimi_cli_oauth":
+                return "oauth-token"
+            return api_key or ""
+
+        @staticmethod
+        def build_full_headers(*, host, access_token):
+            return [
+                ("Host", host),
+                ("Accept-Encoding", "gzip, deflate"),
+                ("Connection", "keep-alive"),
+                ("Accept", "application/json"),
+                ("Content-Type", "application/json"),
+                ("Authorization", f"Bearer {access_token}"),
+            ]
+
+    class DummyStorage:
+        def increment_upstream_failures(self, _upstream_id):
+            return None
+
+        def reset_upstream_health(self, _upstream_id):
+            return None
+
     addon = LLMRouterAddon.__new__(LLMRouterAddon)
     addon._capturer = DataCapturer()
     addon._pending_requests = {}
     addon._pending_requests_lock = threading.Lock()
+    addon._kimi_cli_auth = DummyKimiAuth()
+    addon._storage = DummyStorage()
+    addon._external_storage = DummyStorage()
     return addon
 
 
@@ -173,6 +214,125 @@ def test_apply_multi_upstream_route_injects_claude_headers_for_plain_client():
     assert flow.request.headers["X-Claude-Code-Session-Id"]
 
 
+def test_apply_multi_upstream_route_uses_kimi_headers_when_route_is_kimi_oauth():
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow({"User-Agent": "curl/8.7.1"})
+    captured_req = _make_captured_request(flow)
+
+    addon._apply_multi_upstream_route(
+        flow,
+        {
+            "upstream_id": 9,
+            "target_base_url": "https://api.kimi.com/",
+            "auth_mode": "kimi_cli_oauth",
+            "oauth_key": "oauth/kimi-code",
+            "oauth_host": "https://auth.kimi.com",
+            "api_key": "sk-should-not-be-used",
+            "forward_model": "kimi-k2",
+            "sort_order": 0,
+        },
+        captured_req,
+        "claude-opus",
+        "/v1/chat/completions",
+    )
+
+    assert flow.request.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert list(flow.request.headers.keys()) == [
+        "Host",
+        "Accept-Encoding",
+        "Connection",
+        "Accept",
+        "Content-Type",
+        "Authorization",
+    ]
+    assert flow.request.headers["Authorization"] == "Bearer oauth-token"
+    assert b'"model": "kimi-k2"' in flow.request.content
+    assert captured_req.overridden_model == "kimi-k2"
+    assert flow.metadata["multi_upstream_id"] == 9
+
+
+def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow()
+    captured_req = _make_captured_request(flow)
+
+    addon._apply_single_upstream_kimi_cli_route(
+        flow,
+        {
+            "target_base_url": "https://api.kimi.com/",
+            "auth_mode": "kimi_cli_oauth",
+            "oauth_key": "oauth/kimi-code",
+            "oauth_host": "https://auth.kimi.com",
+            "api_key": "",
+            "forward_model": "kimi-k2",
+        },
+        captured_req,
+        "claude-opus",
+        "/v1/chat/completions",
+    )
+
+    assert flow.request.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert list(flow.request.headers.keys()) == [
+        "Host",
+        "Accept-Encoding",
+        "Connection",
+        "Accept",
+        "Content-Type",
+        "Authorization",
+    ]
+    assert flow.request.headers["Authorization"] == "Bearer oauth-token"
+    assert b'"model": "kimi-k2"' in flow.request.content
+    assert captured_req.overridden_model == "kimi-k2"
+    assert "call_id" in flow.metadata
+    assert id(flow) in addon._pending_requests
+
+
+def test_forward_single_upstream_kimi_cli_rewrites_url_and_syncs_flow():
+    class DummyResp:
+        status_code = 200
+        content = b'{"ok": true}'
+        headers = {"Content-Type": "application/json"}
+
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow()
+    captured_req = _make_captured_request(flow)
+    sent = {}
+
+    addon._get_http_client = lambda: object()
+
+    def _send(_client, method, full_url, req_data, req_headers):
+        sent["method"] = method
+        sent["url"] = full_url
+        sent["body"] = req_data
+        sent["headers"] = list(req_headers)
+        return DummyResp()
+
+    addon._send_ordered_request = _send
+    addon._forward_single_upstream_kimi_cli(
+        flow,
+        {
+            "target_base_url": "https://api.kimi.com/",
+            "auth_mode": "kimi_cli_oauth",
+            "oauth_key": "oauth/kimi-code",
+            "oauth_host": "https://auth.kimi.com",
+            "api_key": "",
+            "forward_model": "kimi-k2",
+        },
+        captured_req,
+        "claude-opus",
+        "/v1/chat/completions",
+    )
+
+    assert sent["url"] == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert sent["method"] == "POST"
+    assert sent["headers"][0][0] == "Host"
+    assert flow.request.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+    assert flow.request.headers["Authorization"] == "Bearer oauth-token"
+    assert b'"model": "kimi-k2"' in flow.request.content
+    assert flow.response["status"] == 200
+    assert captured_req.url == "https://api.kimi.com/v1/chat/completions?beta=true"
+
+
 def test_feature_detection_identifies_roo_client_headers():
     assert LLMRouterAddon._has_roo_client_features({
         "User-Agent": "RooCode/3.60.0",
@@ -199,6 +359,91 @@ def test_responseheaders_streams_and_captures_chunks():
     assert result == b"data"
     assert flow.metadata["streamed_response_chunks"] == [b"data"]
     assert flow.metadata["first_token_time"] is not None
+
+
+def test_route_multi_upstream_streaming_can_fallback_after_kimi_route_setup_failure():
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow()
+    captured_req = _make_captured_request(flow)
+    attempts = []
+
+    addon._is_route_reachable = lambda _url: True
+
+    def _apply(flow_obj, route, captured_req_obj, model_name, path):
+        attempts.append(route["upstream_id"])
+        if route["upstream_id"] == 1:
+            raise RuntimeError("token unavailable")
+        flow_obj.metadata["multi_upstream_id"] = route["upstream_id"]
+        captured_req_obj.url = f"https://ok.example.com{path}"
+
+    addon._apply_multi_upstream_route = _apply
+
+    addon._route_multi_upstream_streaming(
+        flow,
+        [
+            {"upstream_id": 1, "target_base_url": "https://api.kimi.com", "auth_mode": "kimi_cli_oauth", "sort_order": 0},
+            {"upstream_id": 2, "target_base_url": "https://api.example.com", "auth_mode": "api_key", "sort_order": 1},
+        ],
+        captured_req,
+        "claude-opus",
+        "/v1/messages",
+    )
+
+    assert attempts == [1, 2]
+    assert flow.metadata["multi_upstream_native"] is True
+    assert flow.metadata["multi_upstream_id"] == 2
+    assert getattr(flow, "response", None) is None
+
+
+def test_forward_multi_upstream_kimi_cli_syncs_body_and_flow_headers():
+    class DummyResp:
+        status_code = 200
+        content = b'{"id":"ok"}'
+        headers = {"Content-Type": "application/json"}
+
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow()
+    captured_req = _make_captured_request(flow)
+    sent = {}
+
+    addon._get_http_client = lambda: object()
+
+    def _send(_client, method, full_url, req_data, req_headers):
+        sent["method"] = method
+        sent["url"] = full_url
+        sent["body"] = req_data
+        sent["headers"] = list(req_headers)
+        return DummyResp()
+
+    addon._send_ordered_request = _send
+    addon._forward_multi_upstream(
+        flow,
+        [
+            {
+                "upstream_id": 11,
+                "target_base_url": "https://api.kimi.com",
+                "auth_mode": "kimi_cli_oauth",
+                "oauth_key": "oauth/kimi-code",
+                "oauth_host": "https://auth.kimi.com",
+                "api_key": "",
+                "forward_model": "kimi-k2",
+                "health_status": "healthy",
+                "sort_order": 0,
+            }
+        ],
+        captured_req,
+        "claude-opus",
+        "/v1/chat/completions",
+    )
+
+    assert sent["method"] == "POST"
+    assert sent["url"] == "https://api.kimi.com/v1/chat/completions"
+    assert sent["headers"][0][0] == "Host"
+    assert flow.request.headers["Authorization"] == "Bearer oauth-token"
+    assert flow.response["status"] == 200
+    assert '"model": "kimi-k2"' in captured_req.body
+    assert captured_req.overridden_model == "kimi-k2"
+    assert flow.metadata["multi_upstream_id"] == 11
 
 
 def test_build_upstream_headers_strips_proxy_headers_and_replaces_auth():
@@ -235,7 +480,7 @@ def test_join_api_path_does_not_duplicate_v1():
 
 
 def test_health_check_requests_prefer_anthropic_for_anthropic_upstream():
-    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon = _make_addon_for_route_tests()
 
     candidates = addon._build_health_check_requests(
         "https://api.deepseek.com/anthropic/",
@@ -249,7 +494,7 @@ def test_health_check_requests_prefer_anthropic_for_anthropic_upstream():
 
 
 def test_health_check_requests_prefer_openai_for_v1_upstream():
-    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon = _make_addon_for_route_tests()
 
     candidates = addon._build_health_check_requests(
         "https://api.example.com/v1",
@@ -258,3 +503,21 @@ def test_health_check_requests_prefer_openai_for_v1_upstream():
 
     assert candidates[0][0] == "https://api.example.com/v1/chat/completions"
     assert candidates[1][0] == "https://api.example.com/v1/messages"
+
+
+def test_health_check_requests_skip_kimi_when_header_build_fails():
+    addon = _make_addon_for_route_tests()
+    addon._build_kimi_cli_headers = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no token"))
+
+    candidates = addon._build_health_check_requests(
+        "https://api.kimi.com",
+        {
+            "model_key": "kimi-k2",
+            "auth_mode": "kimi_cli_oauth",
+            "oauth_key": "oauth/kimi-code",
+            "oauth_host": "https://auth.kimi.com",
+            "api_key": "",
+        },
+    )
+
+    assert candidates == []

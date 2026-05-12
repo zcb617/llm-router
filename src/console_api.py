@@ -405,6 +405,13 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         is_active = body.get("is_active", True)
         use_claude_features = body.get("use_claude_features", False)
         use_roo_features = body.get("use_roo_features", False)
+        auth_mode = (body.get("auth_mode") or "api_key").strip()
+        oauth_key = (body.get("oauth_key") or "oauth/kimi-code").strip()
+        oauth_host = (body.get("oauth_host") or "https://auth.kimi.com").strip()
+
+        if auth_mode not in ("api_key", "kimi_cli_oauth"):
+            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key 或 kimi_cli_oauth"})
+            return True
 
         if not name or not target_base_url:
             _json_response(flow, 400, {"error": "名称和基础 URL 不能为空"})
@@ -413,7 +420,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         upstream_id = storage.create_upstream(
             name=name, target_base_url=target_base_url,
             api_key=api_key, description=description, is_active=is_active,
-            use_claude_features=use_claude_features, use_roo_features=use_roo_features
+            use_claude_features=use_claude_features, use_roo_features=use_roo_features,
+            auth_mode=auth_mode, oauth_key=oauth_key, oauth_host=oauth_host,
         )
 
         if addon:
@@ -439,6 +447,18 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         if not body:
             _json_response(flow, 400, {"error": "请求体格式错误"})
             return True
+        auth_mode = body.get("auth_mode")
+        if isinstance(auth_mode, str):
+            auth_mode = auth_mode.strip()
+        if auth_mode is not None and auth_mode not in ("api_key", "kimi_cli_oauth"):
+            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key 或 kimi_cli_oauth"})
+            return True
+        oauth_key = body.get("oauth_key")
+        if oauth_key is not None:
+            oauth_key = oauth_key.strip() or "oauth/kimi-code"
+        oauth_host = body.get("oauth_host")
+        if oauth_host is not None:
+            oauth_host = oauth_host.strip() or "https://auth.kimi.com"
 
         updated = storage.update_upstream(
             upstream_id=upstream_id,
@@ -448,7 +468,10 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             description=body.get("description"),
             is_active=body.get("is_active"),
             use_claude_features=body.get("use_claude_features"),
-            use_roo_features=body.get("use_roo_features")
+            use_roo_features=body.get("use_roo_features"),
+            auth_mode=auth_mode,
+            oauth_key=oauth_key,
+            oauth_host=oauth_host,
         )
 
         if updated:

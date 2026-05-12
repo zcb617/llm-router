@@ -17,6 +17,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from src.openai_protocol_converter import parse_sse_buffer
+from src.kimi_cli_auth import KimiCliAuthManager
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,7 @@ class LLMRouterAddon:
         # 上游连接复用客户端（多上游同步转发 + 健康检查）
         self._http_client = None
         self._http_client_lock = threading.Lock()
+        self._kimi_cli_auth = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
 
         # 多上游流式预探活超时
         self._stream_route_preconnect_timeout_s = max(
@@ -188,6 +190,37 @@ class LLMRouterAddon:
             )
             return self._http_client
 
+    def _is_kimi_cli_auth(self, cfg: dict) -> bool:
+        return self._kimi_cli_auth.is_kimi_cli_auth(cfg or {})
+
+    def _build_kimi_cli_headers(self, full_url: str, cfg: dict) -> list[tuple[str, str]]:
+        auth_mode = (cfg.get("auth_mode") or "api_key")
+        access_token = self._kimi_cli_auth.resolve_access_token(
+            auth_mode=auth_mode,
+            api_key=cfg.get("api_key", "") or "",
+            oauth_key=cfg.get("oauth_key") or "oauth/kimi-code",
+            oauth_host=cfg.get("oauth_host") or "https://auth.kimi.com",
+        )
+        if not access_token:
+            raise RuntimeError("No access token available for kimi_cli_oauth upstream")
+
+        parsed = urlparse(full_url)
+        host = parsed.netloc
+        if not host:
+            raise RuntimeError(f"Invalid upstream url: {full_url}")
+        return self._kimi_cli_auth.build_full_headers(host=host, access_token=access_token)
+
+    @staticmethod
+    def _send_ordered_request(client, method: str, full_url: str, req_data: bytes, req_headers: list[tuple[str, str]]):
+        req = client.build_request(method, full_url, headers=req_headers, content=req_data)
+        return client.send(req)
+
+    @staticmethod
+    def _apply_ordered_headers_to_flow(flow, headers: list[tuple[str, str]]) -> None:
+        flow.request.headers.clear()
+        for key, value in headers:
+            flow.request.headers[key] = value
+
     def _start_save_workers(self):
         if self._save_workers_started:
             return
@@ -234,6 +267,9 @@ class LLMRouterAddon:
                     "upstream_id": r["upstream_id"],
                     "target_base_url": r["target_base_url"],
                     "api_key": r.get("api_key", ""),
+                    "auth_mode": r.get("auth_mode") or "api_key",
+                    "oauth_key": r.get("oauth_key") or "oauth/kimi-code",
+                    "oauth_host": r.get("oauth_host") or "https://auth.kimi.com",
                     "forward_model": r.get("forward_model", ""),
                     "use_claude_features": r.get("use_claude_features", False),
                     "use_roo_features": r.get("use_roo_features", False),
@@ -264,6 +300,9 @@ class LLMRouterAddon:
                         self._model_cache[mk] = {
                             "target_base_url": target_base_url,
                             "api_key": api_key,
+                            "auth_mode": cfg.get("auth_mode") or "api_key",
+                            "oauth_key": cfg.get("oauth_key") or "oauth/kimi-code",
+                            "oauth_host": cfg.get("oauth_host") or "https://auth.kimi.com",
                             "forward_model": forward_model,
                             "use_claude_features": bool(cfg.get("use_claude_features", False)),
                             "use_roo_features": bool(cfg.get("use_roo_features", False)),
@@ -480,6 +519,21 @@ class LLMRouterAddon:
         target_base_url = mapping["target_base_url"]
         logger.info(f"Model mapping: {model_name} -> {target_base_url}")
 
+        # kimi-cli auth 专用通道：流式请求走原生转发，非流式请求走专用同步通道。
+        if self._is_kimi_cli_auth(mapping):
+            if self._is_stream_request(captured_req.body):
+                self._apply_single_upstream_kimi_cli_route(flow, mapping, captured_req, model_name, path)
+                return
+            await asyncio.to_thread(
+                self._forward_single_upstream_kimi_cli,
+                flow,
+                mapping,
+                captured_req,
+                model_name,
+                path,
+            )
+            return
+
         # 替换 API key
         if mapping["api_key"]:
             logger.info("Replacing API key")
@@ -628,17 +682,29 @@ class LLMRouterAddon:
             flow.metadata["local_response"] = True
             return
 
+        last_error = "pre-connect failed"
         for route in candidate_routes:
             if self._is_route_reachable(route.get("target_base_url", "")):
-                self._apply_multi_upstream_route(flow, route, captured_req, model_name, path)
-                flow.metadata["multi_upstream_native"] = True
-                logger.info(
-                    f"Multi-upstream streaming selected upstream {route['upstream_id']}: "
-                    f"{route['target_base_url']} for model {model_name}"
-                )
-                return
+                try:
+                    self._apply_multi_upstream_route(flow, route, captured_req, model_name, path)
+                    flow.metadata["multi_upstream_native"] = True
+                    logger.info(
+                        f"Multi-upstream streaming selected upstream {route['upstream_id']}: "
+                        f"{route['target_base_url']} for model {model_name}"
+                    )
+                    return
+                except Exception as e:
+                    upstream_id = route.get("upstream_id")
+                    last_error = f"{upstream_id}: {e}"
+                    logger.warning(
+                        f"Streaming upstream apply failed: {upstream_id} {route.get('target_base_url', '')}: {e}, trying next"
+                    )
+                    if upstream_id is not None:
+                        self.storage.increment_upstream_failures(upstream_id)
+                    continue
 
             upstream_id = route.get("upstream_id")
+            last_error = f"{upstream_id}: pre-connect failed"
             logger.warning(
                 f"Streaming upstream pre-connect failed: {upstream_id} {route.get('target_base_url', '')}, trying next"
             )
@@ -647,10 +713,88 @@ class LLMRouterAddon:
 
         flow.response = http.Response.make(
             502,
-            json.dumps({"error": "All upstreams unavailable: pre-connect failed"}, ensure_ascii=False).encode("utf-8"),
+            json.dumps({"error": f"All upstreams unavailable: {last_error}"}, ensure_ascii=False).encode("utf-8"),
             {"Content-Type": "application/json"}
         )
         flow.metadata["local_response"] = True
+
+    def _apply_single_upstream_kimi_cli_route(self, flow, mapping, captured_req, model_name, path):
+        """单上游 kimi-cli auth 流式通道：走 mitmproxy 原生转发，但使用专用头模板。"""
+        try:
+            target_url = mapping["target_base_url"]
+            forward_model = mapping.get("forward_model", "")
+            req_body = captured_req.body
+            if forward_model:
+                req_body = self._replace_model_in_body(req_body, forward_model)
+
+            new_url = self.capturer.rewrite_url(flow, target_url, path)
+            req_headers = self._build_kimi_cli_headers(new_url, mapping)
+            self._apply_ordered_headers_to_flow(flow, req_headers)
+
+            if req_body is not None:
+                flow.request.content = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
+
+            captured_req.body = req_body
+            captured_req.original_model = model_name
+            captured_req.overridden_model = forward_model or model_name
+            captured_req.url = new_url
+            captured_req.call_id = str(uuid.uuid4())
+            flow.metadata["call_id"] = captured_req.call_id
+            self._store_pending_request(flow, captured_req)
+        except Exception as e:
+            logger.error(f"Kimi streaming upstream setup failed: {e}")
+            flow.response = http.Response.make(
+                502,
+                json.dumps({"error": f"Kimi streaming upstream failed: {e}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"}
+            )
+            flow.metadata["local_response"] = True
+
+    def _forward_single_upstream_kimi_cli(self, flow, mapping, captured_req, model_name, path):
+        """kimi-cli auth 单上游非流式专用通道：严格复刻 kimi-cli 头部模板。"""
+        target_url = mapping["target_base_url"]
+        forward_model = mapping.get("forward_model", "")
+        client = self._get_http_client()
+
+        try:
+            req_body = captured_req.body
+            if forward_model:
+                req_body = self._replace_model_in_body(req_body, forward_model)
+
+            full_url = self.capturer.rewrite_url(flow, target_url, path)
+            req_data = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
+            req_headers = self._build_kimi_cli_headers(full_url, mapping)
+            self._apply_ordered_headers_to_flow(flow, req_headers)
+            if req_body is not None:
+                flow.request.content = req_data
+
+            resp = self._send_ordered_request(client, captured_req.method, full_url, req_data, req_headers)
+
+            upstream_headers_time = time.time()
+            resp_body = resp.content
+            first_body_time = upstream_headers_time if resp_body else None
+            flow.response = http.Response.make(
+                resp.status_code,
+                resp_body,
+                dict(resp.headers),
+            )
+
+            captured_req.body = req_body
+            captured_req.original_model = model_name
+            captured_req.overridden_model = forward_model or model_name
+            captured_req.url = full_url
+            captured_req.call_id = str(uuid.uuid4())
+            flow.metadata["call_id"] = captured_req.call_id
+            flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
+            self._store_pending_request(flow, captured_req)
+        except Exception as e:
+            logger.error(f"Kimi dedicated upstream request failed: {e}")
+            flow.response = http.Response.make(
+                502,
+                json.dumps({"error": f"Kimi dedicated upstream failed: {e}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"}
+            )
+            flow.metadata["local_response"] = True
 
     def _forward_multi_upstream(self, flow, routes, captured_req, model_name, path):
         """多上游转发：按 sort_order 依次尝试，跳过 unhealthy 上游"""
@@ -685,27 +829,38 @@ class LLMRouterAddon:
                 if forward_model:
                     req_body = self._replace_model_in_body(req_body, forward_model)
 
-                # 准备 headers。Host/Connection/Content-Length 等由 urllib 按真实上游 URL 生成。
-                req_headers = self._build_upstream_headers(flow.request.headers, api_key)
-
-                # 注入特征 headers；已由对应客户端发出的请求保持原样。
-                if route.get("use_claude_features"):
-                    self._apply_claude_feature_headers(req_headers, flow)
-                elif route.get("use_roo_features"):
-                    self._apply_roo_feature_headers(req_headers, flow)
-
                 # 构建完整 URL
                 full_url = target_url.rstrip("/") + path
                 logger.debug(f"Multi-upstream forwarding to: {full_url}")
 
                 # 同步 HTTP 请求（连接复用）
                 req_data = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
-                resp = client.request(
-                    captured_req.method,
-                    full_url,
-                    content=req_data,
-                    headers=req_headers,
-                )
+                if self._is_kimi_cli_auth(route):
+                    req_headers = self._build_kimi_cli_headers(full_url, route)
+                    self._apply_ordered_headers_to_flow(flow, req_headers)
+                    resp = self._send_ordered_request(
+                        client,
+                        captured_req.method,
+                        full_url,
+                        req_data,
+                        req_headers,
+                    )
+                else:
+                    # 准备 headers。Host/Connection/Content-Length 等由 urllib 按真实上游 URL 生成。
+                    req_headers = self._build_upstream_headers(flow.request.headers, api_key)
+
+                    # 注入特征 headers；已由对应客户端发出的请求保持原样。
+                    if route.get("use_claude_features"):
+                        self._apply_claude_feature_headers(req_headers, flow)
+                    elif route.get("use_roo_features"):
+                        self._apply_roo_feature_headers(req_headers, flow)
+
+                    resp = client.request(
+                        captured_req.method,
+                        full_url,
+                        content=req_data,
+                        headers=req_headers,
+                    )
 
                 upstream_headers_time = time.time()
                 resp_body = resp.content
@@ -726,6 +881,7 @@ class LLMRouterAddon:
                     if health == "unhealthy":
                         self.reload_model_configs()
                     # 记录调用信息
+                    captured_req.body = req_body
                     captured_req.original_model = model_name
                     captured_req.overridden_model = forward_model or model_name
                     captured_req.url = full_url
@@ -808,20 +964,27 @@ class LLMRouterAddon:
         if forward_model:
             req_body = self._replace_model_in_body(req_body, forward_model)
 
-        req_headers = self._build_upstream_headers(flow.request.headers, api_key)
-        if route.get("use_claude_features"):
-            self._apply_claude_feature_headers(req_headers, flow)
-        elif route.get("use_roo_features"):
-            self._apply_roo_feature_headers(req_headers, flow)
-
-        flow.request.headers.clear()
-        for h, v in req_headers.items():
-            flow.request.headers[h] = v
-        if req_body is not None:
-            flow.request.content = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
-
         new_url = self.capturer.rewrite_url(flow, target_url, path)
         logger.info(f"Multi-upstream rewritten URL: {new_url}")
+
+        if self._is_kimi_cli_auth(route):
+            req_headers = self._build_kimi_cli_headers(new_url, route)
+            self._apply_ordered_headers_to_flow(flow, req_headers)
+        else:
+            req_headers = self._build_upstream_headers(flow.request.headers, api_key)
+            if route.get("use_claude_features"):
+                self._apply_claude_feature_headers(req_headers, flow)
+            elif route.get("use_roo_features"):
+                self._apply_roo_feature_headers(req_headers, flow)
+
+            flow.request.headers.clear()
+            for h, v in req_headers.items():
+                flow.request.headers[h] = v
+            parsed = urlparse(new_url)
+            if parsed.netloc:
+                flow.request.headers["Host"] = parsed.netloc
+        if req_body is not None:
+            flow.request.content = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
 
         captured_req.body = req_body
         captured_req.original_model = model_name
@@ -900,26 +1063,39 @@ class LLMRouterAddon:
 
     def _build_health_check_requests(self, target_base_url: str, model_info: dict) -> list[tuple[str, str, dict]]:
         """基于模型配置和匹配上游构造健康检查候选请求。"""
-        api_key = model_info.get("api_key", "")
         model = model_info.get("forward_model") or model_info.get("model_key") or "gpt-3.5-turbo"
-        headers = self._build_upstream_headers({}, api_key)
-        headers["Content-Type"] = "application/json"
 
         openai_body = json.dumps({
             "model": model,
             "messages": [{"role": "user", "content": "hello"}],
             "max_tokens": 5
         })
-        anthropic_headers = dict(headers)
-        anthropic_headers.setdefault("anthropic-version", "2023-06-01")
         anthropic_body = json.dumps({
             "model": model,
             "messages": [{"role": "user", "content": "hello"}],
             "max_tokens": 5
         })
+        openai_url = self._join_api_path(target_base_url, "/v1/chat/completions")
+        anthropic_url = self._join_api_path(target_base_url, "/v1/messages")
+
+        if self._is_kimi_cli_auth(model_info):
+            try:
+                openai_headers = dict(self._build_kimi_cli_headers(openai_url, model_info))
+                anthropic_headers = dict(self._build_kimi_cli_headers(anthropic_url, model_info))
+            except Exception as e:
+                logger.warning(f"Health check skipped for kimi_cli_oauth upstream {target_base_url}: {e}")
+                return []
+            anthropic_headers.setdefault("anthropic-version", "2023-06-01")
+        else:
+            api_key = model_info.get("api_key", "")
+            openai_headers = self._build_upstream_headers({}, api_key)
+            openai_headers["Content-Type"] = "application/json"
+            anthropic_headers = dict(openai_headers)
+            anthropic_headers.setdefault("anthropic-version", "2023-06-01")
+
         candidates = [
-            (self._join_api_path(target_base_url, "/v1/chat/completions"), openai_body, headers),
-            (self._join_api_path(target_base_url, "/v1/messages"), anthropic_body, anthropic_headers),
+            (openai_url, openai_body, openai_headers),
+            (anthropic_url, anthropic_body, anthropic_headers),
         ]
         if self._prefers_anthropic_health_check(target_base_url, model_info):
             candidates.reverse()
