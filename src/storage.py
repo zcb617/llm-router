@@ -584,6 +584,53 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur)
 
+    def update_api_key(
+        self,
+        user_id: int,
+        key_id: int,
+        name: str = None,
+        expires_at: date = None,
+        is_active: bool = None,
+    ) -> bool:
+        """更新 API Key 基础属性（名称/过期时间/启用状态）。"""
+        fields = []
+        params = []
+
+        if name is not None:
+            fields.append("name = %s" if self.postgresql else "name = ?")
+            params.append(name)
+        if expires_at is not None:
+            fields.append("expires_at = %s" if self.postgresql else "expires_at = ?")
+            params.append(expires_at if self.postgresql else expires_at.isoformat())
+        if is_active is not None:
+            fields.append("is_active = %s" if self.postgresql else "is_active = ?")
+            params.append(is_active if self.postgresql else int(is_active))
+
+        if not fields:
+            return False
+
+        sql = (
+            f"UPDATE api_keys SET {', '.join(fields)} WHERE id = %s AND user_id = %s"
+            if self.postgresql
+            else f"UPDATE api_keys SET {', '.join(fields)} WHERE id = ? AND user_id = ?"
+        )
+        params.extend([key_id, user_id])
+
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, tuple(params))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, tuple(params))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
     def verify_api_key(self, key: str) -> Optional[dict]:
         """验证 API Key，返回 {id, user_id} 或 None"""
         from datetime import date

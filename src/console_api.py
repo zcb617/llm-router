@@ -355,6 +355,73 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         })
         return True
 
+    # PUT /api/keys/{id} - 更新密钥信息（名称/过期时间/启用状态）
+    if path.startswith("/api/keys/") and not path.endswith("/reveal") and flow.request.method == "PUT":
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+
+        try:
+            key_id = int(path.split("/")[-1])
+        except (ValueError, IndexError):
+            _json_response(flow, 400, {"error": "无效的密钥ID"})
+            return True
+
+        body = _extract_body(flow)
+        if not body:
+            _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+
+        name = body.get("name")
+        expires_at_raw = body.get("expires_at")
+        is_active_raw = body.get("is_active")
+
+        update_name = None
+        update_expires_at = None
+        update_is_active = None
+
+        if name is not None:
+            if not isinstance(name, str) or not name.strip():
+                _json_response(flow, 400, {"error": "密钥名称不能为空"})
+                return True
+            update_name = name.strip()
+
+        if expires_at_raw is not None:
+            if not isinstance(expires_at_raw, str) or not expires_at_raw.strip():
+                _json_response(flow, 400, {"error": "过期时间格式错误，应为 YYYY-MM-DD"})
+                return True
+            try:
+                update_expires_at = date.fromisoformat(expires_at_raw.strip())
+            except ValueError:
+                _json_response(flow, 400, {"error": "过期时间格式错误，应为 YYYY-MM-DD"})
+                return True
+
+        if is_active_raw is not None:
+            if isinstance(is_active_raw, (bool, int, str)):
+                update_is_active = _is_enabled(is_active_raw)
+            else:
+                _json_response(flow, 400, {"error": "启用状态格式错误"})
+                return True
+
+        if update_name is None and update_expires_at is None and update_is_active is None:
+            _json_response(flow, 400, {"error": "至少需要更新一个字段"})
+            return True
+
+        updated = storage.update_api_key(
+            payload["user_id"],
+            key_id,
+            name=update_name,
+            expires_at=update_expires_at,
+            is_active=update_is_active,
+        )
+        if updated:
+            if addon:
+                addon.clear_api_key_cache()
+            _json_response(flow, 200, {"message": "密钥更新成功"})
+        else:
+            _json_response(flow, 404, {"error": "密钥不存在或无权更新"})
+        return True
+
     # DELETE /api/keys/{id} - 删除密钥
     if path.startswith("/api/keys/") and flow.request.method == "DELETE":
         payload = _require_auth(flow)

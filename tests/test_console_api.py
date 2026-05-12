@@ -368,3 +368,60 @@ def test_check_kimi_token_endpoint_failure(monkeypatch):
     assert handled is True
     assert flow.response["status"] == 400
     assert payload["reason"] == "token_file_not_found_or_invalid"
+
+
+class DummyKeyStorage:
+    def __init__(self, update_result=True):
+        self.update_result = update_result
+        self.updated = None
+
+    def update_api_key(self, user_id, key_id, name=None, expires_at=None, is_active=None):
+        self.updated = {
+            "user_id": user_id,
+            "key_id": key_id,
+            "name": name,
+            "expires_at": expires_at,
+            "is_active": is_active,
+        }
+        return self.update_result
+
+
+def test_update_api_key_success(monkeypatch):
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 12, "email": "u@test"})
+    flow = DummyFlow("PUT", {"name": "prod-key", "expires_at": "2030-01-02", "is_active": False})
+    storage = DummyKeyStorage(update_result=True)
+
+    class DummyAddon:
+        def __init__(self):
+            self.cleared = False
+
+        def clear_api_key_cache(self):
+            self.cleared = True
+
+    addon = DummyAddon()
+    handled = handle_console_api(flow, storage, "/api/keys/8", addon=addon)
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert payload["message"] == "密钥更新成功"
+    assert storage.updated["user_id"] == 12
+    assert storage.updated["key_id"] == 8
+    assert storage.updated["name"] == "prod-key"
+    assert storage.updated["expires_at"].isoformat() == "2030-01-02"
+    assert storage.updated["is_active"] is False
+    assert addon.cleared is True
+
+
+def test_update_api_key_invalid_date(monkeypatch):
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 12, "email": "u@test"})
+    flow = DummyFlow("PUT", {"name": "prod-key", "expires_at": "2030/01/02", "is_active": True})
+    storage = DummyKeyStorage(update_result=True)
+
+    handled = handle_console_api(flow, storage, "/api/keys/8")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert payload["error"] == "过期时间格式错误，应为 YYYY-MM-DD"
+    assert storage.updated is None

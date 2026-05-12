@@ -442,6 +442,34 @@
     </div>
   </div>
 
+  <!-- ==================== 编辑密钥弹窗 ==================== -->
+  <div id="editKeyModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-96 shadow-2xl">
+      <h2 class="text-lg font-semibold mb-4">编辑密钥</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">密钥名称</label>
+          <input id="editKeyName" type="text" required
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">过期时间</label>
+          <input id="editKeyExpiresAt" type="date" required
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="editKeyIsActive" type="checkbox" class="h-4 w-4 rounded border-zinc-300 dark:border-zinc-700 text-blue-600 focus:ring-blue-500">
+          <label for="editKeyIsActive" class="text-sm">启用</label>
+        </div>
+        <div id="editKeyError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelEditKey" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitEditKey" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ==================== 密钥详情（创建后显示完整Key） ==================== -->
   <div id="newKeyResultModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
     <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[500px] shadow-2xl">
@@ -1124,6 +1152,9 @@ document.getElementById('colResetBtn').addEventListener('click', () => { logsSta
 document.getElementById('colSaveBtn').addEventListener('click', () => { document.querySelectorAll('.col-cb').forEach(cb => { const i = parseInt(cb.dataset.idx); logsState.columns[i].visible = cb.checked; }); saveColumns(); document.getElementById('colModal').classList.add('hidden'); renderHeader(); loadLogsData(); });
 
 // ============ 密钥管理 ============
+let allApiKeys = [];
+let editingKeyId = null;
+
 async function copyToClipboard(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     return navigator.clipboard.writeText(text);
@@ -1148,6 +1179,7 @@ async function loadKeys() {
     const res = await fetch('/api/keys', { headers: getAuthHeaders() });
     const data = await res.json();
     const keys = data.keys || [];
+    allApiKeys = keys;
     tbody.innerHTML = '';
     if (keys.length === 0) { empty.classList.remove('hidden'); return; }
     empty.classList.add('hidden');
@@ -1155,9 +1187,10 @@ async function loadKeys() {
     keys.forEach(k => {
       const tr = document.createElement('tr');
       tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
-      const isExpired = k.expires_at < today;
-      const statusClass = isExpired ? 'text-red-500' : 'text-green-500';
-      const statusText = isExpired ? '已过期' : '有效';
+      const isActive = !(k.is_active === false || k.is_active === 0 || k.is_active === '0' || k.is_active === 'false');
+      const isExpired = k.expires_at ? k.expires_at < today : false;
+      const statusClass = !isActive ? 'text-zinc-500' : (isExpired ? 'text-red-500' : 'text-green-500');
+      const statusText = !isActive ? '禁用' : (isExpired ? '已过期' : '有效');
       // 显示掩码
       const keyDisplay = k.key_masked || '****';
       tr.innerHTML = `
@@ -1167,11 +1200,26 @@ async function loadKeys() {
         <td class="px-4 py-2 whitespace-nowrap ${statusClass}">${statusText}</td>
         <td class="px-4 py-2 whitespace-nowrap">${k.created_at || '-'}</td>
         <td class="px-4 py-2 whitespace-nowrap">
+          <button class="edit-key-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${k.id}">编辑</button>
           <button class="copy-key-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${k.id}">复制</button>
           <button class="delete-key-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${k.id}">删除</button>
         </td>
       `;
       tbody.appendChild(tr);
+    });
+    // 编辑密钥
+    tbody.querySelectorAll('.edit-key-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const keyId = parseInt(btn.dataset.id);
+        const keyInfo = allApiKeys.find(k => k.id == keyId);
+        if (!keyInfo) return;
+        editingKeyId = keyId;
+        document.getElementById('editKeyName').value = keyInfo.name || '';
+        document.getElementById('editKeyExpiresAt').value = keyInfo.expires_at || '';
+        document.getElementById('editKeyIsActive').checked = !(keyInfo.is_active === false || keyInfo.is_active === 0 || keyInfo.is_active === '0' || keyInfo.is_active === 'false');
+        document.getElementById('editKeyError').classList.add('hidden');
+        document.getElementById('editKeyModal').classList.remove('hidden');
+      });
     });
     // 复制密钥
     tbody.querySelectorAll('.copy-key-btn').forEach(btn => {
@@ -1256,6 +1304,53 @@ document.getElementById('copyNewKey').addEventListener('click', async () => {
 });
 document.getElementById('closeNewKeyResult').addEventListener('click', () => document.getElementById('newKeyResultModal').classList.add('hidden'));
 document.getElementById('newKeyResultModal').addEventListener('click', (e) => { if (e.target === document.getElementById('newKeyResultModal')) document.getElementById('newKeyResultModal').classList.add('hidden'); });
+
+// 编辑密钥
+document.getElementById('cancelEditKey').addEventListener('click', () => {
+  document.getElementById('editKeyModal').classList.add('hidden');
+  editingKeyId = null;
+});
+document.getElementById('editKeyModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('editKeyModal')) {
+    document.getElementById('editKeyModal').classList.add('hidden');
+    editingKeyId = null;
+  }
+});
+document.getElementById('submitEditKey').addEventListener('click', async () => {
+  if (!editingKeyId) return;
+  const name = document.getElementById('editKeyName').value.trim();
+  const expiresAt = document.getElementById('editKeyExpiresAt').value;
+  const isActive = document.getElementById('editKeyIsActive').checked;
+  if (!name) {
+    document.getElementById('editKeyError').textContent = '名称不能为空';
+    document.getElementById('editKeyError').classList.remove('hidden');
+    return;
+  }
+  if (!expiresAt) {
+    document.getElementById('editKeyError').textContent = '过期时间不能为空';
+    document.getElementById('editKeyError').classList.remove('hidden');
+    return;
+  }
+  try {
+    const res = await fetch('/api/keys/' + editingKeyId, {
+      method: 'PUT',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, expires_at: expiresAt, is_active: isActive })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('editKeyModal').classList.add('hidden');
+      editingKeyId = null;
+      loadKeys();
+    } else {
+      document.getElementById('editKeyError').textContent = data.error || '保存失败';
+      document.getElementById('editKeyError').classList.remove('hidden');
+    }
+  } catch (e) {
+    document.getElementById('editKeyError').textContent = '网络错误: ' + e.message;
+    document.getElementById('editKeyError').classList.remove('hidden');
+  }
+});
 
 // ============ 上游管理 ============
 let allUpstreams = [];
@@ -1701,12 +1796,14 @@ function renderModels() {
     const defaultText = cfg.is_default ? '<span class="text-blue-500 font-medium">是</span>' : '<span class="text-zinc-500">否</span>';
     const upstreamName = cfg.upstream_name || '<span class="text-zinc-400">-</span>';
     const modeText = cfg.use_multi_upstream ? '<span class="text-purple-500 font-medium">多上游</span>' : '<span class="text-zinc-500">单上游</span>';
+    const authMode = cfg.auth_mode || 'api_key';
+    const displayTargetBaseUrl = (cfg.use_multi_upstream || authMode === 'kimi_cli_oauth') ? '-' : (cfg.target_base_url || '-');
     const responsesApiText = cfg.protocol_converter ? `<span class="font-mono text-xs text-blue-600 dark:text-blue-400">${cfg.protocol_converter}</span>` : '<span class="text-zinc-500">无</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${cfg.model_key}</td>
       <td class="px-4 py-2 whitespace-nowrap text-xs">${modeText}</td>
       <td class="px-4 py-2 whitespace-nowrap">${upstreamName}</td>
-      <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${cfg.target_base_url || ''}">${cfg.target_base_url || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap truncate-cell-long" title="${displayTargetBaseUrl === '-' ? '' : displayTargetBaseUrl}">${displayTargetBaseUrl}</td>
       <td class="px-4 py-2 whitespace-nowrap font-mono text-xs text-zinc-500">${keyDisplay}</td>
       <td class="px-4 py-2 whitespace-nowrap">${responsesApiText}</td>
       <td class="px-4 py-2 whitespace-nowrap">${defaultText}</td>
