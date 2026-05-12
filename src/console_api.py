@@ -270,6 +270,43 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         })
         return True
 
+    # PUT /api/auth/password - 修改当前用户密码
+    if path == "/api/auth/password" and flow.request.method == "PUT":
+        from src.auth import check_password, hash_password
+
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+
+        body = _extract_body(flow)
+        if not body:
+            _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+
+        current_password = body.get("current_password", "")
+        new_password = body.get("new_password", "")
+
+        if not current_password or not new_password:
+            _json_response(flow, 400, {"error": "当前密码和新密码不能为空"})
+            return True
+
+        user = storage.find_user_by_email(payload.get("email", ""))
+        if not user:
+            _json_response(flow, 404, {"error": "用户不存在"})
+            return True
+
+        if not check_password(current_password, user.get("password_hash", "")):
+            _json_response(flow, 401, {"error": "当前密码错误"})
+            return True
+
+        updated = storage.update_user_password(user["id"], hash_password(new_password))
+        if not updated:
+            _json_response(flow, 500, {"error": "密码更新失败"})
+            return True
+
+        _json_response(flow, 200, {"message": "密码修改成功，请重新登录"})
+        return True
+
     # GET /api/keys - 获取当前用户的密钥列表
     if path == "/api/keys" and flow.request.method == "GET":
         payload = _require_auth(flow)

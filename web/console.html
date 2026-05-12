@@ -91,7 +91,7 @@
       </nav>
     </div>
     <div class="flex items-center gap-3">
-      <span id="userEmail" class="text-sm text-zinc-500"></span>
+      <span id="userEmail" class="text-sm text-zinc-500 cursor-pointer hover:text-zinc-700 dark:hover:text-zinc-200 hover:underline underline-offset-2" title="点击修改密码"></span>
       <button id="logoutBtn" class="px-3 py-1 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">
         退出登录
       </button>
@@ -716,21 +716,113 @@
     </div>
   </div>
 
+  <!-- ==================== 修改密码弹窗 ==================== -->
+  <div id="changePasswordModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-96 shadow-2xl">
+      <h2 class="text-lg font-semibold mb-4">修改密码</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">当前密码 <span class="text-red-500">*</span></label>
+          <input id="currentPasswordInput" type="password" required
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">新密码 <span class="text-red-500">*</span></label>
+          <input id="newPasswordInput" type="password" required
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">确认新密码 <span class="text-red-500">*</span></label>
+          <input id="confirmNewPasswordInput" type="password" required
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div id="changePasswordError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelChangePassword" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitChangePassword" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 // ============ 认证检查 ============
 const token = localStorage.getItem('llm_token');
 const userEmail = localStorage.getItem('llm_email');
+const userEmailEl = document.getElementById('userEmail');
 if (!token) {
   window.location.href = '/web/login.html';
 }
-document.getElementById('userEmail').textContent = userEmail || '';
+userEmailEl.textContent = userEmail || '';
 
-// 退出登录
-document.getElementById('logoutBtn').addEventListener('click', () => {
+function clearAuthStateAndRedirect() {
   localStorage.removeItem('llm_token');
   localStorage.removeItem('llm_email');
   localStorage.removeItem('llm_user_id');
   window.location.href = '/web/login.html';
+}
+
+// 退出登录
+document.getElementById('logoutBtn').addEventListener('click', () => {
+  clearAuthStateAndRedirect();
+});
+
+function openChangePasswordModal() {
+  document.getElementById('currentPasswordInput').value = '';
+  document.getElementById('newPasswordInput').value = '';
+  document.getElementById('confirmNewPasswordInput').value = '';
+  document.getElementById('changePasswordError').classList.add('hidden');
+  document.getElementById('changePasswordModal').classList.remove('hidden');
+}
+
+function closeChangePasswordModal() {
+  document.getElementById('changePasswordModal').classList.add('hidden');
+}
+
+userEmailEl.addEventListener('click', openChangePasswordModal);
+document.getElementById('cancelChangePassword').addEventListener('click', closeChangePasswordModal);
+document.getElementById('changePasswordModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('changePasswordModal')) {
+    closeChangePasswordModal();
+  }
+});
+
+document.getElementById('submitChangePassword').addEventListener('click', async () => {
+  const currentPassword = document.getElementById('currentPasswordInput').value;
+  const newPassword = document.getElementById('newPasswordInput').value;
+  const confirmNewPassword = document.getElementById('confirmNewPasswordInput').value;
+  const errorEl = document.getElementById('changePasswordError');
+
+  if (!currentPassword || !newPassword || !confirmNewPassword) {
+    errorEl.textContent = '请填写完整信息';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+
+  if (newPassword !== confirmNewPassword) {
+    errorEl.textContent = '两次输入的新密码不一致';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/password', {
+      method: 'PUT',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      alert(data.message || '密码修改成功，请重新登录');
+      clearAuthStateAndRedirect();
+      return;
+    }
+    errorEl.textContent = data.error || '修改失败';
+    errorEl.classList.remove('hidden');
+  } catch (e) {
+    errorEl.textContent = '网络错误: ' + e.message;
+    errorEl.classList.remove('hidden');
+  }
 });
 
 // ============ 动态菜单渲染 ============

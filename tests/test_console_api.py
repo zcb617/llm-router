@@ -425,3 +425,121 @@ def test_update_api_key_invalid_date(monkeypatch):
     assert flow.response["status"] == 400
     assert payload["error"] == "过期时间格式错误，应为 YYYY-MM-DD"
     assert storage.updated is None
+
+
+_DEFAULT_PASSWORD_USER = object()
+
+
+class DummyPasswordStorage:
+    def __init__(self, user=_DEFAULT_PASSWORD_USER, update_result=True):
+        if user is _DEFAULT_PASSWORD_USER:
+            self.user = {"id": 7, "email": "u@test", "password_hash": "hashed-old"}
+        else:
+            self.user = user
+        self.update_result = update_result
+        self.updated = None
+
+    def find_user_by_email(self, email):
+        if not self.user:
+            return None
+        if self.user.get("email") != email:
+            return None
+        return self.user
+
+    def update_user_password(self, user_id, password_hash):
+        self.updated = {"user_id": user_id, "password_hash": password_hash}
+        return self.update_result
+
+
+def test_change_password_success(monkeypatch):
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 7, "email": "u@test"})
+    fake_auth = types.SimpleNamespace(
+        check_password=lambda password, hashed: password == "old-pass" and hashed == "hashed-old",
+        hash_password=lambda password: f"hashed::{password}",
+    )
+    monkeypatch.setitem(sys.modules, "src.auth", fake_auth)
+    flow = DummyFlow("PUT", {"current_password": "old-pass", "new_password": "new-pass"})
+    storage = DummyPasswordStorage()
+
+    handled = handle_console_api(flow, storage, "/api/auth/password")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert payload["message"] == "密码修改成功，请重新登录"
+    assert storage.updated == {"user_id": 7, "password_hash": "hashed::new-pass"}
+
+
+def test_change_password_rejects_wrong_current_password(monkeypatch):
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 7, "email": "u@test"})
+    fake_auth = types.SimpleNamespace(
+        check_password=lambda _password, _hashed: False,
+        hash_password=lambda password: f"hashed::{password}",
+    )
+    monkeypatch.setitem(sys.modules, "src.auth", fake_auth)
+    flow = DummyFlow("PUT", {"current_password": "bad-pass", "new_password": "new-pass"})
+    storage = DummyPasswordStorage()
+
+    handled = handle_console_api(flow, storage, "/api/auth/password")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 401
+    assert payload["error"] == "当前密码错误"
+    assert storage.updated is None
+
+
+def test_change_password_requires_non_empty_fields(monkeypatch):
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 7, "email": "u@test"})
+    fake_auth = types.SimpleNamespace(
+        check_password=lambda _password, _hashed: True,
+        hash_password=lambda password: f"hashed::{password}",
+    )
+    monkeypatch.setitem(sys.modules, "src.auth", fake_auth)
+    flow = DummyFlow("PUT", {"current_password": "", "new_password": ""})
+    storage = DummyPasswordStorage()
+
+    handled = handle_console_api(flow, storage, "/api/auth/password")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert payload["error"] == "当前密码和新密码不能为空"
+    assert storage.updated is None
+
+
+def test_change_password_returns_not_found_when_user_missing(monkeypatch):
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 7, "email": "u@test"})
+    fake_auth = types.SimpleNamespace(
+        check_password=lambda _password, _hashed: True,
+        hash_password=lambda password: f"hashed::{password}",
+    )
+    monkeypatch.setitem(sys.modules, "src.auth", fake_auth)
+    flow = DummyFlow("PUT", {"current_password": "old-pass", "new_password": "new-pass"})
+    storage = DummyPasswordStorage(user={})
+
+    handled = handle_console_api(flow, storage, "/api/auth/password")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 404
+    assert payload["error"] == "用户不存在"
+    assert storage.updated is None
+
+
+def test_change_password_returns_server_error_when_update_failed(monkeypatch):
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 7, "email": "u@test"})
+    fake_auth = types.SimpleNamespace(
+        check_password=lambda password, hashed: password == "old-pass" and hashed == "hashed-old",
+        hash_password=lambda password: f"hashed::{password}",
+    )
+    monkeypatch.setitem(sys.modules, "src.auth", fake_auth)
+    flow = DummyFlow("PUT", {"current_password": "old-pass", "new_password": "new-pass"})
+    storage = DummyPasswordStorage(update_result=False)
+
+    handled = handle_console_api(flow, storage, "/api/auth/password")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 500
+    assert payload["error"] == "密码更新失败"

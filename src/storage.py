@@ -512,6 +512,23 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur, commit=True)
 
+    def update_user_password(self, user_id: int, password_hash: str) -> bool:
+        """更新用户密码，返回是否更新成功"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
     def get_user_count(self) -> int:
         """获取用户总数"""
         if self.postgresql:
