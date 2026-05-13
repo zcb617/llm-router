@@ -916,6 +916,8 @@ const COLUMNS = [
   { key: 'tokens_per_second', label: '生成速度(t/s)', default: true, minWidth: '120px' },
 ];
 const STORAGE_KEY = 'llm_router_columns';
+const PAGE_SIZE_STORAGE_KEY = 'llm_router_logs_page_size_console';
+const ALLOWED_PAGE_SIZES = [10, 20, 50, 100];
 const DEFAULT_MIN_COL_WIDTH = 80;
 const DEFAULT_MAX_COL_WIDTH = 700;
 const LOGS_TABLE_MIN_WIDTH = 1400;
@@ -999,6 +1001,19 @@ function loadColumns() {
 }
 
 function saveColumns() { localStorage.setItem(STORAGE_KEY, JSON.stringify(logsState.columns)); }
+function normalizePageSize(value, fallback = 20) {
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (!ALLOWED_PAGE_SIZES.includes(parsed)) return fallback;
+  return parsed;
+}
+function loadPageSize() {
+  const saved = localStorage.getItem(PAGE_SIZE_STORAGE_KEY);
+  logsState.pageSize = normalizePageSize(saved, logsState.pageSize);
+  const pageSizeSelect = document.getElementById('pageSize');
+  if (pageSizeSelect) pageSizeSelect.value = String(logsState.pageSize);
+}
+function savePageSize() { localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(logsState.pageSize)); }
 function getVisibleColumns() {
   if (!logsState || !logsState.columns) return [];
   return logsState.columns.filter(c => c.visible);
@@ -1222,7 +1237,13 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   logsState.searchOriginal = ''; logsState.searchOverridden = '';
   logsState.page = 1; loadLogsData();
 });
-document.getElementById('pageSize').addEventListener('change', (e) => { logsState.pageSize = parseInt(e.target.value); logsState.page = 1; loadLogsData(); });
+document.getElementById('pageSize').addEventListener('change', (e) => {
+  logsState.pageSize = normalizePageSize(e.target.value, logsState.pageSize);
+  e.target.value = String(logsState.pageSize);
+  savePageSize();
+  logsState.page = 1;
+  loadLogsData();
+});
 document.getElementById('prevBtn').addEventListener('click', () => { if (logsState.page > 1) { logsState.page--; loadLogsData(); } });
 document.getElementById('nextBtn').addEventListener('click', () => { const t = Math.ceil(logsState.total / logsState.pageSize); if (logsState.page < t) { logsState.page++; loadLogsData(); } });
 document.getElementById('jumpBtn').addEventListener('click', () => { const p = parseInt(document.getElementById('jumpPage').value); const t = Math.ceil(logsState.total / logsState.pageSize); if (p >= 1 && p <= t) { logsState.page = p; loadLogsData(); } });
@@ -1765,6 +1786,7 @@ function calcTableHeight() {
 window.addEventListener('resize', calcTableHeight);
 calcTableHeight();
 loadColumns();
+loadPageSize();
 loadLogsData();
 
 // 加载菜单（取代直接加载日志）

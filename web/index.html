@@ -247,6 +247,8 @@ const COLUMNS = [
 ];
 
 const STORAGE_KEY = 'llm_router_columns';
+const PAGE_SIZE_STORAGE_KEY = 'llm_router_logs_page_size_index';
+const ALLOWED_PAGE_SIZES = [10, 20, 50, 100];
 const DEFAULT_MIN_COL_WIDTH = 80;
 const DEFAULT_MAX_COL_WIDTH = 700;
 const LOGS_TABLE_MIN_WIDTH = 1400;
@@ -334,6 +336,24 @@ function loadColumns() {
 
 function saveColumns() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.columns));
+}
+
+function normalizePageSize(value, fallback = 20) {
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (!ALLOWED_PAGE_SIZES.includes(parsed)) return fallback;
+  return parsed;
+}
+
+function loadPageSize() {
+  const saved = localStorage.getItem(PAGE_SIZE_STORAGE_KEY);
+  state.pageSize = normalizePageSize(saved, state.pageSize);
+  const pageSizeSelect = document.getElementById('pageSize');
+  if (pageSizeSelect) pageSizeSelect.value = String(state.pageSize);
+}
+
+function savePageSize() {
+  localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(state.pageSize));
 }
 
 function getVisibleColumns() {
@@ -676,7 +696,9 @@ document.getElementById('resetBtn').addEventListener('click', () => {
 
 // Pagination
 document.getElementById('pageSize').addEventListener('change', (e) => {
-  state.pageSize = parseInt(e.target.value);
+  state.pageSize = normalizePageSize(e.target.value, state.pageSize);
+  e.target.value = String(state.pageSize);
+  savePageSize();
   state.page = 1;
   loadData();
 });
@@ -709,6 +731,7 @@ function calcTableHeight() {
 window.addEventListener('resize', calcTableHeight);
 calcTableHeight();
 loadColumns();
+loadPageSize();
 loadData();
 </script>
 </body>
