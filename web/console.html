@@ -429,8 +429,8 @@
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
         </div>
         <div>
-          <label class="block text-sm font-medium mb-1">过期天数</label>
-          <input id="newKeyDays" type="number" required min="1" value="30"
+          <label class="block text-sm font-medium mb-1">过期时间</label>
+          <input id="newKeyExpiresAt" type="date" required
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
         </div>
         <div id="createKeyError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
@@ -1370,24 +1370,64 @@ async function loadKeys() {
 
 // 创建密钥
 document.getElementById('createKeyBtn').addEventListener('click', () => {
+  const now = new Date();
+  const defaultDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 30);
+  const minDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
   document.getElementById('newKeyName').value = '';
-  document.getElementById('newKeyDays').value = '30';
+  document.getElementById('newKeyExpiresAt').value = formatDateForInput(defaultDate);
+  document.getElementById('newKeyExpiresAt').min = formatDateForInput(minDate);
   document.getElementById('createKeyError').classList.add('hidden');
   document.getElementById('createKeyModal').classList.remove('hidden');
 });
 document.getElementById('cancelCreateKey').addEventListener('click', () => document.getElementById('createKeyModal').classList.add('hidden'));
 document.getElementById('createKeyModal').addEventListener('click', (e) => { if (e.target === document.getElementById('createKeyModal')) document.getElementById('createKeyModal').classList.add('hidden'); });
 
+function formatDateForInput(dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function calculateExpireDays(expiresAt) {
+  const parts = expiresAt.split('-');
+  if (parts.length !== 3) return null;
+
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  const d = Number(parts[2]);
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return null;
+
+  const targetUtc = Date.UTC(y, m - 1, d);
+  const targetDate = new Date(targetUtc);
+  if (
+    targetDate.getUTCFullYear() !== y ||
+    targetDate.getUTCMonth() !== m - 1 ||
+    targetDate.getUTCDate() !== d
+  ) {
+    return null;
+  }
+
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.floor((targetUtc - todayUtc) / (24 * 60 * 60 * 1000));
+}
+
 document.getElementById('submitCreateKey').addEventListener('click', async () => {
   const name = document.getElementById('newKeyName').value.trim();
-  const days = parseInt(document.getElementById('newKeyDays').value);
+  const expiresAt = document.getElementById('newKeyExpiresAt').value;
+  const expireDays = calculateExpireDays(expiresAt);
+
   if (!name) { document.getElementById('createKeyError').textContent = '名称不能为空'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
-  if (!days || days < 1) { document.getElementById('createKeyError').textContent = '天数必须为正整数'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+  if (!expiresAt) { document.getElementById('createKeyError').textContent = '过期时间不能为空'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+  if (expireDays === null) { document.getElementById('createKeyError').textContent = '过期时间格式错误，应为 YYYY-MM-DD'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+  if (expireDays < 1) { document.getElementById('createKeyError').textContent = '过期时间必须晚于今天'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
   try {
     const res = await fetch('/api/keys', {
       method: 'POST',
       headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, expire_days: days })
+      body: JSON.stringify({ name, expire_days: expireDays })
     });
     const data = await res.json();
     if (res.ok) {
