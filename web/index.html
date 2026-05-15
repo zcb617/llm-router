@@ -265,6 +265,7 @@ let state = {
 };
 let resizeState = null;
 let suppressSortClick = false;
+let dataQueryInFlight = false;
 
 function parsePixelValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -545,6 +546,8 @@ function renderPagination() {
 }
 
 async function loadData() {
+  if (dataQueryInFlight) return;
+  dataQueryInFlight = true;
   const params = new URLSearchParams({
     limit: state.pageSize,
     offset: (state.page - 1) * state.pageSize,
@@ -575,6 +578,8 @@ async function loadData() {
   } catch(e) {
     console.error(e);
     document.getElementById('tableBody').innerHTML = '<tr><td colspan="99" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>';
+  } finally {
+    dataQueryInFlight = false;
   }
 }
 

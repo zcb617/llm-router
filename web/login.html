@@ -104,6 +104,23 @@ const loginTab = document.getElementById('loginTab');
 const registerTab = document.getElementById('registerTab');
 const loginForm = document.getElementById('loginForm');
 const registerForm = document.getElementById('registerForm');
+const loginSubmitBtn = loginForm.querySelector('button[type="submit"]');
+const registerSubmitBtn = registerForm.querySelector('button[type="submit"]');
+const authActionLocks = new Set();
+
+async function runAuthLocked(actionKey, submitBtn, actionFn) {
+  if (authActionLocks.has(actionKey)) return;
+  authActionLocks.add(actionKey);
+  const hasDisabledProp = submitBtn && ('disabled' in submitBtn);
+  const previousDisabled = hasDisabledProp ? submitBtn.disabled : false;
+  if (hasDisabledProp) submitBtn.disabled = true;
+  try {
+    return await actionFn();
+  } finally {
+    if (hasDisabledProp) submitBtn.disabled = previousDisabled;
+    authActionLocks.delete(actionKey);
+  }
+}
 
 // Tab 切换
 loginTab.addEventListener('click', () => {
@@ -144,83 +161,87 @@ const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 // 登录
 loginForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  clearErrors();
+  await runAuthLocked('submit-login', loginSubmitBtn, async () => {
+    clearErrors();
 
-  const email = document.getElementById('loginEmail').value.trim();
-  const password = document.getElementById('loginPassword').value;
+    const email = document.getElementById('loginEmail').value.trim();
+    const password = document.getElementById('loginPassword').value;
 
-  if (!email) {
-    showError('loginError', '邮箱不能为空');
-    return;
-  }
-
-  try {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
-    });
-    const data = await res.json();
-
-    if (res.ok) {
-      // 登录成功，保存 token
-      localStorage.setItem('llm_token', data.token);
-      localStorage.setItem('llm_email', data.email);
-      localStorage.setItem('llm_user_id', data.user_id);
-      // 跳转控制台
-      window.location.href = '/web/console.html';
-    } else {
-      showError('loginError', data.error || '登录失败');
+    if (!email) {
+      showError('loginError', '邮箱不能为空');
+      return;
     }
-  } catch (err) {
-    showError('loginError', '网络错误，请重试: ' + err.message);
-  }
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        // 登录成功，保存 token
+        localStorage.setItem('llm_token', data.token);
+        localStorage.setItem('llm_email', data.email);
+        localStorage.setItem('llm_user_id', data.user_id);
+        // 跳转控制台
+        window.location.href = '/web/console.html';
+      } else {
+        showError('loginError', data.error || '登录失败');
+      }
+    } catch (err) {
+      showError('loginError', '网络错误，请重试: ' + err.message);
+    }
+  });
 });
 
 // 注册
 registerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  clearErrors();
+  await runAuthLocked('submit-register', registerSubmitBtn, async () => {
+    clearErrors();
 
-  const email = document.getElementById('registerEmail').value.trim();
-  const password = document.getElementById('registerPassword').value;
-  const confirmPassword = document.getElementById('registerConfirmPassword').value;
+    const email = document.getElementById('registerEmail').value.trim();
+    const password = document.getElementById('registerPassword').value;
+    const confirmPassword = document.getElementById('registerConfirmPassword').value;
 
-  if (!EMAIL_REGEX.test(email)) {
-    showError('registerError', '邮箱格式不正确');
-    return;
-  }
-
-  if (password.length < 6) {
-    showError('registerError', '密码长度不能少于6位');
-    return;
-  }
-
-  if (password !== confirmPassword) {
-    showError('registerError', '两次输入的密码不一致');
-    return;
-  }
-
-  try {
-    const res = await fetch('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
-    });
-    const data = await res.json();
-
-    if (res.ok) {
-      document.getElementById('registerSuccess').classList.remove('hidden');
-      // 清空表单
-      document.getElementById('registerEmail').value = '';
-      document.getElementById('registerPassword').value = '';
-      document.getElementById('registerConfirmPassword').value = '';
-    } else {
-      showError('registerError', data.error || '注册失败');
+    if (!EMAIL_REGEX.test(email)) {
+      showError('registerError', '邮箱格式不正确');
+      return;
     }
-  } catch (err) {
-    showError('registerError', '网络错误，请重试: ' + err.message);
-  }
+
+    if (password.length < 6) {
+      showError('registerError', '密码长度不能少于6位');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      showError('registerError', '两次输入的密码不一致');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        document.getElementById('registerSuccess').classList.remove('hidden');
+        // 清空表单
+        document.getElementById('registerEmail').value = '';
+        document.getElementById('registerPassword').value = '';
+        document.getElementById('registerConfirmPassword').value = '';
+      } else {
+        showError('registerError', data.error || '注册失败');
+      }
+    } catch (err) {
+      showError('registerError', '网络错误，请重试: ' + err.message);
+    }
+  });
 });
 
 // 如果已登录，直接跳转控制台

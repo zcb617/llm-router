@@ -787,42 +787,44 @@ document.getElementById('changePasswordModal').addEventListener('click', (e) => 
   }
 });
 
-document.getElementById('submitChangePassword').addEventListener('click', async () => {
-  const currentPassword = document.getElementById('currentPasswordInput').value;
-  const newPassword = document.getElementById('newPasswordInput').value;
-  const confirmNewPassword = document.getElementById('confirmNewPasswordInput').value;
-  const errorEl = document.getElementById('changePasswordError');
+document.getElementById('submitChangePassword').addEventListener('click', async (event) => {
+  await runLockedAction('submitChangePassword', event.currentTarget, async () => {
+    const currentPassword = document.getElementById('currentPasswordInput').value;
+    const newPassword = document.getElementById('newPasswordInput').value;
+    const confirmNewPassword = document.getElementById('confirmNewPasswordInput').value;
+    const errorEl = document.getElementById('changePasswordError');
 
-  if (!currentPassword || !newPassword || !confirmNewPassword) {
-    errorEl.textContent = '请填写完整信息';
-    errorEl.classList.remove('hidden');
-    return;
-  }
-
-  if (newPassword !== confirmNewPassword) {
-    errorEl.textContent = '两次输入的新密码不一致';
-    errorEl.classList.remove('hidden');
-    return;
-  }
-
-  try {
-    const res = await fetch('/api/auth/password', {
-      method: 'PUT',
-      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
-    });
-    const data = await res.json();
-    if (res.ok) {
-      alert(data.message || '密码修改成功，请重新登录');
-      clearAuthStateAndRedirect();
+    if (!currentPassword || !newPassword || !confirmNewPassword) {
+      errorEl.textContent = '请填写完整信息';
+      errorEl.classList.remove('hidden');
       return;
     }
-    errorEl.textContent = data.error || '修改失败';
-    errorEl.classList.remove('hidden');
-  } catch (e) {
-    errorEl.textContent = '网络错误: ' + e.message;
-    errorEl.classList.remove('hidden');
-  }
+
+    if (newPassword !== confirmNewPassword) {
+      errorEl.textContent = '两次输入的新密码不一致';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/auth/password', {
+        method: 'PUT',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert(data.message || '密码修改成功，请重新登录');
+        clearAuthStateAndRedirect();
+        return;
+      }
+      errorEl.textContent = data.error || '修改失败';
+      errorEl.classList.remove('hidden');
+    } catch (e) {
+      errorEl.textContent = '网络错误: ' + e.message;
+      errorEl.classList.remove('hidden');
+    }
+  });
 });
 
 // ============ 动态菜单渲染 ============
@@ -929,8 +931,25 @@ let logsState = {
 };
 let logsResizeState = null;
 let logsSuppressSortClick = false;
+let logsQueryInFlight = false;
 
 function getAuthHeaders() { return { 'Authorization': 'Bearer ' + token }; }
+
+const actionLocks = new Set();
+async function runLockedAction(actionKey, triggerEl, actionFn) {
+  if (!actionKey) return await actionFn();
+  if (actionLocks.has(actionKey)) return;
+  actionLocks.add(actionKey);
+  const hasDisabledProp = triggerEl && ('disabled' in triggerEl);
+  const previousDisabled = hasDisabledProp ? triggerEl.disabled : false;
+  if (hasDisabledProp) triggerEl.disabled = true;
+  try {
+    return await actionFn();
+  } finally {
+    if (hasDisabledProp) triggerEl.disabled = previousDisabled;
+    actionLocks.delete(actionKey);
+  }
+}
 
 function parsePixelValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -1178,6 +1197,8 @@ function renderPagination() {
 }
 
 async function loadLogsData() {
+  if (logsQueryInFlight) return;
+  logsQueryInFlight = true;
   const params = new URLSearchParams({
     limit: logsState.pageSize, offset: (logsState.page - 1) * logsState.pageSize,
     sort: logsState.sortKey, dir: logsState.sortDir,
@@ -1198,6 +1219,8 @@ async function loadLogsData() {
     renderHeader(); renderTable(calls); renderPagination();
   } catch(e) {
     document.getElementById('tableBody').innerHTML = '<tr><td colspan="99" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>';
+  } finally {
+    logsQueryInFlight = false;
   }
 }
 
@@ -1336,33 +1359,37 @@ async function loadKeys() {
     });
     // 复制密钥
     tbody.querySelectorAll('.copy-key-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', async (event) => {
         const keyId = btn.dataset.id;
-        try {
-          const res = await fetch(`/api/keys/${keyId}/reveal`, { headers: getAuthHeaders() });
-          const data = await res.json();
-          if (res.ok) {
-            await copyToClipboard(data.key);
-            btn.textContent = '已复制!';
-            setTimeout(() => { btn.textContent = '复制'; }, 1500);
-          } else {
-            alert(data.error || '获取密钥失败');
+        await runLockedAction(`copy-key-${keyId}`, event.currentTarget, async () => {
+          try {
+            const res = await fetch(`/api/keys/${keyId}/reveal`, { headers: getAuthHeaders() });
+            const data = await res.json();
+            if (res.ok) {
+              await copyToClipboard(data.key);
+              btn.textContent = '已复制!';
+              setTimeout(() => { btn.textContent = '复制'; }, 1500);
+            } else {
+              alert(data.error || '获取密钥失败');
+            }
+          } catch(e) {
+            alert('复制失败: ' + e.message);
           }
-        } catch(e) {
-          alert('复制失败: ' + e.message);
-        }
+        });
       });
     });
     // 删除密钥
     tbody.querySelectorAll('.delete-key-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('确定删除此密钥？此操作不可恢复。')) return;
+      btn.addEventListener('click', async (event) => {
         const keyId = btn.dataset.id;
-        try {
-          const res = await fetch('/api/keys/' + keyId, { method: 'DELETE', headers: getAuthHeaders() });
-          if (res.ok) { loadKeys(); }
-          else { const d = await res.json(); alert(d.error || '删除失败'); }
-        } catch(e) { alert('网络错误: ' + e.message); }
+        await runLockedAction(`delete-key-${keyId}`, event.currentTarget, async () => {
+          if (!confirm('确定删除此密钥？此操作不可恢复。')) return;
+          try {
+            const res = await fetch('/api/keys/' + keyId, { method: 'DELETE', headers: getAuthHeaders() });
+            if (res.ok) { loadKeys(); }
+            else { const d = await res.json(); alert(d.error || '删除失败'); }
+          } catch(e) { alert('网络错误: ' + e.message); }
+        });
       });
     });
   } catch(e) { tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>'; }
@@ -1414,46 +1441,50 @@ function calculateExpireDays(expiresAt) {
   return Math.floor((targetUtc - todayUtc) / (24 * 60 * 60 * 1000));
 }
 
-document.getElementById('submitCreateKey').addEventListener('click', async () => {
-  const name = document.getElementById('newKeyName').value.trim();
-  const expiresAt = document.getElementById('newKeyExpiresAt').value;
-  const expireDays = calculateExpireDays(expiresAt);
+document.getElementById('submitCreateKey').addEventListener('click', async (event) => {
+  await runLockedAction('submitCreateKey', event.currentTarget, async () => {
+    const name = document.getElementById('newKeyName').value.trim();
+    const expiresAt = document.getElementById('newKeyExpiresAt').value;
+    const expireDays = calculateExpireDays(expiresAt);
 
-  if (!name) { document.getElementById('createKeyError').textContent = '名称不能为空'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
-  if (!expiresAt) { document.getElementById('createKeyError').textContent = '过期时间不能为空'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
-  if (expireDays === null) { document.getElementById('createKeyError').textContent = '过期时间格式错误，应为 YYYY-MM-DD'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
-  if (expireDays < 1) { document.getElementById('createKeyError').textContent = '过期时间必须晚于今天'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
-  try {
-    const res = await fetch('/api/keys', {
-      method: 'POST',
-      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, expire_days: expireDays })
-    });
-    const data = await res.json();
-    if (res.ok) {
-      document.getElementById('createKeyModal').classList.add('hidden');
-      // 显示完整密钥
-      document.getElementById('newKeyResult').value = data.key;
-      document.getElementById('newKeyResultModal').classList.remove('hidden');
-      loadKeys();
-    } else {
-      document.getElementById('createKeyError').textContent = data.error || '创建失败';
+    if (!name) { document.getElementById('createKeyError').textContent = '名称不能为空'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+    if (!expiresAt) { document.getElementById('createKeyError').textContent = '过期时间不能为空'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+    if (expireDays === null) { document.getElementById('createKeyError').textContent = '过期时间格式错误，应为 YYYY-MM-DD'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+    if (expireDays < 1) { document.getElementById('createKeyError').textContent = '过期时间必须晚于今天'; document.getElementById('createKeyError').classList.remove('hidden'); return; }
+    try {
+      const res = await fetch('/api/keys', {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, expire_days: expireDays })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('createKeyModal').classList.add('hidden');
+        // 显示完整密钥
+        document.getElementById('newKeyResult').value = data.key;
+        document.getElementById('newKeyResultModal').classList.remove('hidden');
+        loadKeys();
+      } else {
+        document.getElementById('createKeyError').textContent = data.error || '创建失败';
+        document.getElementById('createKeyError').classList.remove('hidden');
+      }
+    } catch(e) {
+      document.getElementById('createKeyError').textContent = '网络错误: ' + e.message;
       document.getElementById('createKeyError').classList.remove('hidden');
     }
-  } catch(e) {
-    document.getElementById('createKeyError').textContent = '网络错误: ' + e.message;
-    document.getElementById('createKeyError').classList.remove('hidden');
-  }
+  });
 });
 
-document.getElementById('copyNewKey').addEventListener('click', async () => {
-  try {
-    await copyToClipboard(document.getElementById('newKeyResult').value);
-    document.getElementById('copyNewKey').textContent = '已复制!';
-    setTimeout(() => { document.getElementById('copyNewKey').textContent = '复制'; }, 1500);
-  } catch (e) {
-    alert('复制失败: ' + e.message);
-  }
+document.getElementById('copyNewKey').addEventListener('click', async (event) => {
+  await runLockedAction('copyNewKey', event.currentTarget, async () => {
+    try {
+      await copyToClipboard(document.getElementById('newKeyResult').value);
+      document.getElementById('copyNewKey').textContent = '已复制!';
+      setTimeout(() => { document.getElementById('copyNewKey').textContent = '复制'; }, 1500);
+    } catch (e) {
+      alert('复制失败: ' + e.message);
+    }
+  });
 });
 document.getElementById('closeNewKeyResult').addEventListener('click', () => document.getElementById('newKeyResultModal').classList.add('hidden'));
 document.getElementById('newKeyResultModal').addEventListener('click', (e) => { if (e.target === document.getElementById('newKeyResultModal')) document.getElementById('newKeyResultModal').classList.add('hidden'); });
@@ -1469,40 +1500,42 @@ document.getElementById('editKeyModal').addEventListener('click', (e) => {
     editingKeyId = null;
   }
 });
-document.getElementById('submitEditKey').addEventListener('click', async () => {
-  if (!editingKeyId) return;
-  const name = document.getElementById('editKeyName').value.trim();
-  const expiresAt = document.getElementById('editKeyExpiresAt').value;
-  const isActive = document.getElementById('editKeyIsActive').checked;
-  if (!name) {
-    document.getElementById('editKeyError').textContent = '名称不能为空';
-    document.getElementById('editKeyError').classList.remove('hidden');
-    return;
-  }
-  if (!expiresAt) {
-    document.getElementById('editKeyError').textContent = '过期时间不能为空';
-    document.getElementById('editKeyError').classList.remove('hidden');
-    return;
-  }
-  try {
-    const res = await fetch('/api/keys/' + editingKeyId, {
-      method: 'PUT',
-      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, expires_at: expiresAt, is_active: isActive })
-    });
-    const data = await res.json();
-    if (res.ok) {
-      document.getElementById('editKeyModal').classList.add('hidden');
-      editingKeyId = null;
-      loadKeys();
-    } else {
-      document.getElementById('editKeyError').textContent = data.error || '保存失败';
+document.getElementById('submitEditKey').addEventListener('click', async (event) => {
+  await runLockedAction('submitEditKey', event.currentTarget, async () => {
+    if (!editingKeyId) return;
+    const name = document.getElementById('editKeyName').value.trim();
+    const expiresAt = document.getElementById('editKeyExpiresAt').value;
+    const isActive = document.getElementById('editKeyIsActive').checked;
+    if (!name) {
+      document.getElementById('editKeyError').textContent = '名称不能为空';
+      document.getElementById('editKeyError').classList.remove('hidden');
+      return;
+    }
+    if (!expiresAt) {
+      document.getElementById('editKeyError').textContent = '过期时间不能为空';
+      document.getElementById('editKeyError').classList.remove('hidden');
+      return;
+    }
+    try {
+      const res = await fetch('/api/keys/' + editingKeyId, {
+        method: 'PUT',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, expires_at: expiresAt, is_active: isActive })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('editKeyModal').classList.add('hidden');
+        editingKeyId = null;
+        loadKeys();
+      } else {
+        document.getElementById('editKeyError').textContent = data.error || '保存失败';
+        document.getElementById('editKeyError').classList.remove('hidden');
+      }
+    } catch (e) {
+      document.getElementById('editKeyError').textContent = '网络错误: ' + e.message;
       document.getElementById('editKeyError').classList.remove('hidden');
     }
-  } catch (e) {
-    document.getElementById('editKeyError').textContent = '网络错误: ' + e.message;
-    document.getElementById('editKeyError').classList.remove('hidden');
-  }
+  });
 });
 
 // ============ 上游管理 ============
@@ -1580,47 +1613,52 @@ const KIMI_OAUTH_DEFAULT_BASE_URL = 'https://api.kimi.com';
 function bindUpstreamTableEvents() {
   const tbody = document.getElementById('upstreamsTableBody');
   tbody.querySelectorAll('.edit-upstream-btn').forEach(btn => {
-    btn.onclick = async () => {
-      const u = allUpstreams.find(c => c.id == btn.dataset.id);
-      if (!u) return;
-      editingUpstreamId = u.id;
-      document.getElementById('upstreamEditTitle').textContent = '编辑上游';
-      document.getElementById('upstreamName').value = u.name;
-      document.getElementById('upstreamBaseUrl').value = u.target_base_url;
-      document.getElementById('upstreamDescription').value = u.description || '';
-      document.getElementById('upstreamIsActive').checked = u.is_active;
-      document.getElementById('upstreamUseClaudeFeatures').checked = u.use_claude_features || false;
-      document.getElementById('upstreamUseRooFeatures').checked = u.use_roo_features || false;
-      document.getElementById('upstreamAuthMode').value = u.auth_mode || 'api_key';
-      document.getElementById('upstreamEditError').classList.add('hidden');
-      setUpstreamOauthTokenStatus('');
+    btn.onclick = async (event) => {
+      const id = btn.dataset.id;
+      await runLockedAction(`edit-upstream-${id}`, event.currentTarget, async () => {
+        const u = allUpstreams.find(c => c.id == id);
+        if (!u) return;
+        editingUpstreamId = u.id;
+        document.getElementById('upstreamEditTitle').textContent = '编辑上游';
+        document.getElementById('upstreamName').value = u.name;
+        document.getElementById('upstreamBaseUrl').value = u.target_base_url;
+        document.getElementById('upstreamDescription').value = u.description || '';
+        document.getElementById('upstreamIsActive').checked = u.is_active;
+        document.getElementById('upstreamUseClaudeFeatures').checked = u.use_claude_features || false;
+        document.getElementById('upstreamUseRooFeatures').checked = u.use_roo_features || false;
+        document.getElementById('upstreamAuthMode').value = u.auth_mode || 'api_key';
+        document.getElementById('upstreamEditError').classList.add('hidden');
+        setUpstreamOauthTokenStatus('');
 
-      // 获取完整 upstream 数据（含完整 api_key）
-      try {
-        const res = await fetch('/api/upstreams/' + u.id, { headers: getAuthHeaders() });
-        const full = await res.json();
-        document.getElementById('upstreamApiKey').value = full.api_key || '';
-        document.getElementById('upstreamAuthMode').value = full.auth_mode || 'api_key';
-      } catch(e) {
-        document.getElementById('upstreamApiKey').value = '';
-      }
-      syncUpstreamAuthModeFields();
+        // 获取完整 upstream 数据（含完整 api_key）
+        try {
+          const res = await fetch('/api/upstreams/' + u.id, { headers: getAuthHeaders() });
+          const full = await res.json();
+          document.getElementById('upstreamApiKey').value = full.api_key || '';
+          document.getElementById('upstreamAuthMode').value = full.auth_mode || 'api_key';
+        } catch(e) {
+          document.getElementById('upstreamApiKey').value = '';
+        }
+        syncUpstreamAuthModeFields();
 
-      // 重置 toggle 状态
-      document.getElementById('upstreamApiKey').type = 'password';
-      document.getElementById('toggleApiKeyBtn').textContent = '显示';
+        // 重置 toggle 状态
+        document.getElementById('upstreamApiKey').type = 'password';
+        document.getElementById('toggleApiKeyBtn').textContent = '显示';
 
-      document.getElementById('upstreamEditModal').classList.remove('hidden');
+        document.getElementById('upstreamEditModal').classList.remove('hidden');
+      });
     };
   });
   tbody.querySelectorAll('.delete-upstream-btn').forEach(btn => {
-    btn.onclick = async () => {
-      if (!confirm('确定删除此上游？关联的模型配置将失去 url 和 key。')) return;
+    btn.onclick = async (event) => {
       const id = btn.dataset.id;
-      try {
-        const res = await fetch('/api/upstreams/' + id, { method: 'DELETE', headers: getAuthHeaders() });
-        if (res.ok) { loadUpstreams(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
-      } catch(e) { alert('网络错误: ' + e.message); }
+      await runLockedAction(`delete-upstream-${id}`, event.currentTarget, async () => {
+        if (!confirm('确定删除此上游？关联的模型配置将失去 url 和 key。')) return;
+        try {
+          const res = await fetch('/api/upstreams/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+          if (res.ok) { loadUpstreams(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
     };
   });
 }
@@ -1711,99 +1749,103 @@ function setUpstreamOauthTokenStatus(message, isError = false) {
   if (!message) node.className = 'text-xs text-zinc-500';
 }
 
-document.getElementById('checkKimiTokenBtn').addEventListener('click', async () => {
-  const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
-  if (authMode !== 'kimi_cli_oauth') {
-    setUpstreamOauthTokenStatus('请先选择 kimi-cli auth 认证方式', true);
-    return;
-  }
-  setUpstreamOauthTokenStatus('检测中...');
-  try {
-    const res = await fetch('/api/upstreams/kimi-token/check', {
-      method: 'POST',
-      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ oauth_key: KIMI_OAUTH_DEFAULT_KEY })
-    });
-    const data = await res.json();
-    if (res.ok) {
-      const ttl = data.seconds_to_expiry != null ? `，剩余 ${data.seconds_to_expiry}s` : '';
-      setUpstreamOauthTokenStatus(`可用（${data.path}${ttl}）`);
-    } else {
-      const msg = data.error || '本机 token 不可用';
-      const detail = data.path ? `（${data.path}）` : '';
-      setUpstreamOauthTokenStatus(msg + detail, true);
+document.getElementById('checkKimiTokenBtn').addEventListener('click', async (event) => {
+  await runLockedAction('checkKimiToken', event.currentTarget, async () => {
+    const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
+    if (authMode !== 'kimi_cli_oauth') {
+      setUpstreamOauthTokenStatus('请先选择 kimi-cli auth 认证方式', true);
+      return;
     }
-  } catch (e) {
-    setUpstreamOauthTokenStatus('检测失败: ' + e.message, true);
-  }
-});
-
-document.getElementById('submitUpstreamEdit').addEventListener('click', async () => {
-  const name = document.getElementById('upstreamName').value.trim();
-  const targetBaseUrl = document.getElementById('upstreamBaseUrl').value.trim();
-  const apiKey = document.getElementById('upstreamApiKey').value;
-  const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
-  const isKimiOauth = authMode === 'kimi_cli_oauth';
-  const oauthKey = KIMI_OAUTH_DEFAULT_KEY;
-  const oauthHost = KIMI_OAUTH_DEFAULT_HOST;
-  const effectiveApiKey = isKimiOauth ? '' : apiKey;
-  const effectiveTargetBaseUrl = isKimiOauth
-    ? (targetBaseUrl || KIMI_OAUTH_DEFAULT_BASE_URL)
-    : targetBaseUrl;
-  const description = document.getElementById('upstreamDescription').value.trim();
-  const isActive = document.getElementById('upstreamIsActive').checked;
-  const useClaudeFeatures = isKimiOauth ? false : document.getElementById('upstreamUseClaudeFeatures').checked;
-  const useRooFeatures = isKimiOauth ? false : document.getElementById('upstreamUseRooFeatures').checked;
-
-  if (!name || (!isKimiOauth && !targetBaseUrl)) {
-    document.getElementById('upstreamEditError').textContent = isKimiOauth
-      ? '上游名称不能为空'
-      : '名称和基础 URL 不能为空';
-    document.getElementById('upstreamEditError').classList.remove('hidden');
-    return;
-  }
-
-  const body = {
-    name,
-    target_base_url: effectiveTargetBaseUrl,
-    api_key: effectiveApiKey,
-    auth_mode: authMode,
-    oauth_key: oauthKey,
-    oauth_host: oauthHost,
-    description,
-    is_active: isActive,
-    use_claude_features: useClaudeFeatures,
-    use_roo_features: useRooFeatures
-  };
-
-  try {
-    let res;
-    if (editingUpstreamId) {
-      res = await fetch('/api/upstreams/' + editingUpstreamId, {
-        method: 'PUT',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    } else {
-      res = await fetch('/api/upstreams', {
+    setUpstreamOauthTokenStatus('检测中...');
+    try {
+      const res = await fetch('/api/upstreams/kimi-token/check', {
         method: 'POST',
         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+        body: JSON.stringify({ oauth_key: KIMI_OAUTH_DEFAULT_KEY })
       });
+      const data = await res.json();
+      if (res.ok) {
+        const ttl = data.seconds_to_expiry != null ? `，剩余 ${data.seconds_to_expiry}s` : '';
+        setUpstreamOauthTokenStatus(`可用（${data.path}${ttl}）`);
+      } else {
+        const msg = data.error || '本机 token 不可用';
+        const detail = data.path ? `（${data.path}）` : '';
+        setUpstreamOauthTokenStatus(msg + detail, true);
+      }
+    } catch (e) {
+      setUpstreamOauthTokenStatus('检测失败: ' + e.message, true);
     }
-    const data = await res.json();
-    if (res.ok) {
-      document.getElementById('upstreamEditModal').classList.add('hidden');
-      editingUpstreamId = null;
-      loadUpstreams();
-    } else {
-      document.getElementById('upstreamEditError').textContent = data.error || '保存失败';
+  });
+});
+
+document.getElementById('submitUpstreamEdit').addEventListener('click', async (event) => {
+  await runLockedAction('submitUpstreamEdit', event.currentTarget, async () => {
+    const name = document.getElementById('upstreamName').value.trim();
+    const targetBaseUrl = document.getElementById('upstreamBaseUrl').value.trim();
+    const apiKey = document.getElementById('upstreamApiKey').value;
+    const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
+    const isKimiOauth = authMode === 'kimi_cli_oauth';
+    const oauthKey = KIMI_OAUTH_DEFAULT_KEY;
+    const oauthHost = KIMI_OAUTH_DEFAULT_HOST;
+    const effectiveApiKey = isKimiOauth ? '' : apiKey;
+    const effectiveTargetBaseUrl = isKimiOauth
+      ? (targetBaseUrl || KIMI_OAUTH_DEFAULT_BASE_URL)
+      : targetBaseUrl;
+    const description = document.getElementById('upstreamDescription').value.trim();
+    const isActive = document.getElementById('upstreamIsActive').checked;
+    const useClaudeFeatures = isKimiOauth ? false : document.getElementById('upstreamUseClaudeFeatures').checked;
+    const useRooFeatures = isKimiOauth ? false : document.getElementById('upstreamUseRooFeatures').checked;
+
+    if (!name || (!isKimiOauth && !targetBaseUrl)) {
+      document.getElementById('upstreamEditError').textContent = isKimiOauth
+        ? '上游名称不能为空'
+        : '名称和基础 URL 不能为空';
+      document.getElementById('upstreamEditError').classList.remove('hidden');
+      return;
+    }
+
+    const body = {
+      name,
+      target_base_url: effectiveTargetBaseUrl,
+      api_key: effectiveApiKey,
+      auth_mode: authMode,
+      oauth_key: oauthKey,
+      oauth_host: oauthHost,
+      description,
+      is_active: isActive,
+      use_claude_features: useClaudeFeatures,
+      use_roo_features: useRooFeatures
+    };
+
+    try {
+      let res;
+      if (editingUpstreamId) {
+        res = await fetch('/api/upstreams/' + editingUpstreamId, {
+          method: 'PUT',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+      } else {
+        res = await fetch('/api/upstreams', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+      }
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('upstreamEditModal').classList.add('hidden');
+        editingUpstreamId = null;
+        loadUpstreams();
+      } else {
+        document.getElementById('upstreamEditError').textContent = data.error || '保存失败';
+        document.getElementById('upstreamEditError').classList.remove('hidden');
+      }
+    } catch(e) {
+      document.getElementById('upstreamEditError').textContent = '网络错误: ' + e.message;
       document.getElementById('upstreamEditError').classList.remove('hidden');
     }
-  } catch(e) {
-    document.getElementById('upstreamEditError').textContent = '网络错误: ' + e.message;
-    document.getElementById('upstreamEditError').classList.remove('hidden');
-  }
+  });
 });
 
 // 上游搜索/重置
@@ -1972,53 +2014,58 @@ function renderModels() {
   });
   // 编辑
   tbody.querySelectorAll('.edit-model-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const cfg = allModelConfigs.find(c => c.id == btn.dataset.id);
-      if (!cfg) return;
-      editingModelId = cfg.id;
-      editingRoutes = [];
-      document.getElementById('modelEditTitle').textContent = '编辑模型配置';
-      document.getElementById('modelKey').value = cfg.model_key;
-      document.getElementById('modelUpstreamSelect').value = cfg.upstream_id || '';
-      onUpstreamChange();
-      document.getElementById('modelForwardModel').value = cfg.forward_model || '';
-      document.getElementById('modelProtocolConverter').value = cfg.protocol_converter || '';
-      document.getElementById('modelIsActive').checked = cfg.is_active;
-      document.getElementById('modelIsDefault').checked = cfg.is_default;
-      const multi = cfg.use_multi_upstream;
-      document.getElementById('modelUseMultiUpstream').checked = multi;
-      onMultiUpstreamChange();
-      // 多上游模式：加载路由
-      if (multi) {
-        try {
-          const res = await fetch(`/api/models/${cfg.id}/routes`, { headers: getAuthHeaders() });
-          const data = await res.json();
-          editingRoutes = (data.routes || []).map(r => ({
-            id: r.id,
-            upstream_id: r.upstream_id,
-            forward_model: r.forward_model || '',
-            protocol_converter: r.protocol_converter || '',
-            sort_order: r.sort_order || 0
-          }));
-          if (editingRoutes.length === 0) {
-            editingRoutes = [{ upstream_id: null, forward_model: '', protocol_converter: '', sort_order: 0 }];
-          }
-          renderRoutesList();
-        } catch(e) { console.error('Failed to load routes:', e); }
-      }
-      document.getElementById('modelEditError').classList.add('hidden');
-      document.getElementById('modelEditModal').classList.remove('hidden');
+    btn.addEventListener('click', async (event) => {
+      const id = btn.dataset.id;
+      await runLockedAction(`edit-model-${id}`, event.currentTarget, async () => {
+        const cfg = allModelConfigs.find(c => c.id == id);
+        if (!cfg) return;
+        editingModelId = cfg.id;
+        editingRoutes = [];
+        document.getElementById('modelEditTitle').textContent = '编辑模型配置';
+        document.getElementById('modelKey').value = cfg.model_key;
+        document.getElementById('modelUpstreamSelect').value = cfg.upstream_id || '';
+        onUpstreamChange();
+        document.getElementById('modelForwardModel').value = cfg.forward_model || '';
+        document.getElementById('modelProtocolConverter').value = cfg.protocol_converter || '';
+        document.getElementById('modelIsActive').checked = cfg.is_active;
+        document.getElementById('modelIsDefault').checked = cfg.is_default;
+        const multi = cfg.use_multi_upstream;
+        document.getElementById('modelUseMultiUpstream').checked = multi;
+        onMultiUpstreamChange();
+        // 多上游模式：加载路由
+        if (multi) {
+          try {
+            const res = await fetch(`/api/models/${cfg.id}/routes`, { headers: getAuthHeaders() });
+            const data = await res.json();
+            editingRoutes = (data.routes || []).map(r => ({
+              id: r.id,
+              upstream_id: r.upstream_id,
+              forward_model: r.forward_model || '',
+              protocol_converter: r.protocol_converter || '',
+              sort_order: r.sort_order || 0
+            }));
+            if (editingRoutes.length === 0) {
+              editingRoutes = [{ upstream_id: null, forward_model: '', protocol_converter: '', sort_order: 0 }];
+            }
+            renderRoutesList();
+          } catch(e) { console.error('Failed to load routes:', e); }
+        }
+        document.getElementById('modelEditError').classList.add('hidden');
+        document.getElementById('modelEditModal').classList.remove('hidden');
+      });
     });
   });
   // 删除
   tbody.querySelectorAll('.delete-model-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('确定删除此模型配置？此操作不可恢复。')) return;
+    btn.addEventListener('click', async (event) => {
       const id = btn.dataset.id;
-      try {
-        const res = await fetch('/api/models/' + id, { method: 'DELETE', headers: getAuthHeaders() });
-        if (res.ok) { loadModels(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
-      } catch(e) { alert('网络错误: ' + e.message); }
+      await runLockedAction(`delete-model-${id}`, event.currentTarget, async () => {
+        if (!confirm('确定删除此模型配置？此操作不可恢复。')) return;
+        try {
+          const res = await fetch('/api/models/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+          if (res.ok) { loadModels(); } else { const d = await res.json(); alert(d.error || '删除失败'); }
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
     });
   });
 }
@@ -2099,84 +2146,86 @@ document.getElementById('modelEditModal').addEventListener('click', (e) => {
   }
 });
 
-document.getElementById('submitModelEdit').addEventListener('click', async () => {
-  const modelKey = document.getElementById('modelKey').value.trim();
-  const upstreamId = document.getElementById('modelUpstreamSelect').value;
-  const targetBaseUrl = document.getElementById('modelBaseUrl').value.trim();
-  const apiKey = document.getElementById('modelApiKey').value;
-  const forwardModel = document.getElementById('modelForwardModel').value.trim();
-  const protocolConverter = document.getElementById('modelProtocolConverter').value || null;
-  const isActive = document.getElementById('modelIsActive').checked;
-  const isDefault = document.getElementById('modelIsDefault').checked;
-  const useMultiUpstream = document.getElementById('modelUseMultiUpstream').checked;
+document.getElementById('submitModelEdit').addEventListener('click', async (event) => {
+  await runLockedAction('submitModelEdit', event.currentTarget, async () => {
+    const modelKey = document.getElementById('modelKey').value.trim();
+    const upstreamId = document.getElementById('modelUpstreamSelect').value;
+    const targetBaseUrl = document.getElementById('modelBaseUrl').value.trim();
+    const apiKey = document.getElementById('modelApiKey').value;
+    const forwardModel = document.getElementById('modelForwardModel').value.trim();
+    const protocolConverter = document.getElementById('modelProtocolConverter').value || null;
+    const isActive = document.getElementById('modelIsActive').checked;
+    const isDefault = document.getElementById('modelIsDefault').checked;
+    const useMultiUpstream = document.getElementById('modelUseMultiUpstream').checked;
 
-  if (!modelKey) {
-    document.getElementById('modelEditError').textContent = '模型标识不能为空';
-    document.getElementById('modelEditError').classList.remove('hidden');
-    return;
-  }
-  if (!useMultiUpstream && !upstreamId && !targetBaseUrl) {
-    document.getElementById('modelEditError').textContent = '请选择上游或填写目标 URL';
-    document.getElementById('modelEditError').classList.remove('hidden');
-    return;
-  }
-  if (useMultiUpstream) {
-    const validRoutes = editingRoutes.filter(r => r.upstream_id);
-    if (validRoutes.length === 0) {
-      document.getElementById('modelEditError').textContent = '多上游模式至少需要一个路由';
+    if (!modelKey) {
+      document.getElementById('modelEditError').textContent = '模型标识不能为空';
       document.getElementById('modelEditError').classList.remove('hidden');
       return;
     }
-  }
-
-  const body = {
-    model_key: modelKey,
-    upstream_id: !useMultiUpstream && upstreamId ? parseInt(upstreamId) : null,
-    target_base_url: useMultiUpstream ? '' : targetBaseUrl,
-    api_key: useMultiUpstream ? '' : apiKey,
-    forward_model: useMultiUpstream ? '' : forwardModel,
-    protocol_converter: protocolConverter,
-    is_active: isActive,
-    is_default: isDefault,
-    use_multi_upstream: useMultiUpstream,
-    routes: useMultiUpstream ? editingRoutes.filter(r => r.upstream_id).map(r => ({
-      upstream_id: r.upstream_id,
-      forward_model: r.forward_model || '',
-      protocol_converter: r.protocol_converter || null,
-      sort_order: r.sort_order || 0
-    })) : []
-  };
-
-  try {
-    let res;
-    if (editingModelId) {
-      res = await fetch('/api/models/' + editingModelId, {
-        method: 'PUT',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    } else {
-      res = await fetch('/api/models', {
-        method: 'POST',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    }
-    const data = await res.json();
-    if (!res.ok) {
-      document.getElementById('modelEditError').textContent = data.error || '保存失败';
+    if (!useMultiUpstream && !upstreamId && !targetBaseUrl) {
+      document.getElementById('modelEditError').textContent = '请选择上游或填写目标 URL';
       document.getElementById('modelEditError').classList.remove('hidden');
       return;
     }
+    if (useMultiUpstream) {
+      const validRoutes = editingRoutes.filter(r => r.upstream_id);
+      if (validRoutes.length === 0) {
+        document.getElementById('modelEditError').textContent = '多上游模式至少需要一个路由';
+        document.getElementById('modelEditError').classList.remove('hidden');
+        return;
+      }
+    }
 
-    document.getElementById('modelEditModal').classList.add('hidden');
-    editingModelId = null;
-    editingRoutes = [];
-    loadModels();
-  } catch(e) {
-    document.getElementById('modelEditError').textContent = '网络错误: ' + e.message;
-    document.getElementById('modelEditError').classList.remove('hidden');
-  }
+    const body = {
+      model_key: modelKey,
+      upstream_id: !useMultiUpstream && upstreamId ? parseInt(upstreamId) : null,
+      target_base_url: useMultiUpstream ? '' : targetBaseUrl,
+      api_key: useMultiUpstream ? '' : apiKey,
+      forward_model: useMultiUpstream ? '' : forwardModel,
+      protocol_converter: protocolConverter,
+      is_active: isActive,
+      is_default: isDefault,
+      use_multi_upstream: useMultiUpstream,
+      routes: useMultiUpstream ? editingRoutes.filter(r => r.upstream_id).map(r => ({
+        upstream_id: r.upstream_id,
+        forward_model: r.forward_model || '',
+        protocol_converter: r.protocol_converter || null,
+        sort_order: r.sort_order || 0
+      })) : []
+    };
+
+    try {
+      let res;
+      if (editingModelId) {
+        res = await fetch('/api/models/' + editingModelId, {
+          method: 'PUT',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+      } else {
+        res = await fetch('/api/models', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        document.getElementById('modelEditError').textContent = data.error || '保存失败';
+        document.getElementById('modelEditError').classList.remove('hidden');
+        return;
+      }
+
+      document.getElementById('modelEditModal').classList.add('hidden');
+      editingModelId = null;
+      editingRoutes = [];
+      loadModels();
+    } catch(e) {
+      document.getElementById('modelEditError').textContent = '网络错误: ' + e.message;
+      document.getElementById('modelEditError').classList.remove('hidden');
+    }
+  });
 });
 
 // ============ 用户管理 ============
@@ -2236,30 +2285,34 @@ function bindUserTableEvents() {
   const tbody = document.getElementById('usersTableBody');
   // 修改角色
   tbody.querySelectorAll('.user-role-select').forEach(sel => {
-    sel.onchange = async () => {
+    sel.onchange = async (event) => {
       const userId = sel.dataset.userId;
       const roleId = sel.value || null;
-      try {
-        const res = await fetch('/api/users/' + userId, {
-          method: 'PUT',
-          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role_id: roleId })
-        });
-        if (!res.ok) { const d = await res.json(); alert(d.error || '修改失败'); }
-        else { loadUsers(); }  // 重新加载以更新角色名称
-      } catch(e) { alert('网络错误: ' + e.message); }
+      await runLockedAction(`update-user-role-${userId}`, event.currentTarget, async () => {
+        try {
+          const res = await fetch('/api/users/' + userId, {
+            method: 'PUT',
+            headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role_id: roleId })
+          });
+          if (!res.ok) { const d = await res.json(); alert(d.error || '修改失败'); }
+          else { loadUsers(); }  // 重新加载以更新角色名称
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
     };
   });
   // 删除用户
   tbody.querySelectorAll('.delete-user-btn').forEach(btn => {
-    btn.onclick = async () => {
-      if (!confirm('确定删除此用户？此操作不可恢复。')) return;
+    btn.onclick = async (event) => {
       const id = btn.dataset.id;
-      try {
-        const res = await fetch('/api/users/' + id, { method: 'DELETE', headers: getAuthHeaders() });
-        if (res.ok) { loadUsers(); }
-        else { const d = await res.json(); alert(d.error || '删除失败'); }
-      } catch(e) { alert('网络错误: ' + e.message); }
+      await runLockedAction(`delete-user-${id}`, event.currentTarget, async () => {
+        if (!confirm('确定删除此用户？此操作不可恢复。')) return;
+        try {
+          const res = await fetch('/api/users/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+          if (res.ok) { loadUsers(); }
+          else { const d = await res.json(); alert(d.error || '删除失败'); }
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
     };
   });
 }
@@ -2341,36 +2394,41 @@ function bindRoleTableEvents() {
   });
   // 配置菜单
   tbody.querySelectorAll('.edit-role-menus-btn').forEach(btn => {
-    btn.onclick = async () => {
-      editingRoleMenusId = parseInt(btn.dataset.id);
-      try {
-        const res = await fetch('/api/roles/' + editingRoleMenusId + '/menus', { headers: getAuthHeaders() });
-        const data = await res.json();
-        allMenusForRole = data.all_menus || [];
-        const roleMenuIds = data.role_menus || [];
-        const list = document.getElementById('roleMenusList');
-        list.innerHTML = '';
-        allMenusForRole.forEach(m => {
-          const div = document.createElement('div');
-          div.className = 'flex items-center gap-2 p-2 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800';
-          div.innerHTML = `<input type="checkbox" value="${m.id}" ${roleMenuIds.includes(m.id) ? 'checked' : ''} class="role-menu-cb"><span class="flex-1 text-sm">${m.icon} ${m.name}</span>`;
-          list.appendChild(div);
-        });
-        document.getElementById('roleMenusError').classList.add('hidden');
-        document.getElementById('roleMenusModal').classList.remove('hidden');
-      } catch(e) { alert('加载失败: ' + e.message); }
+    btn.onclick = async (event) => {
+      const roleId = parseInt(btn.dataset.id);
+      await runLockedAction(`edit-role-menus-${roleId}`, event.currentTarget, async () => {
+        editingRoleMenusId = roleId;
+        try {
+          const res = await fetch('/api/roles/' + editingRoleMenusId + '/menus', { headers: getAuthHeaders() });
+          const data = await res.json();
+          allMenusForRole = data.all_menus || [];
+          const roleMenuIds = data.role_menus || [];
+          const list = document.getElementById('roleMenusList');
+          list.innerHTML = '';
+          allMenusForRole.forEach(m => {
+            const div = document.createElement('div');
+            div.className = 'flex items-center gap-2 p-2 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800';
+            div.innerHTML = `<input type="checkbox" value="${m.id}" ${roleMenuIds.includes(m.id) ? 'checked' : ''} class="role-menu-cb"><span class="flex-1 text-sm">${m.icon} ${m.name}</span>`;
+            list.appendChild(div);
+          });
+          document.getElementById('roleMenusError').classList.add('hidden');
+          document.getElementById('roleMenusModal').classList.remove('hidden');
+        } catch(e) { alert('加载失败: ' + e.message); }
+      });
     };
   });
   // 删除角色
   tbody.querySelectorAll('.delete-role-btn').forEach(btn => {
-    btn.onclick = async () => {
-      if (!confirm('确定删除此角色？关联的用户将失去该角色权限。')) return;
+    btn.onclick = async (event) => {
       const id = btn.dataset.id;
-      try {
-        const res = await fetch('/api/roles/' + id, { method: 'DELETE', headers: getAuthHeaders() });
-        if (res.ok) { loadRoles(); }
-        else { const d = await res.json(); alert(d.error || '删除失败'); }
-      } catch(e) { alert('网络错误: ' + e.message); }
+      await runLockedAction(`delete-role-${id}`, event.currentTarget, async () => {
+        if (!confirm('确定删除此角色？关联的用户将失去该角色权限。')) return;
+        try {
+          const res = await fetch('/api/roles/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+          if (res.ok) { loadRoles(); }
+          else { const d = await res.json(); alert(d.error || '删除失败'); }
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
     };
   });
 }
@@ -2408,42 +2466,44 @@ document.getElementById('roleEditModal').addEventListener('click', (e) => {
   }
 });
 
-document.getElementById('submitRoleEdit').addEventListener('click', async () => {
-  const name = document.getElementById('roleName').value.trim();
-  const description = document.getElementById('roleDescription').value.trim();
-  if (!name) {
-    document.getElementById('roleEditError').textContent = '角色名称不能为空';
-    document.getElementById('roleEditError').classList.remove('hidden');
-    return;
-  }
-  try {
-    let res;
-    if (editingRoleId) {
-      res = await fetch('/api/roles/' + editingRoleId, {
-        method: 'PUT',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description })
-      });
-    } else {
-      res = await fetch('/api/roles', {
-        method: 'POST',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description })
-      });
+document.getElementById('submitRoleEdit').addEventListener('click', async (event) => {
+  await runLockedAction('submitRoleEdit', event.currentTarget, async () => {
+    const name = document.getElementById('roleName').value.trim();
+    const description = document.getElementById('roleDescription').value.trim();
+    if (!name) {
+      document.getElementById('roleEditError').textContent = '角色名称不能为空';
+      document.getElementById('roleEditError').classList.remove('hidden');
+      return;
     }
-    const data = await res.json();
-    if (res.ok) {
-      document.getElementById('roleEditModal').classList.add('hidden');
-      editingRoleId = null;
-      loadRoles();
-    } else {
-      document.getElementById('roleEditError').textContent = data.error || '保存失败';
+    try {
+      let res;
+      if (editingRoleId) {
+        res = await fetch('/api/roles/' + editingRoleId, {
+          method: 'PUT',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, description })
+        });
+      } else {
+        res = await fetch('/api/roles', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, description })
+        });
+      }
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('roleEditModal').classList.add('hidden');
+        editingRoleId = null;
+        loadRoles();
+      } else {
+        document.getElementById('roleEditError').textContent = data.error || '保存失败';
+        document.getElementById('roleEditError').classList.remove('hidden');
+      }
+    } catch(e) {
+      document.getElementById('roleEditError').textContent = '网络错误: ' + e.message;
       document.getElementById('roleEditError').classList.remove('hidden');
     }
-  } catch(e) {
-    document.getElementById('roleEditError').textContent = '网络错误: ' + e.message;
-    document.getElementById('roleEditError').classList.remove('hidden');
-  }
+  });
 });
 
 // 角色菜单配置
@@ -2459,26 +2519,28 @@ document.getElementById('roleMenusModal').addEventListener('click', (e) => {
   }
 });
 
-document.getElementById('submitRoleMenus').addEventListener('click', async () => {
-  const menuIds = Array.from(document.querySelectorAll('.role-menu-cb:checked')).map(cb => parseInt(cb.value));
-  try {
-    const res = await fetch('/api/roles/' + editingRoleMenusId + '/menus', {
-      method: 'PUT',
-      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ menu_ids: menuIds })
-    });
-    const data = await res.json();
-    if (res.ok) {
-      document.getElementById('roleMenusModal').classList.add('hidden');
-      editingRoleMenusId = null;
-    } else {
-      document.getElementById('roleMenusError').textContent = data.error || '保存失败';
+document.getElementById('submitRoleMenus').addEventListener('click', async (event) => {
+  await runLockedAction('submitRoleMenus', event.currentTarget, async () => {
+    const menuIds = Array.from(document.querySelectorAll('.role-menu-cb:checked')).map(cb => parseInt(cb.value));
+    try {
+      const res = await fetch('/api/roles/' + editingRoleMenusId + '/menus', {
+        method: 'PUT',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ menu_ids: menuIds })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('roleMenusModal').classList.add('hidden');
+        editingRoleMenusId = null;
+      } else {
+        document.getElementById('roleMenusError').textContent = data.error || '保存失败';
+        document.getElementById('roleMenusError').classList.remove('hidden');
+      }
+    } catch(e) {
+      document.getElementById('roleMenusError').textContent = '网络错误: ' + e.message;
       document.getElementById('roleMenusError').classList.remove('hidden');
     }
-  } catch(e) {
-    document.getElementById('roleMenusError').textContent = '网络错误: ' + e.message;
-    document.getElementById('roleMenusError').classList.remove('hidden');
-  }
+  });
 });
 
 // 用户管理搜索/重置
