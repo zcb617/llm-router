@@ -2,7 +2,7 @@
 Token计算模块测试
 """
 import pytest
-from src.tokenizer import count_tokens_from_api_response, calculate_tokens
+from src.tokenizer import count_tokens_from_api_response, calculate_tokens, extract_cache_miss_tokens
 
 
 def test_count_tokens_from_api_response_openai():
@@ -91,3 +91,48 @@ def test_calculate_tokens_local_fallback():
     )
     assert source == "local"
     assert input_tokens > 0
+
+
+def test_calculate_tokens_claude_code_end_turn_usage_mapping():
+    """Claude Code 特征：end_turn 场景按 input/output 口径提取。"""
+    response = """
+event:message_delta
+data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":25600,"cache_creation_input_tokens":0,"cache_read_input_tokens":5632,"output_tokens":83,"prompt_tokens":31232,"completion_tokens":83,"total_tokens":31315,"cached_tokens":5632}}
+"""
+    input_tokens, output_tokens, source = calculate_tokens(
+        model="claude-opus",
+        request_body="",
+        response_body=response,
+        prefer_claude_code_usage=True,
+    )
+    assert source == "api"
+    assert input_tokens == 25600
+    assert output_tokens == 83
+    assert extract_cache_miss_tokens(response, prefer_claude_code_usage=True) == 25600
+
+
+def test_calculate_tokens_claude_code_tool_use_usage_mapping():
+    """Claude Code 特征：tool_use 场景不能被 prompt/completion 的 0 覆盖。"""
+    response = """
+event:message_delta
+data:{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":3412,"cache_creation_input_tokens":0,"cache_read_input_tokens":97004,"output_tokens":80,"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"cached_tokens":0}}
+"""
+    input_tokens, output_tokens, source = calculate_tokens(
+        model="claude-opus",
+        request_body="",
+        response_body=response,
+        prefer_claude_code_usage=True,
+    )
+    assert source == "api"
+    assert input_tokens == 3412
+    assert output_tokens == 80
+    assert extract_cache_miss_tokens(response, prefer_claude_code_usage=True) == 3412
+
+    # 默认逻辑保持不变（不影响非 Claude Code 特征路径）
+    plain_input, plain_output, _ = calculate_tokens(
+        model="claude-opus",
+        request_body="",
+        response_body=response,
+    )
+    assert plain_input == 0
+    assert plain_output == 0

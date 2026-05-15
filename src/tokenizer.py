@@ -74,7 +74,7 @@ def _extract_cached_hit_from_sse(response_body: str) -> Optional[int]:
     return last_val
 
 
-def _extract_cache_miss_tokens(usage) -> Optional[int]:
+def _extract_cache_miss_tokens(usage, prefer_claude_code_usage: bool = False) -> Optional[int]:
     """Extract cache miss tokens (total input minus cache hit).
     兼容格式:
       - Claude: prompt_tokens - cache_read_input_tokens
@@ -82,6 +82,10 @@ def _extract_cache_miss_tokens(usage) -> Optional[int]:
     """
     if not isinstance(usage, dict):
         return None
+    if prefer_claude_code_usage:
+        # Claude Code 特征请求：按产品口径，input_tokens 即未命中缓存输入。
+        if "input_tokens" in usage:
+            return _safe_int(usage.get("input_tokens"))
     # Claude 格式
     prompt_tokens = usage.get("prompt_tokens")
     cache_read = usage.get("cache_read_input_tokens")
@@ -100,7 +104,7 @@ def _extract_cache_miss_tokens(usage) -> Optional[int]:
     return None
 
 
-def _extract_cache_miss_from_sse(response_body: str) -> Optional[int]:
+def _extract_cache_miss_from_sse(response_body: str, prefer_claude_code_usage: bool = False) -> Optional[int]:
     """从 SSE 响应体中提取 cache_miss_tokens。取最后一个出现的值。"""
     last_val = None
     for line in response_body.splitlines():
@@ -121,32 +125,35 @@ def _extract_cache_miss_from_sse(response_body: str) -> Optional[int]:
                 usage = message.get("usage")
         if not isinstance(usage, dict):
             continue
-        val = _extract_cache_miss_tokens(usage)
+        val = _extract_cache_miss_tokens(usage, prefer_claude_code_usage=prefer_claude_code_usage)
         if val is not None:
             last_val = val
     return last_val
 
 
-def extract_cache_miss_tokens(response_body: str) -> Optional[int]:
+def extract_cache_miss_tokens(response_body: str, prefer_claude_code_usage: bool = False) -> Optional[int]:
     """从API响应中提取缓存未命中(创建)token数量
     返回: cache_miss_tokens 或 None
     """
     # 先尝试解析为纯 JSON
     try:
         data = json.loads(response_body)
-        val = _extract_cache_miss_tokens(data.get("usage"))
+        val = _extract_cache_miss_tokens(data.get("usage"), prefer_claude_code_usage=prefer_claude_code_usage)
         if val is not None:
             return val
         message = data.get("message")
         if isinstance(message, dict):
-            val = _extract_cache_miss_tokens(message.get("usage"))
+            val = _extract_cache_miss_tokens(
+                message.get("usage"),
+                prefer_claude_code_usage=prefer_claude_code_usage,
+            )
             if val is not None:
                 return val
         return None
     except (json.JSONDecodeError, KeyError, TypeError):
         pass
     # 不是纯 JSON，尝试 SSE 格式解析
-    return _extract_cache_miss_from_sse(response_body)
+    return _extract_cache_miss_from_sse(response_body, prefer_claude_code_usage=prefer_claude_code_usage)
 
 
 def extract_cached_hit_tokens(response_body: str) -> Optional[int]:
@@ -171,9 +178,17 @@ def extract_cached_hit_tokens(response_body: str) -> Optional[int]:
     return _extract_cached_hit_from_sse(response_body)
 
 
-def _extract_usage_tokens(usage) -> Optional[Tuple[int, int]]:
+def _extract_usage_tokens(usage, prefer_claude_code_usage: bool = False) -> Optional[Tuple[int, int]]:
     """Extract token pair from usage object in either OpenAI/Kimi/Responses shapes."""
     if not isinstance(usage, dict):
+        return None
+
+    if prefer_claude_code_usage:
+        if "input_tokens" in usage or "output_tokens" in usage or "completion_tokens" in usage:
+            output_raw = usage.get("output_tokens")
+            if output_raw is None:
+                output_raw = usage.get("completion_tokens")
+            return (_safe_int(usage.get("input_tokens")), _safe_int(output_raw))
         return None
 
     if "prompt_tokens" in usage or "completion_tokens" in usage:
@@ -185,7 +200,10 @@ def _extract_usage_tokens(usage) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _extract_usage_from_sse(response_body: str) -> Optional[Tuple[int, int]]:
+def _extract_usage_from_sse(
+    response_body: str,
+    prefer_claude_code_usage: bool = False,
+) -> Optional[Tuple[int, int]]:
     """从 SSE 格式的响应体中提取 usage 信息。
 
     支持 Anthropic (event:message_start/message_stop) 和 OpenAI SSE 格式。
@@ -216,6 +234,13 @@ def _extract_usage_from_sse(response_body: str) -> Optional[Tuple[int, int]]:
         if not isinstance(usage, dict):
             continue
 
+        if prefer_claude_code_usage:
+            usage_tokens = _extract_usage_tokens(usage, prefer_claude_code_usage=True)
+            if usage_tokens is not None:
+                # Claude Code 口径：取最后一个 usage 事件（通常是 message_delta）。
+                input_tokens, output_tokens = usage_tokens
+            continue
+
         if input_tokens is None:
             if "prompt_tokens" in usage:
                 input_tokens = _safe_int(usage.get("prompt_tokens"))
@@ -232,7 +257,10 @@ def _extract_usage_from_sse(response_body: str) -> Optional[Tuple[int, int]]:
     return None
 
 
-def count_tokens_from_api_response(response_body: str) -> Optional[Tuple[int, int]]:
+def count_tokens_from_api_response(
+    response_body: str,
+    prefer_claude_code_usage: bool = False,
+) -> Optional[Tuple[int, int]]:
     """
     从API响应中提取token数量
     返回: (input_tokens, output_tokens) 或 None
@@ -241,13 +269,19 @@ def count_tokens_from_api_response(response_body: str) -> Optional[Tuple[int, in
     try:
         data = json.loads(response_body)
 
-        usage_tokens = _extract_usage_tokens(data.get("usage"))
+        usage_tokens = _extract_usage_tokens(
+            data.get("usage"),
+            prefer_claude_code_usage=prefer_claude_code_usage,
+        )
         if usage_tokens is not None:
             return usage_tokens
 
         message = data.get("message")
         if isinstance(message, dict):
-            usage_tokens = _extract_usage_tokens(message.get("usage"))
+            usage_tokens = _extract_usage_tokens(
+                message.get("usage"),
+                prefer_claude_code_usage=prefer_claude_code_usage,
+            )
             if usage_tokens is not None:
                 return usage_tokens
 
@@ -256,7 +290,10 @@ def count_tokens_from_api_response(response_body: str) -> Optional[Tuple[int, in
         pass
 
     # 不是纯 JSON，尝试 SSE 格式解析
-    return _extract_usage_from_sse(response_body)
+    return _extract_usage_from_sse(
+        response_body,
+        prefer_claude_code_usage=prefer_claude_code_usage,
+    )
 
 
 def count_tokens_local(model: str, text: str) -> int:
@@ -419,7 +456,8 @@ def _extract_text_from_response(body_dict: dict) -> str:
 def calculate_tokens(
     model: str,
     request_body: Optional[str],
-    response_body: Optional[str]
+    response_body: Optional[str],
+    prefer_claude_code_usage: bool = False,
 ) -> Tuple[int, int, str]:
     """
     计算token数量，优先使用API响应，否则本地计算
@@ -428,7 +466,10 @@ def calculate_tokens(
     """
     # 优先尝试从API响应提取
     if response_body:
-        api_result = count_tokens_from_api_response(response_body)
+        api_result = count_tokens_from_api_response(
+            response_body,
+            prefer_claude_code_usage=prefer_claude_code_usage,
+        )
         if api_result:
             return (api_result[0], api_result[1], "api")
 

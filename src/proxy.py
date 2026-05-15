@@ -462,6 +462,7 @@ class LLMRouterAddon:
         flow.metadata["model_mapping"] = mapping
         flow.metadata["original_model"] = model_name
         flow.metadata["overridden_model"] = mapping.get("forward_model", "") or model_name
+        self._set_claude_code_feature_flag(flow, flow.request.headers)
 
         # 判断是否为 Responses API 请求（支持 /v1/responses 和 /responses）
         is_responses_api = path == "/v1/responses" or path == "/responses"
@@ -589,6 +590,7 @@ class LLMRouterAddon:
                 logger.info(f"Injecting Roo Code headers (upstream: {target_base_url})")
             else:
                 logger.info(f"Preserving incoming Roo Code headers (upstream: {target_base_url})")
+        self._set_claude_code_feature_flag(flow, flow.request.headers)
 
         # 重写URL
         new_url = self.capturer.rewrite_url(flow, target_base_url, path)
@@ -667,6 +669,11 @@ class LLMRouterAddon:
         for h, v in self._get_roo_headers(flow).items():
             headers[h] = v
         return True
+
+    @classmethod
+    def _set_claude_code_feature_flag(cls, flow, headers) -> None:
+        """记录当前请求是否具备 Claude Code 特征（透传或注入）。"""
+        flow.metadata["claude_code_feature_request"] = cls._has_claude_client_features(headers)
 
     def _inject_claude_headers(self, flow: http.HTTPFlow):
         """注入 Claude Code 特征 headers，让上游 LLM 认为请求来自 Claude Code 客户端
@@ -756,6 +763,7 @@ class LLMRouterAddon:
             new_url = self.capturer.rewrite_url(flow, target_url, normalized_path)
             req_headers = self._build_kimi_cli_headers(new_url, mapping)
             self._apply_ordered_headers_to_flow(flow, req_headers)
+            self._set_claude_code_feature_flag(flow, req_headers)
 
             if req_body is not None:
                 flow.request.content = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
@@ -792,6 +800,7 @@ class LLMRouterAddon:
             req_data = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
             req_headers = self._build_kimi_cli_headers(full_url, mapping)
             self._apply_ordered_headers_to_flow(flow, req_headers)
+            self._set_claude_code_feature_flag(flow, req_headers)
             if req_body is not None:
                 flow.request.content = req_data
 
@@ -917,6 +926,7 @@ class LLMRouterAddon:
                     captured_req.url = full_url
                     captured_req.call_id = str(uuid.uuid4())
                     flow.metadata["call_id"] = captured_req.call_id
+                    self._set_claude_code_feature_flag(flow, req_headers)
                     self._store_pending_request(flow, captured_req)
                     flow.metadata["multi_upstream_id"] = upstream_id
                     flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
@@ -1001,12 +1011,14 @@ class LLMRouterAddon:
         if self._is_kimi_cli_auth(route):
             req_headers = self._build_kimi_cli_headers(new_url, route)
             self._apply_ordered_headers_to_flow(flow, req_headers)
+            self._set_claude_code_feature_flag(flow, req_headers)
         else:
             req_headers = self._build_upstream_headers(flow.request.headers, api_key)
             if route.get("use_claude_features"):
                 self._apply_claude_feature_headers(req_headers, flow)
             elif route.get("use_roo_features"):
                 self._apply_roo_feature_headers(req_headers, flow)
+            self._set_claude_code_feature_flag(flow, req_headers)
 
             flow.request.headers.clear()
             for h, v in req_headers.items():
@@ -2021,14 +2033,19 @@ class LLMRouterAddon:
         first_token_time = flow.metadata.get("first_token_time") or flow.metadata.get("headers_time")
         if first_token_time and stream_type == "stream":
             first_token_ms = int((first_token_time - captured_req.start_time) * 1000)
+        claude_code_feature_request = bool(flow.metadata.get("claude_code_feature_request"))
 
         tokens_input, tokens_output, token_source = calculate_tokens(
             model=model,
             request_body=captured_req.body,
-            response_body=captured_resp.body
+            response_body=captured_resp.body,
+            prefer_claude_code_usage=claude_code_feature_request,
         )
         cached_hit_tokens = extract_cached_hit_tokens(captured_resp.body or "")
-        cache_miss_tokens = extract_cache_miss_tokens(captured_resp.body or "")
+        cache_miss_tokens = extract_cache_miss_tokens(
+            captured_resp.body or "",
+            prefer_claude_code_usage=claude_code_feature_request,
+        )
         tokens_per_second = None
         if tokens_output and tokens_output > 0 and captured_resp.duration_ms and captured_resp.duration_ms > 0:
             tokens_per_second = round(tokens_output / (captured_resp.duration_ms / 1000), 2)
@@ -2128,10 +2145,14 @@ class LLMRouterAddon:
             tokens_input, tokens_output, token_source = calculate_tokens(
                 model=model,
                 request_body=captured_req.body,
-                response_body=response_body
+                response_body=response_body,
+                prefer_claude_code_usage=bool(flow.metadata.get("claude_code_feature_request")),
             )
             cached_hit_tokens = extract_cached_hit_tokens(response_body)
-            cache_miss_tokens = extract_cache_miss_tokens(response_body)
+            cache_miss_tokens = extract_cache_miss_tokens(
+                response_body,
+                prefer_claude_code_usage=bool(flow.metadata.get("claude_code_feature_request")),
+            )
             tokens_per_second = None
             if tokens_output and tokens_output > 0 and duration_ms and duration_ms > 0:
                 tokens_per_second = round(tokens_output / (duration_ms / 1000), 2)
