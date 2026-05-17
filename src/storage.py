@@ -125,6 +125,7 @@ class CallStorage:
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS cached_hit_tokens INTEGER")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS cache_miss_tokens INTEGER")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS tokens_per_second REAL")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS call_status TEXT")
                 else:
                     cur.execute("PRAGMA table_info(llm_calls)")
                     existing_columns = {row[1] for row in cur.fetchall()}
@@ -136,6 +137,8 @@ class CallStorage:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN cache_miss_tokens INTEGER")
                     if "tokens_per_second" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN tokens_per_second REAL")
+                    if "call_status" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN call_status TEXT")
 
                 conn.commit()
                 self._llm_calls_schema_ready = True
@@ -208,6 +211,7 @@ class CallStorage:
                         response_headers JSON,
                         response_body TEXT,
                         final_responses_body TEXT,
+                        call_status TEXT,
                         duration_ms INTEGER,
                         tokens_input INTEGER,
                         tokens_output INTEGER,
@@ -238,6 +242,7 @@ class CallStorage:
                         response_headers TEXT,
                         response_body TEXT,
                         final_responses_body TEXT,
+                        call_status TEXT,
                         duration_ms INTEGER,
                         tokens_input INTEGER,
                         tokens_output INTEGER,
@@ -271,6 +276,7 @@ class CallStorage:
         original_model: str = None,
         overridden_model: str = None,
         final_responses_body: Optional[str] = None,
+        call_status: Optional[str] = None,
         cached_hit_tokens: Optional[int] = None,
         cache_miss_tokens: Optional[int] = None,
         tokens_per_second: Optional[float] = None,
@@ -286,11 +292,11 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body, final_responses_body,
+                        response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
                 """,
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
@@ -298,6 +304,7 @@ class CallStorage:
                     json.dumps(response_headers, ensure_ascii=False),
                     response_body,
                     final_responses_body,
+                    call_status,
                     duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                     stream_type, first_token_ms,
                     original_model, overridden_model
@@ -311,11 +318,11 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body, final_responses_body,
+                        response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
@@ -323,6 +330,7 @@ class CallStorage:
                     json.dumps(response_headers, ensure_ascii=False),
                     response_body,
                     final_responses_body,
+                    call_status,
                     duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                     stream_type, first_token_ms,
                     original_model, overridden_model
@@ -413,6 +421,10 @@ class CallStorage:
                 cur.execute("ALTER TABLE llm_calls ADD COLUMN final_responses_body TEXT")
             except Exception:
                 pass
+            try:
+                cur.execute("ALTER TABLE llm_calls ADD COLUMN call_status TEXT")
+            except Exception:
+                pass
             conn.commit()
         else:
             import sqlite3
@@ -449,6 +461,10 @@ class CallStorage:
                 pass
             try:
                 db_cur.execute("ALTER TABLE llm_calls ADD COLUMN final_responses_body TEXT")
+            except Exception:
+                pass
+            try:
+                db_cur.execute("ALTER TABLE llm_calls ADD COLUMN call_status TEXT")
             except Exception:
                 pass
             db_conn.commit()
@@ -706,6 +722,7 @@ class CallStorage:
         user_id: Optional[int] = None, api_key_id: Optional[int] = None,
         previous_response_id: Optional[str] = None, full_context: Optional[str] = None,
         final_responses_body: Optional[str] = None,
+        call_status: Optional[str] = None,
         cached_hit_tokens: Optional[int] = None,
         cache_miss_tokens: Optional[int] = None,
         tokens_per_second: Optional[float] = None,
@@ -720,6 +737,7 @@ class CallStorage:
             json.dumps(response_headers, ensure_ascii=False),
             response_body,
             final_responses_body,
+            call_status,
             duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
             stream_type, first_token_ms,
             original_model, overridden_model, user_id, api_key_id,
@@ -732,12 +750,12 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body, final_responses_body,
+                        response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -748,12 +766,12 @@ class CallStorage:
                     INSERT INTO llm_calls (
                         call_id, timestamp, url, method,
                         request_headers, request_body,
-                        response_headers, response_body, final_responses_body,
+                        response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)

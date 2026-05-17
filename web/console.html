@@ -498,6 +498,7 @@
           <div><span class="text-zinc-500">调用ID:</span> <code id="dCallId" class="ml-1 font-mono"></code></div>
           <div><span class="text-zinc-500">时间:</span> <span id="dTimestamp" class="ml-1"></span></div>
           <div><span class="text-zinc-500">方法:</span> <span id="dMethod" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">状态:</span> <span id="dStatus" class="ml-1"></span></div>
           <div><span class="text-zinc-500">URL:</span> <span id="dUrl" class="ml-1 break-all"></span></div>
           <div><span class="text-zinc-500">原始模型:</span> <span id="dOriginalModel" class="ml-1"></span></div>
           <div><span class="text-zinc-500">映射模型:</span> <span id="dOverriddenModel" class="ml-1"></span></div>
@@ -905,6 +906,7 @@ const COLUMNS = [
   { key: 'call_id', label: '调用ID', default: true, minWidth: '180px' },
   { key: 'timestamp', label: '时间', default: true, minWidth: '165px' },
   { key: 'method', label: '方法', default: true, minWidth: '60px', width: '60px' },
+  { key: 'call_status', label: '状态', default: true, minWidth: '80px', width: '80px' },
   { key: 'url', label: 'URL', default: true, minWidth: '200px' },
   { key: 'original_model', label: '原始模型', default: true, minWidth: '140px' },
   { key: 'overridden_model', label: '映射模型', default: true, minWidth: '140px' },
@@ -1182,6 +1184,17 @@ function renderTable(data) {
       } else if (col.key === 'url') { td.classList.add('truncate-cell-long'); td.title = val; }
       else if (col.key === 'original_model' || col.key === 'overridden_model') { td.classList.add('truncate-cell'); td.title = val; }
       if (col.key === 'stream_type') val = val === 'stream' ? '流式' : '非流式';
+      if (col.key === 'call_status') {
+        if (val === 'failed') {
+          val = '失败';
+          td.classList.add('text-red-600', 'dark:text-red-400', 'font-semibold');
+        } else if (val === 'success') {
+          val = '成功';
+          td.classList.add('text-emerald-600', 'dark:text-emerald-400');
+        } else {
+          val = '-';
+        }
+      }
       td.textContent = val;
       tr.appendChild(td);
     });
@@ -1228,6 +1241,7 @@ function showDetail(row) {
   document.getElementById('dCallId').textContent = row.call_id || 'N/A';
   document.getElementById('dTimestamp').textContent = row.timestamp || '';
   document.getElementById('dMethod').textContent = row.method || '';
+  document.getElementById('dStatus').textContent = row.call_status === 'failed' ? '失败' : (row.call_status === 'success' ? '成功' : '-');
   document.getElementById('dUrl').textContent = row.url || '';
   document.getElementById('dOriginalModel').textContent = row.original_model || '-';
   document.getElementById('dOverriddenModel').textContent = row.overridden_model || '-';

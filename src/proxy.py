@@ -236,6 +236,28 @@ class LLMRouterAddon:
         for key, value in headers:
             flow.request.headers[key] = value
 
+    @staticmethod
+    def _infer_call_status(response_status: Optional[int], response_body: Optional[str]) -> str:
+        """根据响应状态码和响应体判定调用结果。"""
+        if response_status is not None and not (200 <= response_status < 300):
+            return "failed"
+
+        body = response_body or ""
+        body_lower = body.lower()
+        if (
+            "event:error" in body_lower
+            or '"type":"api_error"' in body_lower
+            or '"type": "api_error"' in body_lower
+            or "the server had an error while processing your request" in body_lower
+        ):
+            return "failed"
+
+        stripped = body.lstrip()
+        if stripped.startswith("{") and '"error"' in body_lower:
+            return "failed"
+
+        return "success"
+
     def _start_save_workers(self):
         if self._save_workers_started:
             return
@@ -2081,6 +2103,7 @@ class LLMRouterAddon:
             "response_headers": captured_resp.headers,
             "response_body": captured_resp.body or "",
             "final_responses_body": final_responses_body,
+            "call_status": self._infer_call_status(captured_resp.status_code, captured_resp.body or ""),
             "duration_ms": captured_resp.duration_ms,
             "tokens_input": tokens_input,
             "tokens_output": tokens_output,
@@ -2173,6 +2196,7 @@ class LLMRouterAddon:
                 "response_headers": response_headers,
                 "response_body": response_body,
                 "final_responses_body": None,
+                "call_status": self._infer_call_status(resp_status, response_body),
                 "duration_ms": duration_ms,
                 "tokens_input": tokens_input,
                 "tokens_output": tokens_output,
