@@ -137,6 +137,13 @@
       <div class="flex-1 min-w-[200px]">
         <input id="searchOverridden" type="text" placeholder="映射模型名称..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
       </div>
+      <div class="min-w-[150px]">
+        <select id="autoRefresh" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          <option value="60000">自动刷新: 1分钟</option>
+          <option value="300000" selected>自动刷新: 5分钟</option>
+          <option value="0">自动刷新: 关闭</option>
+        </select>
+      </div>
       <button id="searchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
       <button id="resetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
     </div>
@@ -250,7 +257,10 @@ const COLUMNS = [
 
 const STORAGE_KEY = 'llm_router_columns';
 const PAGE_SIZE_STORAGE_KEY = 'llm_router_logs_page_size_index';
+const AUTO_REFRESH_STORAGE_KEY = 'llm_router_logs_auto_refresh_index';
 const ALLOWED_PAGE_SIZES = [10, 20, 50, 100];
+const ALLOWED_AUTO_REFRESH_MS = [0, 60000, 300000];
+const DEFAULT_AUTO_REFRESH_MS = 300000;
 const DEFAULT_MIN_COL_WIDTH = 80;
 const DEFAULT_MAX_COL_WIDTH = 700;
 const LOGS_TABLE_MIN_WIDTH = 1400;
@@ -263,11 +273,13 @@ let state = {
   sortDir: 'desc',
   searchOriginal: '',
   searchOverridden: '',
+  autoRefreshMs: DEFAULT_AUTO_REFRESH_MS,
   columns: createDefaultColumns()
 };
 let resizeState = null;
 let suppressSortClick = false;
 let dataQueryInFlight = false;
+let autoRefreshTimer = null;
 
 function parsePixelValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -357,6 +369,35 @@ function loadPageSize() {
 
 function savePageSize() {
   localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(state.pageSize));
+}
+
+function normalizeAutoRefreshMs(value, fallback = DEFAULT_AUTO_REFRESH_MS) {
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (!ALLOWED_AUTO_REFRESH_MS.includes(parsed)) return fallback;
+  return parsed;
+}
+
+function loadAutoRefresh() {
+  const saved = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+  state.autoRefreshMs = normalizeAutoRefreshMs(saved, state.autoRefreshMs);
+  const autoRefreshSelect = document.getElementById('autoRefresh');
+  if (autoRefreshSelect) autoRefreshSelect.value = String(state.autoRefreshMs);
+}
+
+function saveAutoRefresh() {
+  localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(state.autoRefreshMs));
+}
+
+function setupAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+  if (state.autoRefreshMs <= 0) return;
+  autoRefreshTimer = setInterval(() => {
+    loadData();
+  }, state.autoRefreshMs);
 }
 
 function getVisibleColumns() {
@@ -721,6 +762,12 @@ document.getElementById('pageSize').addEventListener('change', (e) => {
   state.page = 1;
   loadData();
 });
+document.getElementById('autoRefresh').addEventListener('change', (e) => {
+  state.autoRefreshMs = normalizeAutoRefreshMs(e.target.value, state.autoRefreshMs);
+  e.target.value = String(state.autoRefreshMs);
+  saveAutoRefresh();
+  setupAutoRefresh();
+});
 document.getElementById('prevBtn').addEventListener('click', () => {
   if (state.page > 1) { state.page--; loadData(); }
 });
@@ -751,6 +798,8 @@ window.addEventListener('resize', calcTableHeight);
 calcTableHeight();
 loadColumns();
 loadPageSize();
+loadAutoRefresh();
+setupAutoRefresh();
 loadData();
 </script>
 </body>

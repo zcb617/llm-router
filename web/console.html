@@ -119,6 +119,13 @@
           <div class="flex-1 min-w-[200px]">
             <input id="searchOverridden" type="text" placeholder="映射模型名称..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
           </div>
+          <div class="min-w-[150px]">
+            <select id="autoRefresh" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="60000">自动刷新: 1分钟</option>
+              <option value="300000" selected>自动刷新: 5分钟</option>
+              <option value="0">自动刷新: 关闭</option>
+            </select>
+          </div>
           <button id="searchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
           <button id="resetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
           <button id="colSettingsBtn" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" title="列设置">
@@ -922,6 +929,9 @@ const COLUMNS = [
 const STORAGE_KEY = 'llm_router_columns';
 const PAGE_SIZE_STORAGE_KEY = 'llm_router_logs_page_size_console';
 const ALLOWED_PAGE_SIZES = [10, 20, 50, 100];
+const AUTO_REFRESH_STORAGE_KEY = 'llm_router_logs_auto_refresh_console';
+const ALLOWED_AUTO_REFRESH_MS = [0, 60000, 300000];
+const DEFAULT_AUTO_REFRESH_MS = 300000;
 const DEFAULT_MIN_COL_WIDTH = 80;
 const DEFAULT_MAX_COL_WIDTH = 700;
 const LOGS_TABLE_MIN_WIDTH = 1400;
@@ -929,11 +939,13 @@ let logsState = {
   page: 1, pageSize: 20, total: 0,
   sortKey: 'timestamp', sortDir: 'desc',
   searchOriginal: '', searchOverridden: '',
+  autoRefreshMs: DEFAULT_AUTO_REFRESH_MS,
   columns: createDefaultColumns()
 };
 let logsResizeState = null;
 let logsSuppressSortClick = false;
 let logsQueryInFlight = false;
+let logsAutoRefreshTimer = null;
 
 function getAuthHeaders() { return { 'Authorization': 'Bearer ' + token }; }
 
@@ -1035,6 +1047,29 @@ function loadPageSize() {
   if (pageSizeSelect) pageSizeSelect.value = String(logsState.pageSize);
 }
 function savePageSize() { localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(logsState.pageSize)); }
+function normalizeAutoRefreshMs(value, fallback = DEFAULT_AUTO_REFRESH_MS) {
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (!ALLOWED_AUTO_REFRESH_MS.includes(parsed)) return fallback;
+  return parsed;
+}
+function loadAutoRefresh() {
+  const saved = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+  logsState.autoRefreshMs = normalizeAutoRefreshMs(saved, logsState.autoRefreshMs);
+  const autoRefreshSelect = document.getElementById('autoRefresh');
+  if (autoRefreshSelect) autoRefreshSelect.value = String(logsState.autoRefreshMs);
+}
+function saveAutoRefresh() { localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(logsState.autoRefreshMs)); }
+function setupAutoRefresh() {
+  if (logsAutoRefreshTimer) {
+    clearInterval(logsAutoRefreshTimer);
+    logsAutoRefreshTimer = null;
+  }
+  if (logsState.autoRefreshMs <= 0) return;
+  logsAutoRefreshTimer = setInterval(() => {
+    loadLogsData();
+  }, logsState.autoRefreshMs);
+}
 function getVisibleColumns() {
   if (!logsState || !logsState.columns) return [];
   return logsState.columns.filter(c => c.visible);
@@ -1280,6 +1315,12 @@ document.getElementById('pageSize').addEventListener('change', (e) => {
   savePageSize();
   logsState.page = 1;
   loadLogsData();
+});
+document.getElementById('autoRefresh').addEventListener('change', (e) => {
+  logsState.autoRefreshMs = normalizeAutoRefreshMs(e.target.value, logsState.autoRefreshMs);
+  e.target.value = String(logsState.autoRefreshMs);
+  saveAutoRefresh();
+  setupAutoRefresh();
 });
 document.getElementById('prevBtn').addEventListener('click', () => { if (logsState.page > 1) { logsState.page--; loadLogsData(); } });
 document.getElementById('nextBtn').addEventListener('click', () => { const t = Math.ceil(logsState.total / logsState.pageSize); if (logsState.page < t) { logsState.page++; loadLogsData(); } });
@@ -1883,6 +1924,8 @@ window.addEventListener('resize', calcTableHeight);
 calcTableHeight();
 loadColumns();
 loadPageSize();
+loadAutoRefresh();
+setupAutoRefresh();
 loadLogsData();
 
 // 加载菜单（取代直接加载日志）
