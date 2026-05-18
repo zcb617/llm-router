@@ -12,6 +12,7 @@ class ProxyConfig:
     listen_port: int
     model_mappings: Dict | None = None  # 保留为空，模型配置改从数据库读取
     default_model: str | None = None  # fallback model when no exact match
+    auto_retry_max_attempts: int = 1
     api_key_cache_ttl_seconds: int = 60
     api_key_negative_cache_ttl_seconds: int = 10
     call_save_queue_size: int = 5000
@@ -66,6 +67,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         proxy=ProxyConfig(
             listen_port=raw["proxy"]["listen_port"],
             default_model=raw["proxy"].get("default_model"),
+            auto_retry_max_attempts=int(raw["proxy"].get("auto_retry_max_attempts", 1)),
             api_key_cache_ttl_seconds=int(raw["proxy"].get("api_key_cache_ttl_seconds", 60)),
             api_key_negative_cache_ttl_seconds=int(raw["proxy"].get("api_key_negative_cache_ttl_seconds", 10)),
             call_save_queue_size=int(raw["proxy"].get("call_save_queue_size", 5000)),

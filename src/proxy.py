@@ -68,7 +68,8 @@ class LLMRouterAddon:
                     proxy=ProxyConfig(
                         listen_port=raw_config["proxy"]["listen_port"],
                         model_mappings={},  # 不再从配置文件读取
-                        default_model=raw_config["proxy"].get("default_model")
+                        default_model=raw_config["proxy"].get("default_model"),
+                        auto_retry_max_attempts=int(raw_config["proxy"].get("auto_retry_max_attempts", 1)),
                     ),
                     database=DatabaseConfig(
                         path=db_config.get("path", "./data/llm_calls.db"),
@@ -105,6 +106,7 @@ class LLMRouterAddon:
         self._api_key_cache_lock = threading.Lock()
         self._api_key_cache_ttl = getattr(self.config.proxy, "api_key_cache_ttl_seconds", 60)
         self._api_key_negative_ttl = getattr(self.config.proxy, "api_key_negative_cache_ttl_seconds", 10)
+        self._auto_retry_max_attempts = max(0, int(getattr(self.config.proxy, "auto_retry_max_attempts", 1)))
 
         # 调用记录异步落库队列（避免阻塞请求主循环）
         self._save_queue = queue.Queue(maxsize=max(100, getattr(self.config.proxy, "call_save_queue_size", 5000)))
@@ -257,6 +259,40 @@ class LLMRouterAddon:
             return "failed"
 
         return "success"
+
+    @staticmethod
+    def _is_retryable_api_error(response_status: Optional[int], response_body: Optional[str]) -> bool:
+        """仅识别可自动重试的 server-internal api_error 场景。"""
+        if response_status is None or not (200 <= response_status < 300):
+            return False
+        body_lower = (response_body or "").lower()
+        return (
+            '"type":"api_error"' in body_lower
+            or '"type": "api_error"' in body_lower
+        ) and "the server had an error while processing your request" in body_lower
+
+    def _retry_upstream_once(self, flow: http.HTTPFlow, captured_req) -> Optional[tuple[int, dict, str]]:
+        """对同一上游请求执行一次补偿重试，返回 (status_code, headers, body)。"""
+        req_body = captured_req.body
+        req_data = req_body.encode("utf-8") if isinstance(req_body, str) else req_body
+        # 保留原先注入后的上游请求头，去掉由客户端库自动管理的头。
+        req_headers = {
+            k: v for k, v in dict(flow.request.headers).items()
+            if k.lower() not in self._UPSTREAM_STRIPPED_HEADERS
+        }
+        auth_header = flow.request.headers.get("Authorization")
+        if auth_header:
+            req_headers["Authorization"] = auth_header
+
+        client = self._get_http_client()
+        resp = client.request(
+            captured_req.method,
+            captured_req.url,
+            content=req_data,
+            headers=req_headers,
+        )
+        resp_body = resp.content.decode("utf-8", errors="replace") if resp.content else ""
+        return resp.status_code, dict(resp.headers), resp_body
 
     def _start_save_workers(self):
         if self._save_workers_started:
@@ -1939,6 +1975,29 @@ class LLMRouterAddon:
 
         # 捕获响应数据
         captured_resp = self.capturer.capture_response(flow, captured_req)
+
+        retry_attempt = int(flow.metadata.get("auto_retry_attempt", 0))
+        if (
+            self._auto_retry_max_attempts > 0
+            and retry_attempt < self._auto_retry_max_attempts
+            and self._is_retryable_api_error(captured_resp.status_code, captured_resp.body)
+        ):
+            logger.warning(
+                f"[AUTO_RETRY] call_id={captured_req.call_id} hit retryable api_error, retrying once"
+            )
+            try:
+                status_code, retry_headers, retry_body = self._retry_upstream_once(flow, captured_req)
+                flow.response = http.Response.make(status_code, retry_body.encode("utf-8"), retry_headers)
+                flow.metadata["auto_retry_attempt"] = retry_attempt + 1
+                captured_resp = self.capturer.capture_response(flow, captured_req)
+                logger.warning(
+                    f"[AUTO_RETRY] call_id={captured_req.call_id} retry finished with status={captured_resp.status_code}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[AUTO_RETRY] call_id={captured_req.call_id} retry failed: {e}",
+                    exc_info=True
+                )
         final_responses_body = None
 
         # 协议转换：非流式响应
