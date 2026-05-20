@@ -37,10 +37,12 @@
 
 ### 第一步：安装依赖
 
-```bash
-git clone <仓库地址>
+`ash
+git clone --recursive <仓库地址>
 cd llm-router
-pip install -r requirements.txt
+# 如果 clone 时漏了 --recursive，补拉子模块
+git submodule update --init --recursive
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ### 第二步：配置
@@ -69,7 +71,17 @@ database:
   #   dbname: "llm_router"
 ```
 
-### 第三步：初始化数据库（仅首次）
+### 第三步：创建数据目录（SQLite 用户需要）
+
+如果使用 SQLite（默认配置），先创建数据库目录：
+
+```bash
+mkdir -p data
+```
+
+PostgreSQL 用户可跳过此步骤。
+
+### 第四步：初始化数据库（仅首次）
 
 **这一步非常重要。** 在全新服务器上，必须先执行数据库初始化脚本，创建所有表、索引和预置数据：
 
@@ -90,7 +102,7 @@ python scripts/init_database.py config.yaml
 4. 创建默认管理员账号 `admin / admin`
 5. 标记数据库版本，支持后续增量升级
 
-### 第四步：启动代理
+### 第五步：启动代理
 
 ```bash
 python start.py
@@ -106,7 +118,7 @@ python start.py config.yaml
 
 使用默认账号登录：`admin / admin`
 
-### 第五步：配置客户端
+### 第六步：配置客户端
 
 将你的 LLM 客户端的 API 地址改为：
 
@@ -134,7 +146,7 @@ cp config.example.yaml config.yaml
 2. **初始化数据库**（仅首次，在宿主机执行）：
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python scripts/init_database.py config.yaml
 ```
 
