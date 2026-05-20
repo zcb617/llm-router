@@ -126,6 +126,10 @@ class CallStorage:
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS cache_miss_tokens INTEGER")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS tokens_per_second REAL")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS call_status TEXT")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS user_id INTEGER")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS api_key_id INTEGER")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS previous_response_id TEXT")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS full_context TEXT")
                 else:
                     cur.execute("PRAGMA table_info(llm_calls)")
                     existing_columns = {row[1] for row in cur.fetchall()}
@@ -139,6 +143,14 @@ class CallStorage:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN tokens_per_second REAL")
                     if "call_status" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN call_status TEXT")
+                    if "user_id" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN user_id INTEGER")
+                    if "api_key_id" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN api_key_id INTEGER")
+                    if "previous_response_id" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN previous_response_id TEXT")
+                    if "full_context" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN full_context TEXT")
 
                 conn.commit()
                 self._llm_calls_schema_ready = True
@@ -219,7 +231,11 @@ class CallStorage:
                         stream_type TEXT,
                         first_token_ms INTEGER,
                         original_model TEXT,
-                        overridden_model TEXT
+                        overridden_model TEXT,
+                        user_id INTEGER,
+                        api_key_id INTEGER,
+                        previous_response_id TEXT,
+                        full_context TEXT
                     )
                 """)
             finally:
@@ -250,7 +266,11 @@ class CallStorage:
                         stream_type TEXT,
                         first_token_ms INTEGER,
                         original_model TEXT,
-                        overridden_model TEXT
+                        overridden_model TEXT,
+                        user_id INTEGER,
+                        api_key_id INTEGER,
+                        previous_response_id TEXT,
+                        full_context TEXT
                     )
                 """)
                 await db.commit()
