@@ -37,7 +37,7 @@
 
 ### 第一步：安装依赖
 
-`ash
+```bash
 git clone --recursive <仓库地址>
 cd llm-router
 # 如果 clone 时漏了 --recursive，补拉子模块
