@@ -1684,8 +1684,22 @@ class LLMRouterAddon:
         )
 
     @classmethod
+    def _assistant_tool_use_lacks_thinking_block(cls, msg: dict) -> bool:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            return False
+        content = msg.get("content")
+        if not cls._assistant_content_has_tool_use(content):
+            return False
+        if not isinstance(content, list):
+            return False
+        return not any(
+            isinstance(part, dict) and part.get("type") == "thinking"
+            for part in content
+        )
+
+    @classmethod
     def _normalize_kimi_tool_use_reasoning(cls, body: str, path: str) -> str:
-        """Kimi thinking 模式下，assistant/tool_use 消息必须显式带 reasoning_content。"""
+        """压缩掉 thinking 块后，降级关闭本轮 thinking，避免 Kimi 对 tool_use 历史做硬校验。"""
         if not body or not path.endswith("/messages"):
             return body
 
@@ -1701,26 +1715,27 @@ class LLMRouterAddon:
         if not isinstance(messages, list):
             return body
 
-        changed = False
-        normalized_messages = []
-        for msg in messages:
-            if (
-                isinstance(msg, dict)
-                and msg.get("role") == "assistant"
-                and cls._assistant_content_has_tool_use(msg.get("content"))
-                and not isinstance(msg.get("reasoning_content"), str)
-            ):
-                updated_msg = dict(msg)
-                updated_msg["reasoning_content"] = ""
-                normalized_messages.append(updated_msg)
-                changed = True
-                continue
-            normalized_messages.append(msg)
-
-        if not changed:
+        if not any(cls._assistant_tool_use_lacks_thinking_block(msg) for msg in messages):
             return body
 
-        data["messages"] = normalized_messages
+        data.pop("thinking", None)
+        context_management = data.get("context_management")
+        if isinstance(context_management, dict):
+            edits = context_management.get("edits")
+            if isinstance(edits, list):
+                filtered_edits = [
+                    edit for edit in edits
+                    if not (
+                        isinstance(edit, dict)
+                        and edit.get("type") == "clear_thinking_20251015"
+                    )
+                ]
+                if filtered_edits:
+                    updated_context_management = dict(context_management)
+                    updated_context_management["edits"] = filtered_edits
+                    data["context_management"] = updated_context_management
+                else:
+                    data.pop("context_management", None)
         return json.dumps(data, ensure_ascii=False)
 
     def _prepare_forward_body(self, body: str, forward_model: str, path: str) -> str:

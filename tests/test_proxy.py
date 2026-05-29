@@ -288,19 +288,21 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
     assert id(flow) in addon._pending_requests
 
 
-def test_apply_single_upstream_kimi_cli_route_backfills_reasoning_content_for_tool_use_messages():
+def test_apply_single_upstream_kimi_cli_route_drops_thinking_when_tool_use_history_lacks_thinking_block():
     addon = _make_addon_for_route_tests()
     flow = _make_flow()
     flow.request.content = json.dumps({
         "model": "claude-opus",
         "stream": True,
         "thinking": {"type": "adaptive"},
+        "context_management": {
+            "edits": [{"type": "clear_thinking_20251015", "keep": "all"}],
+        },
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "hello"}]},
             {
                 "role": "assistant",
                 "content": [
-                    {"type": "text", "text": "先看结构"},
                     {"type": "tool_use", "id": "tool_1", "name": "Glob", "input": {"pattern": "**/*"}},
                 ],
             },
@@ -324,8 +326,8 @@ def test_apply_single_upstream_kimi_cli_route_backfills_reasoning_content_for_to
     )
 
     forwarded = json.loads(flow.request.content.decode("utf-8"))
-    assert forwarded["messages"][1]["reasoning_content"] == ""
-    assert forwarded["messages"][1]["content"][1]["type"] == "tool_use"
+    assert "thinking" not in forwarded
+    assert forwarded["messages"][1]["content"][0]["type"] == "tool_use"
 
 
 def test_forward_single_upstream_kimi_cli_rewrites_url_and_syncs_flow():
