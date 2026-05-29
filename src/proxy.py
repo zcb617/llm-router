@@ -626,16 +626,12 @@ class LLMRouterAddon:
         forward_model = mapping.get("forward_model", "")
         if forward_model:
             logger.info(f"Model override: {model_name} -> {forward_model}")
-            new_body = self._replace_model_in_body(captured_req.body, forward_model)
-            captured_req.body = new_body
-            # 更新 flow 的 body
-            flow.request.content = new_body.encode("utf-8")
-            # 记录原始和替换后的模型
-            captured_req.original_model = model_name
-            captured_req.overridden_model = forward_model
-        else:
-            captured_req.original_model = model_name
-            captured_req.overridden_model = model_name
+        prepared_body = self._prepare_forward_body(captured_req.body, forward_model, path)
+        if prepared_body != captured_req.body:
+            flow.request.content = prepared_body.encode("utf-8")
+        captured_req.body = prepared_body
+        captured_req.original_model = model_name
+        captured_req.overridden_model = forward_model or model_name
 
         # 根据上游配置决定是否注入客户端特征 headers；已由对应客户端发出的请求保持原样。
         if mapping.get("use_claude_features"):
@@ -813,9 +809,7 @@ class LLMRouterAddon:
         try:
             target_url = self._resolve_target_base_url(mapping)
             forward_model = mapping.get("forward_model", "")
-            req_body = captured_req.body
-            if forward_model:
-                req_body = self._replace_model_in_body(req_body, forward_model)
+            req_body = self._prepare_forward_body(captured_req.body, forward_model, path)
 
             normalized_path = self._normalize_path_for_base(target_url, path)
             new_url = self.capturer.rewrite_url(flow, target_url, normalized_path)
@@ -849,9 +843,7 @@ class LLMRouterAddon:
         client = self._get_http_client()
 
         try:
-            req_body = captured_req.body
-            if forward_model:
-                req_body = self._replace_model_in_body(req_body, forward_model)
+            req_body = self._prepare_forward_body(captured_req.body, forward_model, path)
 
             normalized_path = self._normalize_path_for_base(target_url, path)
             full_url = self.capturer.rewrite_url(flow, target_url, normalized_path)
@@ -919,9 +911,7 @@ class LLMRouterAddon:
 
             try:
                 # 准备请求 body
-                req_body = captured_req.body
-                if forward_model:
-                    req_body = self._replace_model_in_body(req_body, forward_model)
+                req_body = self._prepare_forward_body(captured_req.body, forward_model, path)
 
                 # 构建完整 URL
                 if self._is_kimi_cli_auth(route):
@@ -1058,9 +1048,7 @@ class LLMRouterAddon:
         api_key = route.get("api_key", "")
         forward_model = route.get("forward_model", "")
 
-        req_body = captured_req.body
-        if forward_model:
-            req_body = self._replace_model_in_body(req_body, forward_model)
+        req_body = self._prepare_forward_body(captured_req.body, forward_model, path)
 
         normalized_path = self._normalize_path_for_base(target_url, path) if self._is_kimi_cli_auth(route) else path
         new_url = self.capturer.rewrite_url(flow, target_url, normalized_path)
@@ -1685,6 +1673,61 @@ class LLMRouterAddon:
             return data.get("model")
         except (json.JSONDecodeError, AttributeError):
             return None
+
+    @staticmethod
+    def _assistant_content_has_tool_use(content) -> bool:
+        if not isinstance(content, list):
+            return False
+        return any(
+            isinstance(part, dict) and part.get("type") == "tool_use"
+            for part in content
+        )
+
+    @classmethod
+    def _normalize_kimi_tool_use_reasoning(cls, body: str, path: str) -> str:
+        """Kimi thinking 模式下，assistant/tool_use 消息必须显式带 reasoning_content。"""
+        if not body or not path.endswith("/messages"):
+            return body
+
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, AttributeError):
+            return body
+
+        if not isinstance(data, dict) or not isinstance(data.get("thinking"), dict):
+            return body
+
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return body
+
+        changed = False
+        normalized_messages = []
+        for msg in messages:
+            if (
+                isinstance(msg, dict)
+                and msg.get("role") == "assistant"
+                and cls._assistant_content_has_tool_use(msg.get("content"))
+                and not isinstance(msg.get("reasoning_content"), str)
+            ):
+                updated_msg = dict(msg)
+                updated_msg["reasoning_content"] = ""
+                normalized_messages.append(updated_msg)
+                changed = True
+                continue
+            normalized_messages.append(msg)
+
+        if not changed:
+            return body
+
+        data["messages"] = normalized_messages
+        return json.dumps(data, ensure_ascii=False)
+
+    def _prepare_forward_body(self, body: str, forward_model: str, path: str) -> str:
+        prepared_body = body
+        if forward_model:
+            prepared_body = self._replace_model_in_body(prepared_body, forward_model)
+        return self._normalize_kimi_tool_use_reasoning(prepared_body, path)
 
     def _replace_model_in_body(self, body: str, new_model: str) -> str:
         """替换请求 body 中的 model 字段"""

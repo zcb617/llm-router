@@ -2,6 +2,7 @@
 代理转发测试
 """
 import inspect
+import json
 import sys
 import threading
 import types
@@ -285,6 +286,46 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
     assert captured_req.overridden_model == "kimi-k2"
     assert "call_id" in flow.metadata
     assert id(flow) in addon._pending_requests
+
+
+def test_apply_single_upstream_kimi_cli_route_backfills_reasoning_content_for_tool_use_messages():
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow()
+    flow.request.content = json.dumps({
+        "model": "claude-opus",
+        "stream": True,
+        "thinking": {"type": "adaptive"},
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "先看结构"},
+                    {"type": "tool_use", "id": "tool_1", "name": "Glob", "input": {"pattern": "**/*"}},
+                ],
+            },
+        ],
+    }).encode("utf-8")
+    captured_req = _make_captured_request(flow)
+
+    addon._apply_single_upstream_kimi_cli_route(
+        flow,
+        {
+            "target_base_url": "https://api.kimi.com/",
+            "auth_mode": "kimi_cli_oauth",
+            "oauth_key": "oauth/kimi-code",
+            "oauth_host": "https://auth.kimi.com",
+            "api_key": "",
+            "forward_model": "kimi-k2",
+        },
+        captured_req,
+        "claude-opus",
+        "/v1/messages",
+    )
+
+    forwarded = json.loads(flow.request.content.decode("utf-8"))
+    assert forwarded["messages"][1]["reasoning_content"] == ""
+    assert forwarded["messages"][1]["content"][1]["type"] == "tool_use"
 
 
 def test_forward_single_upstream_kimi_cli_rewrites_url_and_syncs_flow():
