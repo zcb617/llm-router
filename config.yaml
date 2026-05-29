@@ -1,13 +1,13 @@
 proxy:
   listen_port: 38888
-  default_model: "kimi-for-coding"  # 指向 model_configs 表中的 model_key，模型配置请在控制台「模型配置」菜单中管理
+#  default_model: "kimi-for-coding"  # 指向 model_configs 表中的 model_key，模型配置请在控制台「模型配置」菜单中管理
   auto_retry_max_attempts: 2 # 仅针对 api_error(server internal) 的自动重试次数
 
 database:
   path: "./data/llm_calls.db"
-  postgresql:
-    host: "192.168.1.51"
-    port: 5432
-    user: "zhangcb"
-    password: "tmdysj"
-    dbname: "llm-router"
+#  postgresql:
+#    host: "192.168.1.51"
+#    port: 5432
+#    user: "zhangcb"
+#    password: "tmdysj"
+#    dbname: "llm-router"
