@@ -37,6 +37,7 @@ class LLMRouterAddon:
         "upgrade",
         "content-length",
         "authorization",
+        "x-api-key",
     }
 
     
@@ -450,8 +451,11 @@ class LLMRouterAddon:
 
         # === LLM 转发请求：验证 API Key ===
         auth_header = flow.request.headers.get("Authorization", "")
+        anthropic_api_key = flow.request.headers.get("X-Api-Key", "")
         if auth_header.startswith("Bearer "):
             user_api_key = auth_header[7:]
+        elif anthropic_api_key:
+            user_api_key = anthropic_api_key
         else:
             # 无 API Key，返回 401
             flow.response = http.Response.make(
