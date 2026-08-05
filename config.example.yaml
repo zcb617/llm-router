@@ -8,6 +8,7 @@ proxy:
   # call_save_queue_size: 5000               # 调用记录异步落库队列长度
   # call_save_workers: 2                     # 调用记录异步落库 worker 数量
   # stream_route_preconnect_timeout_ms: 800  # 多上游流式预探活超时（毫秒）
+  # codex_app_server_token:                  # codex_app_server_token
 
 database:
   path: "./data/llm_calls.db"
