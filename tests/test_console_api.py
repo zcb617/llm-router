@@ -281,6 +281,84 @@ def test_create_kimi_oauth_upstream_clears_api_key(monkeypatch):
     assert storage.created["use_roo_features"] is False
 
 
+def test_create_codex_upstream_preserves_user_url_and_token():
+    flow = DummyFlow("POST", {
+        "name": "codex",
+        "target_base_url": "ws://192.168.1.254:45001",
+        "api_key": "app-server-token",
+        "auth_mode": "codex",
+        "description": "remote codex",
+    })
+    storage = DummyUpstreamStorage()
+
+    handled = handle_console_api(flow, storage, "/api/upstreams")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.created["auth_mode"] == "codex"
+    assert storage.created["target_base_url"] == "ws://192.168.1.254:45001"
+    assert storage.created["api_key"] == "app-server-token"
+
+
+def test_codex_model_endpoint_returns_server_models(monkeypatch):
+    class CodexStorage(DummyUpstreamStorage):
+        def get_upstream(self, upstream_id):
+            return {
+                "id": upstream_id,
+                "target_base_url": "ws://127.0.0.1:45001",
+                "api_key": "app-server-token",
+                "auth_mode": "codex",
+            }
+
+    monkeypatch.setattr(
+        "src.codex_app_server.list_models_sync",
+        lambda url, token: [{"id": "gpt-5.5", "display_name": "GPT-5.5"}],
+    )
+    flow = DummyFlow("GET", {})
+    handled = handle_console_api(flow, CodexStorage(), "/api/upstreams/7/codex-models")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert payload["models"][0]["id"] == "gpt-5.5"
+    assert "app-server-token" not in json.dumps(payload)
+
+
+def test_create_codex_model_rejects_forward_model_not_supported_by_server(monkeypatch):
+    class CodexModelStorage(DummyUpstreamStorage):
+        def get_upstream(self, upstream_id):
+            return {
+                "id": upstream_id,
+                "target_base_url": "ws://127.0.0.1:45001",
+                "api_key": "app-server-token",
+                "auth_mode": "codex",
+            }
+
+        def create_model_config_with_routes(self, **kwargs):
+            self.created_model = kwargs
+            return 1
+
+    monkeypatch.setattr(
+        "src.codex_app_server.list_models_sync",
+        lambda url, token: [{"id": "gpt-5.5"}],
+    )
+    flow = DummyFlow("POST", {
+        "model_key": "codex-main",
+        "upstream_id": 7,
+        "forward_model": "not-supported",
+        "use_multi_upstream": False,
+    })
+    storage = CodexModelStorage()
+
+    handled = handle_console_api(flow, storage, "/api/models")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert "不受当前 Codex App Server 支持" in payload["error"]
+    assert not hasattr(storage, "created_model")
+
+
 def test_update_kimi_oauth_upstream_forces_api_key_empty(monkeypatch):
     monkeypatch.delenv("KIMI_CODE_BASE_URL", raising=False)
     flow = DummyFlow("PUT", {

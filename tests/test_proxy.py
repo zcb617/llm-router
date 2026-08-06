@@ -288,6 +288,97 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
     assert id(flow) in addon._pending_requests
 
 
+def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():
+    addon = _make_addon_for_route_tests()
+    addon._codex_bridge_url = "http://127.0.0.1:45678"
+    addon._codex_bridge_token = "bridge-secret"
+    flow = _make_flow()
+    flow.request.content = json.dumps({
+        "model": "router-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": True,
+    }).encode("utf-8")
+    captured_req = _make_captured_request(flow)
+
+    addon._apply_codex_route(
+        flow,
+        {
+            "upstream_id": 42,
+            "target_base_url": "ws://192.168.1.254:45001",
+            "auth_mode": "codex",
+            "api_key": "app-server-token",
+            "forward_model": "gpt-5.5",
+        },
+        captured_req,
+        "router-model",
+        "/v1/chat/completions",
+    )
+
+    assert flow.request.url == "http://127.0.0.1:45678/codex?beta=true"
+    assert flow.request.headers["Host"] == "127.0.0.1:45678"
+    assert flow.request.headers["X-LLM-Router-Codex-Bridge-Token"] == "bridge-secret"
+    assert flow.request.headers["X-LLM-Router-Codex-Upstream-Id"] == "42"
+    assert "Authorization" not in flow.request.headers
+    assert b'"model": "gpt-5.5"' in flow.request.content
+    assert flow.request.headers["Content-Length"] == str(len(flow.request.content))
+    assert captured_req.overridden_model == "gpt-5.5"
+    assert flow.metadata["codex_route"] is True
+    assert id(flow) in addon._pending_requests
+
+
+def test_load_model_configs_keeps_single_upstream_id_for_codex():
+    addon = _make_addon_for_route_tests()
+
+    class Storage:
+        def get_all_model_configs(self):
+            return [{
+                "id": 1,
+                "model_key": "codex-main",
+                "upstream_id": 42,
+                "target_base_url": "ws://192.168.1.254:45001",
+                "api_key": "app-server-token",
+                "auth_mode": "codex",
+                "forward_model": "gpt-5.5",
+                "is_active": True,
+                "is_default": False,
+                "use_multi_upstream": False,
+            }]
+
+        def get_all_model_routes(self):
+            return []
+
+    addon._external_storage = Storage()
+    addon._storage = None
+    addon._load_model_configs()
+
+    assert addon._model_cache["codex-main"]["upstream_id"] == 42
+
+
+def test_codex_route_rejects_non_chat_completions_path():
+    addon = _make_addon_for_route_tests()
+    addon._codex_bridge_url = "http://127.0.0.1:45678"
+    addon._codex_bridge_token = "bridge-secret"
+    flow = _make_flow()
+    captured_req = _make_captured_request(flow)
+
+    addon._apply_codex_route(
+        flow,
+        {
+            "upstream_id": 42,
+            "target_base_url": "ws://192.168.1.254:45001",
+            "auth_mode": "codex",
+            "forward_model": "gpt-5.5",
+        },
+        captured_req,
+        "router-model",
+        "/v1/responses",
+    )
+
+    assert flow.response["status"] == 400
+    assert flow.metadata["local_response"] is True
+    assert id(flow) not in addon._pending_requests
+
+
 def test_apply_single_upstream_kimi_cli_route_drops_thinking_when_tool_use_history_lacks_thinking_block():
     addon = _make_addon_for_route_tests()
     flow = _make_flow()

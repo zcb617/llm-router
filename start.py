@@ -46,13 +46,21 @@ async def run_proxy(config, storage):
     """运行代理服务器"""
     from mitmproxy.options import Options
     from mitmproxy.tools.dump import DumpMaster
+    from src.codex_app_server import CodexBridgeServer
 
     options = Options()
     options.set(f"listen_port={config.proxy.listen_port}", f"mode=regular")
 
     master = DumpMaster(options)
+    codex_bridge = CodexBridgeServer(storage)
+    codex_bridge_url = await codex_bridge.start()
 
-    addon = create_addon(config, storage)
+    addon = create_addon(
+        config,
+        storage,
+        codex_bridge_url=codex_bridge_url,
+        codex_bridge_token=codex_bridge.bridge_token,
+    )
     master.addons.add(addon)
 
     try:
@@ -60,6 +68,8 @@ async def run_proxy(config, storage):
     except KeyboardInterrupt:
         print("\nShutting down...")
         master.shutdown()
+    finally:
+        await codex_bridge.stop()
 
 
 def main():

@@ -84,7 +84,7 @@
   <!-- Top Header -->
   <header class="bg-white dark:bg-zinc-900 border-b border-zinc-300 dark:border-zinc-700 px-4 py-3 flex items-center justify-between flex-shrink-0">
     <div class="flex items-center gap-5">
-      <h1 class="text-lg font-bold">LLM Router<span class="ml-2 text-xs font-normal text-zinc-400 dark:text-zinc-500">v0.0.2</span></h1>
+      <h1 class="text-lg font-bold">LLM Router<span class="ml-2 text-xs font-normal text-zinc-400 dark:text-zinc-500">v0.0.3</span></h1>
       <nav class="flex items-center gap-1 text-sm">
         <a href="/web/console.html" class="top-nav-link active">控制台</a>
         <a href="/web/model-square.html" class="top-nav-link">模型广场</a>
@@ -570,6 +570,7 @@
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
             <option value="api_key">API Key</option>
             <option value="kimi_cli_oauth">kimi-cli auth（专用通道）</option>
+            <option value="codex">codex（App Server）</option>
           </select>
         </div>
         <div id="upstreamApiKeyWrap">
@@ -649,10 +650,18 @@
                 class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
             </div>
           </div>
-          <div class="mt-3">
+          <div id="modelForwardModelInputWrap" class="mt-3">
             <label class="block text-sm font-medium mb-1">转发模型名称</label>
             <input id="modelForwardModel" type="text" placeholder="如：claude-sonnet-4-5（留空则不替换）"
               class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div id="modelForwardModelSelectWrap" class="mt-3 hidden">
+            <label class="block text-sm font-medium mb-1">转发模型名称</label>
+            <select id="modelForwardModelSelect" disabled
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="">请先选择 codex 上游并加载模型</option>
+            </select>
+            <div id="modelForwardModelStatus" class="mt-1 text-xs text-zinc-500"></div>
           </div>
           <div class="mt-3">
             <label class="block text-sm font-medium mb-1">协议转换器</label>
@@ -1630,6 +1639,8 @@ function renderUpstreams() {
     const displayBaseUrl = authMode === 'kimi_cli_oauth' ? '-' : (u.target_base_url || '-');
     const authBadge = authMode === 'kimi_cli_oauth'
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">kimi-cli auth</span>'
+      : authMode === 'codex'
+      ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300">codex</span>'
       : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">api_key</span>';
     const claudeBadge = u.use_claude_features
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">已启用</span>'
@@ -1963,6 +1974,72 @@ function makeUpstreamOption(u, selectedId) {
   return `<option value="${u.id}"${sel}>${u.name} (${u.target_base_url})</option>`;
 }
 
+function getSelectedModelUpstream() {
+  const upstreamId = document.getElementById('modelUpstreamSelect').value;
+  return allUpstreamsCache.find(u => String(u.id) === String(upstreamId)) || null;
+}
+
+function setForwardModelValue(value) {
+  const modelValue = value || '';
+  document.getElementById('modelForwardModel').value = modelValue;
+  document.getElementById('modelForwardModelSelect').value = modelValue;
+}
+
+function syncForwardModelFields() {
+  const upstream = getSelectedModelUpstream();
+  const isCodex = !document.getElementById('modelUseMultiUpstream').checked
+    && upstream && (upstream.auth_mode || 'api_key') === 'codex';
+  const inputWrap = document.getElementById('modelForwardModelInputWrap');
+  const selectWrap = document.getElementById('modelForwardModelSelectWrap');
+  inputWrap.classList.toggle('hidden', !!isCodex);
+  selectWrap.classList.toggle('hidden', !isCodex);
+  if (!isCodex) {
+    document.getElementById('modelForwardModelStatus').textContent = '';
+  }
+  return !!isCodex;
+}
+
+let codexModelRequestSequence = 0;
+
+async function loadCodexModelsForUpstream(upstreamId, selectedModel = '') {
+  const select = document.getElementById('modelForwardModelSelect');
+  const status = document.getElementById('modelForwardModelStatus');
+  const requestSequence = ++codexModelRequestSequence;
+  const isCurrentRequest = () => requestSequence === codexModelRequestSequence
+    && String(document.getElementById('modelUpstreamSelect').value) === String(upstreamId)
+    && !document.getElementById('modelUseMultiUpstream').checked;
+  select.disabled = true;
+  select.innerHTML = '<option value="">正在读取 Codex App Server 模型...</option>';
+  status.textContent = '正在读取当前服务器支持的模型';
+  status.className = 'mt-1 text-xs text-zinc-500';
+  try {
+    const res = await fetch(`/api/upstreams/${upstreamId}/codex-models`, { headers: getAuthHeaders() });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '模型列表获取失败');
+    if (!isCurrentRequest()) return;
+    const models = data.models || [];
+    select.innerHTML = '<option value="">-- 选择 Codex 模型 --</option>';
+    models.forEach(model => {
+      const id = model.id || model.model || '';
+      if (!id) return;
+      const displayName = model.display_name && model.display_name !== id
+        ? `${model.display_name} (${id})`
+        : id;
+      select.innerHTML += `<option value="${id}">${displayName}</option>`;
+    });
+    select.value = selectedModel || '';
+    select.disabled = models.length === 0;
+    status.textContent = models.length ? `已加载 ${models.length} 个可用模型` : '当前 App Server 没有可用模型';
+    status.className = 'mt-1 text-xs ' + (models.length ? 'text-green-600' : 'text-red-500');
+  } catch (e) {
+    if (!isCurrentRequest()) return;
+    select.innerHTML = '<option value="">模型列表加载失败</option>';
+    select.disabled = true;
+    status.textContent = '加载失败: ' + e.message;
+    status.className = 'mt-1 text-xs text-red-500';
+  }
+}
+
 function renderRoutesList() {
   const container = document.getElementById('routesList');
   if (editingRoutes.length === 0) {
@@ -2081,13 +2158,13 @@ function renderModels() {
         document.getElementById('modelEditTitle').textContent = '编辑模型配置';
         document.getElementById('modelKey').value = cfg.model_key;
         document.getElementById('modelUpstreamSelect').value = cfg.upstream_id || '';
-        onUpstreamChange();
-        document.getElementById('modelForwardModel').value = cfg.forward_model || '';
         document.getElementById('modelProtocolConverter').value = cfg.protocol_converter || '';
         document.getElementById('modelIsActive').checked = cfg.is_active;
         document.getElementById('modelIsDefault').checked = cfg.is_default;
         const multi = cfg.use_multi_upstream;
         document.getElementById('modelUseMultiUpstream').checked = multi;
+        await onUpstreamChange(cfg.forward_model || '');
+        setForwardModelValue(cfg.forward_model || '');
         onMultiUpstreamChange();
         // 多上游模式：加载路由
         if (multi) {
@@ -2128,7 +2205,8 @@ function renderModels() {
 }
 
 // 上游选择改变时自动填充 URL 和 Key
-function onUpstreamChange() {
+async function onUpstreamChange(selectedModel = '') {
+  codexModelRequestSequence += 1;
   const select = document.getElementById('modelUpstreamSelect');
   const option = select.options[select.selectedIndex];
   const directFields = document.getElementById('modelDirectFields');
@@ -2143,13 +2221,19 @@ function onUpstreamChange() {
     document.getElementById('modelApiKey').value = '';
     directFields.style.display = 'block';
   }
+  const isCodex = syncForwardModelFields();
+  if (isCodex) {
+    await loadCodexModelsForUpstream(select.value, selectedModel || document.getElementById('modelForwardModel').value);
+  }
 }
 
 // 多上游模式切换
 function onMultiUpstreamChange() {
+  codexModelRequestSequence += 1;
   const multi = document.getElementById('modelUseMultiUpstream').checked;
   document.getElementById('modelSingleFields').style.display = multi ? 'none' : 'block';
   document.getElementById('modelMultiFields').style.display = multi ? 'block' : 'none';
+  syncForwardModelFields();
   if (multi && editingRoutes.length === 0) {
     editingRoutes = [{ upstream_id: null, forward_model: '', protocol_converter: '', sort_order: 0 }];
     renderRoutesList();
@@ -2183,7 +2267,7 @@ document.getElementById('createModelBtn').addEventListener('click', () => {
   document.getElementById('modelUseMultiUpstream').checked = false;
   onUpstreamChange();
   onMultiUpstreamChange();
-  document.getElementById('modelForwardModel').value = '';
+  setForwardModelValue('');
   document.getElementById('modelProtocolConverter').value = '';
   document.getElementById('modelIsActive').checked = true;
   document.getElementById('modelIsDefault').checked = false;
@@ -2209,11 +2293,16 @@ document.getElementById('submitModelEdit').addEventListener('click', async (even
     const upstreamId = document.getElementById('modelUpstreamSelect').value;
     const targetBaseUrl = document.getElementById('modelBaseUrl').value.trim();
     const apiKey = document.getElementById('modelApiKey').value;
-    const forwardModel = document.getElementById('modelForwardModel').value.trim();
+    const useMultiUpstream = document.getElementById('modelUseMultiUpstream').checked;
+    const selectedUpstream = getSelectedModelUpstream();
+    const isCodexUpstream = !useMultiUpstream && selectedUpstream
+      && (selectedUpstream.auth_mode || 'api_key') === 'codex';
+    const forwardModel = (isCodexUpstream
+      ? document.getElementById('modelForwardModelSelect').value
+      : document.getElementById('modelForwardModel').value).trim();
     const protocolConverter = document.getElementById('modelProtocolConverter').value || null;
     const isActive = document.getElementById('modelIsActive').checked;
     const isDefault = document.getElementById('modelIsDefault').checked;
-    const useMultiUpstream = document.getElementById('modelUseMultiUpstream').checked;
 
     if (!modelKey) {
       document.getElementById('modelEditError').textContent = '模型标识不能为空';
@@ -2222,6 +2311,11 @@ document.getElementById('submitModelEdit').addEventListener('click', async (even
     }
     if (!useMultiUpstream && !upstreamId && !targetBaseUrl) {
       document.getElementById('modelEditError').textContent = '请选择上游或填写目标 URL';
+      document.getElementById('modelEditError').classList.remove('hidden');
+      return;
+    }
+    if (isCodexUpstream && !forwardModel) {
+      document.getElementById('modelEditError').textContent = '请选择当前 Codex App Server 支持的转发模型';
       document.getElementById('modelEditError').classList.remove('hidden');
       return;
     }

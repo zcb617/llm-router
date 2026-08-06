@@ -41,7 +41,7 @@ class LLMRouterAddon:
     }
 
     
-    def __init__(self, config=None, storage=None):
+    def __init__(self, config=None, storage=None, codex_bridge_url=None, codex_bridge_token=None):
         self._external_storage = storage  # 从外部传入的 storage（已初始化数据库表）
         # 延迟导入避免循环依赖
         if config is None:
@@ -86,6 +86,8 @@ class LLMRouterAddon:
             )
 
         self.config = config
+        self._codex_bridge_url = (codex_bridge_url or "").rstrip("/")
+        self._codex_bridge_token = codex_bridge_token or ""
 
         # 模型配置缓存（从数据库加载）
         self._model_cache = {}  # model_key -> {target_base_url, api_key, forward_model}  or {multi_upstream: True, routes: [...]}
@@ -195,6 +197,10 @@ class LLMRouterAddon:
 
     def _is_kimi_cli_auth(self, cfg: dict) -> bool:
         return self._kimi_cli_auth.is_kimi_cli_auth(cfg or {})
+
+    @staticmethod
+    def _is_codex_auth(cfg: dict) -> bool:
+        return (cfg or {}).get("auth_mode") == "codex"
 
     def _resolve_target_base_url(self, cfg: dict) -> str:
         if self._is_kimi_cli_auth(cfg):
@@ -381,6 +387,7 @@ class LLMRouterAddon:
                             continue
 
                         self._model_cache[mk] = {
+                            "upstream_id": cfg.get("upstream_id"),
                             "target_base_url": target_base_url,
                             "api_key": api_key,
                             "auth_mode": auth_mode,
@@ -525,6 +532,13 @@ class LLMRouterAddon:
         flow.metadata["original_model"] = model_name
         flow.metadata["overridden_model"] = mapping.get("forward_model", "") or model_name
         self._set_claude_code_feature_flag(flow, flow.request.headers)
+
+        # Codex App Server 使用独立的 loopback HTTP bridge。先于 Responses API
+        # 转换和普通 HTTP URL 改写分流，避免把 ws:// 地址交给 mitmproxy HTTP
+        # 上游处理器。
+        if self._is_codex_auth(mapping):
+            self._apply_codex_route(flow, mapping, captured_req, model_name, path)
+            return
 
         # 判断是否为 Responses API 请求（支持 /v1/responses 和 /responses）
         is_responses_api = path == "/v1/responses" or path == "/responses"
@@ -773,6 +787,12 @@ class LLMRouterAddon:
 
         last_error = "pre-connect failed"
         for route in candidate_routes:
+            if self._is_codex_auth(route):
+                logger.warning(
+                    "Codex upstream %s is not supported in multi-upstream mode; skipping",
+                    route.get("upstream_id"),
+                )
+                continue
             target_url = self._resolve_target_base_url(route)
             if self._is_route_reachable(target_url):
                 try:
@@ -905,6 +925,12 @@ class LLMRouterAddon:
         client = self._get_http_client()
 
         for route in candidate_routes:
+            if self._is_codex_auth(route):
+                logger.warning(
+                    "Codex upstream %s is not supported in multi-upstream mode; skipping",
+                    route.get("upstream_id"),
+                )
+                continue
             upstream_id = route["upstream_id"]
             health = route.get("health_status", "healthy")
             target_url = self._resolve_target_base_url(route)
@@ -1088,6 +1114,65 @@ class LLMRouterAddon:
         self._store_pending_request(flow, captured_req)
         flow.metadata["multi_upstream_id"] = upstream_id
 
+    def _apply_codex_route(self, flow, mapping, captured_req, model_name, path):
+        """把单上游 Codex 请求改写到内部 HTTP bridge。"""
+        if path not in ("/v1/chat/completions", "/chat/completions"):
+            flow.response = http.Response.make(
+                400,
+                json.dumps(
+                    {"error": "Codex 上游当前仅支持 OpenAI Chat Completions 接口"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            flow.metadata["local_response"] = True
+            return
+
+        if not self._codex_bridge_url or not self._codex_bridge_token:
+            flow.response = http.Response.make(
+                503,
+                json.dumps({"error": "Codex App Server bridge is not available"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            flow.metadata["local_response"] = True
+            return
+
+        forward_model = (mapping.get("forward_model") or "").strip()
+        if not forward_model:
+            flow.response = http.Response.make(
+                400,
+                json.dumps({"error": "Codex upstream requires a forwarding model"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            flow.metadata["local_response"] = True
+            return
+
+        prepared_body = self._prepare_forward_body(captured_req.body, forward_model, path)
+        req_headers = self._build_upstream_headers(flow.request.headers)
+        req_headers["Content-Type"] = "application/json"
+        req_headers["X-LLM-Router-Codex-Bridge-Token"] = self._codex_bridge_token
+        req_headers["X-LLM-Router-Codex-Upstream-Id"] = str(mapping.get("upstream_id") or "")
+        self._apply_ordered_headers_to_flow(flow, list(req_headers.items()))
+
+        bridge_url = self.capturer.rewrite_url(flow, self._codex_bridge_url, "/codex")
+        parsed_bridge_url = urlparse(bridge_url)
+        if parsed_bridge_url.netloc:
+            flow.request.headers["Host"] = parsed_bridge_url.netloc
+        if prepared_body is not None:
+            request_content = prepared_body.encode("utf-8") if isinstance(prepared_body, str) else prepared_body
+            flow.request.content = request_content
+            flow.request.headers["Content-Length"] = str(len(request_content))
+        captured_req.body = prepared_body
+        captured_req.original_model = model_name
+        captured_req.overridden_model = forward_model
+        # 记录远程 App Server 地址，避免调用记录显示内部临时 bridge 地址。
+        captured_req.url = mapping.get("target_base_url") or bridge_url
+        captured_req.call_id = str(uuid.uuid4())
+        flow.metadata["call_id"] = captured_req.call_id
+        flow.metadata["codex_route"] = True
+        flow.metadata["codex_upstream_id"] = mapping.get("upstream_id")
+        self._store_pending_request(flow, captured_req)
+
     @classmethod
     def _build_upstream_headers(cls, headers, api_key: str = "") -> dict:
         """构造发往真实上游的请求头，避免透传反向代理和路由器认证头。"""
@@ -1156,6 +1241,8 @@ class LLMRouterAddon:
 
     def _build_health_check_requests(self, target_base_url: str, model_info: dict) -> list[tuple[str, str, dict]]:
         """基于模型配置和匹配上游构造健康检查候选请求。"""
+        if self._is_codex_auth(model_info):
+            return []
         if self._is_kimi_cli_auth(model_info):
             target_base_url = KIMI_CLI_OAUTH_BASE_URL
 
@@ -1639,6 +1726,18 @@ class LLMRouterAddon:
             if self._is_kimi_cli_auth(model_info):
                 target_url = KIMI_CLI_OAUTH_BASE_URL
             if not target_url:
+                continue
+
+            if self._is_codex_auth(model_info):
+                try:
+                    from src.codex_app_server import list_models_sync
+
+                    list_models_sync(target_url, model_info.get("api_key") or "")
+                    self.storage.reset_upstream_health(upstream_id)
+                    self.reload_model_configs()
+                    logger.info("Health check: Codex upstream %s recovered", upstream_name)
+                except Exception as exc:
+                    logger.info("Health check: Codex upstream %s still unreachable: %s", upstream_name, exc)
                 continue
 
             recovered = False
@@ -2382,6 +2481,6 @@ addons = [LLMRouterAddon()]
 
 
 
-def create_addon(config, storage=None) -> LLMRouterAddon:
+def create_addon(config, storage=None, codex_bridge_url=None, codex_bridge_token=None) -> LLMRouterAddon:
     """创建addon实例（供start.py调用）"""
-    return LLMRouterAddon(config, storage)
+    return LLMRouterAddon(config, storage, codex_bridge_url, codex_bridge_token)

@@ -19,6 +19,7 @@ from src.kimi_cli_auth import (
 
 _MODEL_CONFIG_PATH_RE = re.compile(r'^/api/models/(\d+)$')
 _MODEL_ROUTE_PATH_RE = re.compile(r'^/api/models/(\d+)/routes/(\d+)$')
+_CODEX_MODEL_PATH_RE = re.compile(r'^/api/upstreams/(\d+)/codex-models$')
 
 
 def _match_model_config_path(path: str):
@@ -123,6 +124,51 @@ def _validate_model_config_target(upstream_id, target_base_url: str, use_multi_u
 
 def _default_kimi_oauth_base_url() -> str:
     return KIMI_CLI_OAUTH_BASE_URL
+
+
+def _get_upstream_for_validation(storage, upstream_id):
+    """读取模型保存时需要的上游认证方式；兼容轻量测试存储。"""
+    if not upstream_id or not hasattr(storage, "get_upstream"):
+        return None
+    try:
+        return storage.get_upstream(int(upstream_id))
+    except (TypeError, ValueError):
+        return None
+
+
+def _validate_codex_forward_model(storage, upstream_id, forward_model: str) -> Optional[str]:
+    """校验 Codex 转发模型确实存在于当前 App Server。"""
+    upstream = _get_upstream_for_validation(storage, upstream_id)
+    if not upstream or (upstream.get("auth_mode") or "api_key") != "codex":
+        return None
+    if not forward_model:
+        return "Codex 上游必须选择转发模型"
+    try:
+        from src.codex_app_server import list_models_sync
+
+        models = list_models_sync(upstream.get("target_base_url") or "", upstream.get("api_key") or "")
+    except Exception as exc:
+        return f"无法获取 Codex App Server 模型列表: {exc}"
+
+    supported = {
+        str(model.get("id") or model.get("model"))
+        for model in models
+        if isinstance(model, dict) and (model.get("id") or model.get("model"))
+    }
+    if forward_model not in supported:
+        return f"转发模型不受当前 Codex App Server 支持: {forward_model}"
+    return None
+
+
+def _validate_no_codex_routes(storage, routes: list) -> Optional[str]:
+    """第一阶段保持多上游原有 HTTP 故障转移语义，不接受 Codex 路由。"""
+    if not hasattr(storage, "get_upstream"):
+        return None
+    for route in routes or []:
+        upstream = _get_upstream_for_validation(storage, route.get("upstream_id"))
+        if upstream and (upstream.get("auth_mode") or "api_key") == "codex":
+            return "当前版本 Codex 上游仅支持单上游模式"
+    return None
 
 
 def _extract_model_routes(body: dict) -> tuple[list, Optional[str]]:
@@ -513,6 +559,26 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 500, {"error": f"检测失败: {e}"})
         return True
 
+    # GET /api/upstreams/{id}/codex-models - 查询当前 Codex App Server 模型
+    codex_model_match = _CODEX_MODEL_PATH_RE.match(path)
+    if codex_model_match and flow.request.method == "GET":
+        upstream_id = int(codex_model_match.group(1))
+        upstream = _get_upstream_for_validation(storage, upstream_id)
+        if not upstream:
+            _json_response(flow, 404, {"error": "上游不存在"})
+            return True
+        if (upstream.get("auth_mode") or "api_key") != "codex":
+            _json_response(flow, 400, {"error": "该上游不是 codex 认证方式"})
+            return True
+        try:
+            from src.codex_app_server import list_models_sync
+
+            models = list_models_sync(upstream.get("target_base_url") or "", upstream.get("api_key") or "")
+            _json_response(flow, 200, {"upstream_id": upstream_id, "models": models})
+        except Exception as exc:
+            _json_response(flow, 502, {"error": f"获取 Codex App Server 模型列表失败: {exc}"})
+        return True
+
     # GET /api/upstreams/{id} - 获取单个上游（返回完整 api_key）
     if path.startswith("/api/upstreams/") and flow.request.method == "GET":
         try:
@@ -545,8 +611,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         oauth_key = (body.get("oauth_key") or KIMI_DEFAULT_OAUTH_KEY).strip()
         oauth_host = (body.get("oauth_host") or KIMI_DEFAULT_OAUTH_HOST).strip()
 
-        if auth_mode not in ("api_key", "kimi_cli_oauth"):
-            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key 或 kimi_cli_oauth"})
+        if auth_mode not in ("api_key", "kimi_cli_oauth", "codex"):
+            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth 或 codex"})
             return True
         if auth_mode == "kimi_cli_oauth":
             api_key = ""
@@ -596,8 +662,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         auth_mode = body.get("auth_mode")
         if isinstance(auth_mode, str):
             auth_mode = auth_mode.strip()
-        if auth_mode is not None and auth_mode not in ("api_key", "kimi_cli_oauth"):
-            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key 或 kimi_cli_oauth"})
+        if auth_mode is not None and auth_mode not in ("api_key", "kimi_cli_oauth", "codex"):
+            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth 或 codex"})
             return True
 
         effective_auth_mode = auth_mode if auth_mode is not None else (existing.get("auth_mode") or "api_key")
@@ -717,6 +783,14 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         if use_multi_upstream and not routes:
             _json_response(flow, 400, {"error": "多上游模式至少需要一个路由"})
             return True
+        route_auth_error = _validate_no_codex_routes(storage, routes) if use_multi_upstream else None
+        if route_auth_error:
+            _json_response(flow, 400, {"error": route_auth_error})
+            return True
+        codex_model_error = _validate_codex_forward_model(storage, upstream_id, forward_model)
+        if codex_model_error:
+            _json_response(flow, 400, {"error": codex_model_error})
+            return True
         if use_multi_upstream:
             upstream_id = None
             target_base_url = ""
@@ -782,6 +856,14 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
         if use_multi_upstream and "routes" in body and not routes:
             _json_response(flow, 400, {"error": "多上游模式至少需要一个路由"})
+            return True
+        route_auth_error = _validate_no_codex_routes(storage, routes) if use_multi_upstream else None
+        if route_auth_error:
+            _json_response(flow, 400, {"error": route_auth_error})
+            return True
+        codex_model_error = _validate_codex_forward_model(storage, upstream_id, forward_model)
+        if codex_model_error:
+            _json_response(flow, 400, {"error": codex_model_error})
             return True
 
         # 如果选择了上游，模型配置自身不保存直连 url/key（以上游为准）。
@@ -876,6 +958,11 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "upstream_id 不能为空"})
             return True
 
+        upstream = _get_upstream_for_validation(storage, upstream_id)
+        if upstream and (upstream.get("auth_mode") or "api_key") == "codex":
+            _json_response(flow, 400, {"error": "当前版本 Codex 上游仅支持单上游模式"})
+            return True
+
         route_id = storage.create_model_route(config_id, upstream_id, forward_model, protocol_converter, sort_order)
         if addon:
             addon.reload_model_configs()
@@ -891,6 +978,11 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         body = _extract_body(flow)
         if not body:
             _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+
+        upstream = _get_upstream_for_validation(storage, body.get("upstream_id"))
+        if upstream and (upstream.get("auth_mode") or "api_key") == "codex":
+            _json_response(flow, 400, {"error": "当前版本 Codex 上游仅支持单上游模式"})
             return True
 
         updated = storage.update_model_route(
