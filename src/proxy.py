@@ -433,6 +433,22 @@ class LLMRouterAddon:
             return self._model_cache[self._default_model_key], True
         
         return None, False
+
+    def _build_models_response(self) -> dict:
+        """构建 OpenAI 兼容的模型列表响应。"""
+        data = [
+            {
+                "id": model_key,
+                "object": "model",
+                "created": 0,
+                "owned_by": "llm-router",
+                "permission": [],
+                "root": model_key,
+                "parent": None,
+            }
+            for model_key in sorted(self._model_cache)
+        ]
+        return {"object": "list", "data": data}
     
     def load(self, loader: Loader):
         """加载addon"""
@@ -485,6 +501,17 @@ class LLMRouterAddon:
         # 存储用户信息到 flow.metadata，供 response() 使用
         flow.metadata["user_id"] = key_info["user_id"]
         flow.metadata["api_key_id"] = key_info["id"]
+
+        # === OpenAI 兼容模型列表接口 ===
+        request_path = urlparse(flow.request.url).path
+        if flow.request.method == "GET" and request_path == "/v1/models":
+            flow.response = http.Response.make(
+                200,
+                json.dumps(self._build_models_response(), ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
+            flow.metadata["local_response"] = True
+            return
 
         # 捕获请求数据
         captured_req = self.capturer.capture_request(flow)

@@ -1,6 +1,7 @@
 """
 代理转发测试
 """
+import asyncio
 import inspect
 import json
 import sys
@@ -129,6 +130,58 @@ def test_stream_request_detection():
     assert LLMRouterAddon._is_stream_request('{"stream": true}')
     assert not LLMRouterAddon._is_stream_request('{"stream": false}')
     assert not LLMRouterAddon._is_stream_request("not json")
+
+
+def test_build_models_response_uses_sorted_routable_model_keys():
+    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon._model_cache = {
+        "z-model": {"target_base_url": "https://z.example.com"},
+        "a-model": {"target_base_url": "https://a.example.com"},
+    }
+
+    response = addon._build_models_response()
+
+    assert response["object"] == "list"
+    assert [model["id"] for model in response["data"]] == ["a-model", "z-model"]
+    assert response["data"][0] == {
+        "id": "a-model",
+        "object": "model",
+        "created": 0,
+        "owned_by": "llm-router",
+        "permission": [],
+        "root": "a-model",
+        "parent": None,
+    }
+
+
+def test_request_models_returns_openai_compatible_list_without_forwarding():
+    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon._model_cache = {"router-model": {}}
+    addon._verify_api_key_cached = lambda _api_key: {"id": 1, "user_id": 2}
+    flow = _make_flow()
+    flow.request.url = "http://router.test/v1/models?available=true"
+    flow.request.path = "/v1/models?available=true"
+    flow.request.method = "GET"
+    flow.request.content = b""
+
+    asyncio.run(addon.request(flow))
+
+    assert flow.response["status"] == 200
+    assert json.loads(flow.response["content"].decode("utf-8")) == {
+        "object": "list",
+        "data": [
+            {
+                "id": "router-model",
+                "object": "model",
+                "created": 0,
+                "owned_by": "llm-router",
+                "permission": [],
+                "root": "router-model",
+                "parent": None,
+            }
+        ],
+    }
+    assert flow.metadata["local_response"] is True
 
 
 def test_apply_multi_upstream_route_rewrites_flow_for_native_proxy():
