@@ -472,6 +472,17 @@ class LLMRouterAddon:
             await asyncio.to_thread(self._handle_local_api, flow)
             return
 
+        # === OpenAI 兼容模型列表接口（公开访问） ===
+        request_path = urlparse(flow.request.url).path
+        if flow.request.method == "GET" and request_path == "/v1/models":
+            flow.response = http.Response.make(
+                200,
+                json.dumps(self._build_models_response(), ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
+            flow.metadata["local_response"] = True
+            return
+
         # === LLM 转发请求：验证 API Key ===
         auth_header = flow.request.headers.get("Authorization", "")
         anthropic_api_key = flow.request.headers.get("X-Api-Key", "")
@@ -501,17 +512,6 @@ class LLMRouterAddon:
         # 存储用户信息到 flow.metadata，供 response() 使用
         flow.metadata["user_id"] = key_info["user_id"]
         flow.metadata["api_key_id"] = key_info["id"]
-
-        # === OpenAI 兼容模型列表接口 ===
-        request_path = urlparse(flow.request.url).path
-        if flow.request.method == "GET" and request_path == "/v1/models":
-            flow.response = http.Response.make(
-                200,
-                json.dumps(self._build_models_response(), ensure_ascii=False).encode("utf-8"),
-                {"Content-Type": "application/json; charset=utf-8"},
-            )
-            flow.metadata["local_response"] = True
-            return
 
         # 捕获请求数据
         captured_req = self.capturer.capture_request(flow)

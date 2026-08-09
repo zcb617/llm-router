@@ -157,11 +157,16 @@ def test_build_models_response_uses_sorted_routable_model_keys():
 def test_request_models_returns_openai_compatible_list_without_forwarding():
     addon = LLMRouterAddon.__new__(LLMRouterAddon)
     addon._model_cache = {"router-model": {}}
-    addon._verify_api_key_cached = lambda _api_key: {"id": 1, "user_id": 2}
+
+    def unexpected_api_key_verification(_api_key):
+        raise AssertionError("/v1/models should not verify an API key")
+
+    addon._verify_api_key_cached = unexpected_api_key_verification
     flow = _make_flow()
     flow.request.url = "http://router.test/v1/models?available=true"
     flow.request.path = "/v1/models?available=true"
     flow.request.method = "GET"
+    flow.request.headers.pop("Authorization")
     flow.request.content = b""
 
     asyncio.run(addon.request(flow))
