@@ -401,30 +401,35 @@ class CodexCliAuthManager:
         }
 
 
-# ChatGPT Codex backend rejects these (not in Codex ResponsesApiRequest).
-_CODEX_UNSUPPORTED_BODY_KEYS = frozenset({
-    "max_output_tokens",
-    "max_tokens",
-    "temperature",
-    "top_p",
-    "top_k",
-    "n",
-    "presence_penalty",
-    "frequency_penalty",
-    "logit_bias",
-    "logprobs",
-    "top_logprobs",
-    "user",
-    "seed",
-    "stop",
-    "response_format",
-    "messages",  # chat-only; already converted when present
-    "previous_response_id",  # not used by codex path the same way
+# Allowlist from Codex CLI source:
+#   my_codex/codex-rs/codex-api/src/common.rs  struct ResponsesApiRequest
+# Built in:
+#   my_codex/codex-rs/core/src/client.rs       build_responses_request()
+#
+# Only these keys are serialized on the wire. Anything else (e.g. max_output_tokens,
+# max_tokens, temperature) is NOT part of ResponsesApiRequest and must not be sent.
+_CODEX_RESPONSES_API_REQUEST_KEYS = frozenset({
+    "model",
+    "instructions",
+    "input",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
+    "store",
+    "stream",
+    "stream_options",
+    "include",
+    "service_tier",
+    "prompt_cache_key",
+    "text",
+    "client_metadata",
 })
 
 
-def _strip_codex_unsupported_keys(payload: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in payload.items() if k not in _CODEX_UNSUPPORTED_BODY_KEYS}
+def _pick_codex_responses_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep only ResponsesApiRequest fields (allowlist from Codex source)."""
+    return {k: v for k, v in payload.items() if k in _CODEX_RESPONSES_API_REQUEST_KEYS}
 
 
 def prepare_codex_responses_body(
@@ -435,8 +440,9 @@ def prepare_codex_responses_body(
     thread_id: str,
     client_metadata: dict[str, str],
 ) -> tuple[str, bool]:
-    """Normalize inbound chat/responses body into Codex Responses API JSON.
+    """Build outbound body matching Codex ResponsesApiRequest fields only.
 
+    Field set is an allowlist from codex-api ResponsesApiRequest / build_responses_request.
     Returns (json_text, stream_flag).
     """
     if body is None or body == "":
@@ -455,21 +461,32 @@ def prepare_codex_responses_body(
     if not model:
         raise ValueError("model is required")
 
-    # Already Responses-shaped (has input, no messages) → keep structure, enforce fields.
+    # Already Responses-shaped (has input, no messages) → allowlist + required overrides.
     if "input" in payload and "messages" not in payload:
-        out = _strip_codex_unsupported_keys(dict(payload))
+        out = _pick_codex_responses_fields(payload)
         out["model"] = model
         out["stream"] = stream
+        # Codex: store = provider.is_azure_responses_endpoint() → false for ChatGPT codex.
         if "store" not in out:
             out["store"] = False
+        # Codex always sends include for reasoning encrypted content when building request.
+        if "include" not in out:
+            out["include"] = ["reasoning.encrypted_content"]
+        if "tool_choice" not in out:
+            out["tool_choice"] = "auto"
+        if "parallel_tool_calls" not in out:
+            out["parallel_tool_calls"] = True
         meta = dict(out.get("client_metadata") or {})
         if not isinstance(meta, dict):
             meta = {}
         meta.update(client_metadata)
         out["client_metadata"] = meta
+        # instructions: skip empty string serialization in Codex; keep only if non-empty.
+        if not (out.get("instructions") or "").strip():
+            out.pop("instructions", None)
         return json.dumps(out, ensure_ascii=False), stream
 
-    # Chat Completions → minimal Responses conversion.
+    # Chat Completions → ResponsesApiRequest-shaped body (only allowlisted keys).
     messages = payload.get("messages") or []
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
@@ -492,7 +509,6 @@ def prepare_codex_responses_body(
                 ]
                 instructions_parts.append("\n".join(t for t in texts if t))
             continue
-        # Map assistant/user/tool into Responses input items as loosely as possible.
         if isinstance(content, str):
             input_items.append({"role": role, "content": content})
         elif isinstance(content, list):
@@ -502,24 +518,43 @@ def prepare_codex_responses_body(
         else:
             input_items.append({"role": role, "content": "" if content is None else content})
 
-    out = {
+    # Mirror defaults from build_responses_request() for ChatGPT/OpenAI provider.
+    out: dict[str, Any] = {
         "model": model,
-        "instructions": "\n\n".join(p for p in instructions_parts if p),
         "input": input_items,
-        "tools": payload.get("tools"),
-        "tool_choice": payload.get("tool_choice") or "auto",
+        # tool_choice: "auto".to_string()
+        "tool_choice": "auto",
+        # parallel_tool_calls: prompt.parallel_tool_calls && !use_responses_lite
         "parallel_tool_calls": bool(payload.get("parallel_tool_calls", True)),
+        # store: provider.is_azure_responses_endpoint() → false for chatgpt codex base url
         "store": False,
         "stream": stream,
+        # include = vec!["reasoning.encrypted_content".to_string()]
+        "include": ["reasoning.encrypted_content"],
         "client_metadata": client_metadata,
     }
-    # Drop null tools to avoid noisy payloads.
-    if out["tools"] is None:
-        out.pop("tools")
-    if payload.get("reasoning") is not None:
-        out["reasoning"] = payload.get("reasoning")
-    # Intentionally do NOT forward max_tokens / max_output_tokens:
-    # ChatGPT Codex backend returns 400 Unsupported parameter: max_output_tokens.
+    instructions = "\n\n".join(p for p in instructions_parts if p)
+    if instructions:
+        out["instructions"] = instructions
+
+    tools = payload.get("tools")
+    if tools is not None:
+        out["tools"] = tools
+
+    # Only pass reasoning if client already sent a Responses-compatible object.
+    if isinstance(payload.get("reasoning"), dict):
+        out["reasoning"] = payload["reasoning"]
+    if isinstance(payload.get("text"), dict):
+        out["text"] = payload["text"]
+    if isinstance(payload.get("stream_options"), dict):
+        out["stream_options"] = payload["stream_options"]
+    if payload.get("service_tier") is not None:
+        out["service_tier"] = payload.get("service_tier")
+    if payload.get("prompt_cache_key") is not None:
+        out["prompt_cache_key"] = payload.get("prompt_cache_key")
+
+    # Final guard: only ResponsesApiRequest keys leave this function.
+    out = _pick_codex_responses_fields(out)
     return json.dumps(out, ensure_ascii=False), stream
 
 

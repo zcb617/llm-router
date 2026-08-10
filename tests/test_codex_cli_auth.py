@@ -9,6 +9,7 @@ from src.codex_cli_auth import (
     CODEX_CLI_VERSION,
     CODEX_ORIGINATOR,
     CodexCliAuthManager,
+    _CODEX_RESPONSES_API_REQUEST_KEYS,
     build_codex_user_agent,
     prepare_codex_responses_body,
     resolve_codex_outbound_url,
@@ -112,9 +113,13 @@ def test_prepare_chat_to_responses_body():
     assert payload["stream"] is True
     assert payload["client_metadata"]["session_id"] == "s1"
     assert any(item.get("role") == "user" for item in payload["input"])
+    # Allowlist only — must match codex-api ResponsesApiRequest keys.
+    assert set(payload.keys()) <= _CODEX_RESPONSES_API_REQUEST_KEYS
     assert "max_tokens" not in payload
     assert "max_output_tokens" not in payload
     assert "temperature" not in payload
+    assert payload["include"] == ["reasoning.encrypted_content"]
+    assert payload["tool_choice"] == "auto"
 
 
 def test_prepare_responses_passthrough():
@@ -124,6 +129,7 @@ def test_prepare_responses_passthrough():
         "stream": False,
         "max_output_tokens": 256,
         "temperature": 0.7,
+        "reasoning": {"effort": "medium"},
     }
     out, stream = prepare_codex_responses_body(
         body,
@@ -137,8 +143,10 @@ def test_prepare_responses_passthrough():
     assert payload["model"] == "m2"
     assert payload["store"] is False
     assert payload["client_metadata"]["session_id"] == "s"
+    assert set(payload.keys()) <= _CODEX_RESPONSES_API_REQUEST_KEYS
     assert "max_output_tokens" not in payload
     assert "temperature" not in payload
+    assert payload["reasoning"] == {"effort": "medium"}
 
 
 def test_resolve_codex_outbound_url():
