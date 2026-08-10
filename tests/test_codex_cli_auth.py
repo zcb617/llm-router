@@ -97,6 +97,8 @@ def test_prepare_chat_to_responses_body():
         "stream": True,
         "max_tokens": 128,
         "temperature": 0.2,
+        "reasoning_effort": "xhigh",
+        "verbosity": "low",
         "messages": [
             {"role": "system", "content": "be helpful"},
             {"role": "user", "content": "hi"},
@@ -121,10 +123,19 @@ def test_prepare_chat_to_responses_body():
     assert "max_tokens" not in payload
     assert "max_output_tokens" not in payload
     assert "temperature" not in payload
+    # Mapped aliases (not unmappable):
+    assert payload["reasoning"]["effort"] == "xhigh"
+    assert payload["text"]["verbosity"] == "low"
+    assert "reasoning_effort" not in {u.field for u in prepared.unmappable}
+    assert "verbosity" not in {u.field for u in prepared.unmappable}
     fields = {u.field for u in prepared.unmappable}
     assert "max_tokens" in fields
     assert "temperature" in fields
     assert any(u.decision.startswith("B:") for u in prepared.unmappable if u.field == "max_tokens")
+    # Log lines stay short
+    for line in prepared.warning_messages():
+        assert "source=codex-rs" not in line
+        assert len(line) < 160
 
 
 def test_prepare_responses_passthrough():

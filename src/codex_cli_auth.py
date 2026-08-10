@@ -511,12 +511,11 @@ class CodexPrepareResult:
     unmappable: list[UnmappableFieldReport]
 
     def warning_messages(self) -> list[str]:
+        """Short log lines (full detail stays in UnmappableFieldReport for structured metadata)."""
         lines = []
         for item in self.unmappable:
             lines.append(
-                f"[codex_cli_oauth unmappable] field={item.field} "
-                f"decision={item.decision} reason={item.reason} "
-                f"source={item.codex_source}"
+                f"[codex_cli_oauth unmappable] {item.field} | {item.decision}"
             )
         return lines
 
@@ -710,6 +709,57 @@ def convert_text_for_codex_responses_api(
     return out or None
 
 
+# Client top-level aliases that map into nested ResponsesApiRequest fields.
+# Codex: Reasoning.effort / TextControls.verbosity (common.rs + client.rs build_responses_request).
+_MAPPED_TOP_LEVEL_ALIASES = frozenset({
+    "messages",           # → input / instructions
+    "max_tokens",         # unmappable (decision B)
+    "max_output_tokens",  # unmappable (decision B)
+    "reasoning_effort",   # → reasoning.effort
+    "verbosity",          # → text.verbosity
+})
+
+
+def _apply_reasoning_effort_and_verbosity(
+    payload: dict[str, Any],
+    out: dict[str, Any],
+) -> None:
+    """Map client top-level reasoning_effort / verbosity into nested Codex fields.
+
+    Source:
+      - Reasoning { effort, summary, context }  (common.rs)
+      - TextControls { verbosity, format }     (common.rs)
+      - build_responses_request builds reasoning.effort and text.verbosity (client.rs)
+    """
+    # reasoning_effort → reasoning.effort (preserve existing reasoning keys)
+    if "reasoning_effort" in payload and payload.get("reasoning_effort") is not None:
+        reasoning = out.get("reasoning")
+        if not isinstance(reasoning, dict):
+            reasoning = {}
+            if isinstance(payload.get("reasoning"), dict):
+                reasoning = {
+                    k: v
+                    for k, v in payload["reasoning"].items()
+                    if k in _CODEX_REASONING_KEYS
+                }
+        if "effort" not in reasoning:
+            reasoning["effort"] = payload.get("reasoning_effort")
+        out["reasoning"] = reasoning
+
+    # verbosity → text.verbosity
+    if "verbosity" in payload and payload.get("verbosity") is not None:
+        text = out.get("text")
+        if not isinstance(text, dict):
+            text = {}
+            if isinstance(payload.get("text"), dict):
+                text = {
+                    k: v for k, v in payload["text"].items() if k in _CODEX_TEXT_KEYS
+                }
+        if "verbosity" not in text:
+            text["verbosity"] = payload.get("verbosity")
+        out["text"] = text
+
+
 def _collect_top_level_unmappable(
     payload: dict[str, Any],
     *,
@@ -717,32 +767,13 @@ def _collect_top_level_unmappable(
     chat_mode: bool,
 ) -> None:
     """Report client top-level keys with no ResponsesApiRequest mapping (user policy B)."""
-    # Keys handled by chat→responses conversion (not "dropped", they become input/instructions).
-    chat_consumed = {"messages", "max_tokens"} if chat_mode else set()
-    special = {
-        "max_tokens",
-        "max_output_tokens",
-        "temperature",
-        "top_p",
-        "top_k",
-        "n",
-        "presence_penalty",
-        "frequency_penalty",
-        "logit_bias",
-        "logprobs",
-        "top_logprobs",
-        "user",
-        "seed",
-        "stop",
-        "response_format",
-    }
     for key, value in payload.items():
         if key in _CODEX_RESPONSES_API_REQUEST_KEYS:
             continue
-        if key in chat_consumed and key != "max_tokens":
-            continue
         if key == "messages" and chat_mode:
             continue  # mapped to input/instructions
+        if key in ("reasoning_effort", "verbosity"):
+            continue  # mapped to reasoning.effort / text.verbosity
         if key in ("max_tokens", "max_output_tokens"):
             unmappable.append(
                 UnmappableFieldReport(
@@ -757,19 +788,15 @@ def _collect_top_level_unmappable(
                 )
             )
             continue
-        if key in special or key not in _CODEX_RESPONSES_API_REQUEST_KEYS:
-            # Already reported max_*; remaining non-wire keys.
-            if key in ("max_tokens", "max_output_tokens"):
-                continue
-            unmappable.append(
-                UnmappableFieldReport(
-                    field=key,
-                    client_value=value,
-                    reason=f"Not a field of Codex ResponsesApiRequest allowlist",
-                    codex_source="codex-rs/codex-api/src/common.rs ResponsesApiRequest",
-                    decision="B: omit on request; report (no invented mapping)",
-                )
+        unmappable.append(
+            UnmappableFieldReport(
+                field=key,
+                client_value=value,
+                reason="Not a field of Codex ResponsesApiRequest allowlist",
+                codex_source="codex-rs/codex-api/src/common.rs ResponsesApiRequest",
+                decision="B: omit on request; report (no invented mapping)",
             )
+        )
 
 
 def prepare_codex_responses_body(
@@ -854,6 +881,7 @@ def prepare_codex_responses_body(
                 out.pop("text", None)
             else:
                 out["text"] = text
+        _apply_reasoning_effort_and_verbosity(payload, out)
         meta = dict(out.get("client_metadata") or {})
         if not isinstance(meta, dict):
             meta = {}
@@ -954,6 +982,9 @@ def prepare_codex_responses_body(
         out["service_tier"] = payload.get("service_tier")
     if payload.get("prompt_cache_key") is not None:
         out["prompt_cache_key"] = payload.get("prompt_cache_key")
+
+    # Top-level client aliases → nested Codex fields (must map, not report unmappable).
+    _apply_reasoning_effort_and_verbosity(payload, out)
 
     out = _pick_codex_responses_fields(out)
     return CodexPrepareResult(
