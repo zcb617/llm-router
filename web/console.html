@@ -570,6 +570,7 @@
             class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
             <option value="api_key">API Key</option>
             <option value="kimi_cli_oauth">kimi-cli auth（专用通道）</option>
+            <option value="codex_cli_oauth">codex-cli oauth（Rust 出站）</option>
             <option value="codex">codex（App Server）</option>
           </select>
         </div>
@@ -586,7 +587,7 @@
             <button id="checkKimiTokenBtn" type="button" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition whitespace-nowrap">检测本机 token</button>
             <span id="upstreamOauthTokenStatus" class="text-xs text-zinc-500"></span>
           </div>
-          <div class="text-xs text-zinc-500">
+          <div id="upstreamOauthHint" class="text-xs text-zinc-500">
             使用该模式时，走专用转发通道，并按当前 kimi-cli 头部全集严格构造请求。
           </div>
         </div>
@@ -1636,9 +1637,11 @@ function renderUpstreams() {
     const statusClass = u.is_active ? 'text-green-500' : 'text-red-500';
     const statusText = u.is_active ? '启用' : '禁用';
     const authMode = u.auth_mode || 'api_key';
-    const displayBaseUrl = authMode === 'kimi_cli_oauth' ? '-' : (u.target_base_url || '-');
+    const displayBaseUrl = (authMode === 'kimi_cli_oauth' || authMode === 'codex_cli_oauth') ? '-' : (u.target_base_url || '-');
     const authBadge = authMode === 'kimi_cli_oauth'
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">kimi-cli auth</span>'
+      : authMode === 'codex_cli_oauth'
+      ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300">codex-cli oauth</span>'
       : authMode === 'codex'
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300">codex</span>'
       : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">api_key</span>';
@@ -1675,6 +1678,7 @@ function renderUpstreams() {
 const KIMI_OAUTH_DEFAULT_KEY = 'oauth/kimi-code';
 const KIMI_OAUTH_DEFAULT_HOST = 'https://auth.kimi.com';
 const KIMI_OAUTH_DEFAULT_BASE_URL = 'https://api.kimi.com';
+const CODEX_CLI_OAUTH_DEFAULT_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 
 function bindUpstreamTableEvents() {
   const tbody = document.getElementById('upstreamsTableBody');
@@ -1783,7 +1787,8 @@ function syncUpstreamAuthModeFields() {
   const claudeFeatureInput = document.getElementById('upstreamUseClaudeFeatures');
   const rooFeatureInput = document.getElementById('upstreamUseRooFeatures');
   const apiLabel = document.getElementById('upstreamApiKeyLabel');
-  if (mode === 'kimi_cli_oauth') {
+  const oauthHint = document.getElementById('upstreamOauthHint');
+  if (mode === 'kimi_cli_oauth' || mode === 'codex_cli_oauth') {
     oauthWrap.classList.remove('hidden');
     baseUrlWrap.classList.add('hidden');
     baseUrlInput.required = false;
@@ -1793,6 +1798,11 @@ function syncUpstreamAuthModeFields() {
     claudeFeatureInput.checked = false;
     rooFeatureInput.checked = false;
     if (apiLabel) apiLabel.textContent = 'API Key';
+    if (oauthHint) {
+      oauthHint.textContent = mode === 'codex_cli_oauth'
+        ? '使用本机 ~/.codex/auth.json（ChatGPT 登录）。出站经 Rust codex_outbound，特征对齐 Codex CLI 0.147.0。'
+        : '使用该模式时，走专用转发通道，并按当前 kimi-cli 头部全集严格构造请求。';
+    }
   } else {
     oauthWrap.classList.add('hidden');
     baseUrlWrap.classList.remove('hidden');
@@ -1818,21 +1828,25 @@ function setUpstreamOauthTokenStatus(message, isError = false) {
 document.getElementById('checkKimiTokenBtn').addEventListener('click', async (event) => {
   await runLockedAction('checkKimiToken', event.currentTarget, async () => {
     const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
-    if (authMode !== 'kimi_cli_oauth') {
-      setUpstreamOauthTokenStatus('请先选择 kimi-cli auth 认证方式', true);
+    if (authMode !== 'kimi_cli_oauth' && authMode !== 'codex_cli_oauth') {
+      setUpstreamOauthTokenStatus('请先选择 kimi-cli auth 或 codex-cli oauth', true);
       return;
     }
     setUpstreamOauthTokenStatus('检测中...');
     try {
-      const res = await fetch('/api/upstreams/kimi-token/check', {
+      const endpoint = authMode === 'codex_cli_oauth'
+        ? '/api/upstreams/codex-token/check'
+        : '/api/upstreams/kimi-token/check';
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oauth_key: KIMI_OAUTH_DEFAULT_KEY })
+        body: JSON.stringify(authMode === 'codex_cli_oauth' ? {} : { oauth_key: KIMI_OAUTH_DEFAULT_KEY })
       });
       const data = await res.json();
       if (res.ok) {
         const ttl = data.seconds_to_expiry != null ? `，剩余 ${data.seconds_to_expiry}s` : '';
-        setUpstreamOauthTokenStatus(`可用（${data.path}${ttl}）`);
+        const account = data.account_id ? `，account=${data.account_id}` : '';
+        setUpstreamOauthTokenStatus(`可用（${data.path}${ttl}${account}）`);
       } else {
         const msg = data.error || '本机 token 不可用';
         const detail = data.path ? `（${data.path}）` : '';
@@ -1851,19 +1865,21 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async (e
     const apiKey = document.getElementById('upstreamApiKey').value;
     const authMode = document.getElementById('upstreamAuthMode').value || 'api_key';
     const isKimiOauth = authMode === 'kimi_cli_oauth';
+    const isCodexCliOauth = authMode === 'codex_cli_oauth';
+    const isManagedOauth = isKimiOauth || isCodexCliOauth;
     const oauthKey = KIMI_OAUTH_DEFAULT_KEY;
     const oauthHost = KIMI_OAUTH_DEFAULT_HOST;
-    const effectiveApiKey = isKimiOauth ? '' : apiKey;
+    const effectiveApiKey = isManagedOauth ? '' : apiKey;
     const effectiveTargetBaseUrl = isKimiOauth
       ? (targetBaseUrl || KIMI_OAUTH_DEFAULT_BASE_URL)
-      : targetBaseUrl;
+      : (isCodexCliOauth ? (targetBaseUrl || CODEX_CLI_OAUTH_DEFAULT_BASE_URL) : targetBaseUrl);
     const description = document.getElementById('upstreamDescription').value.trim();
     const isActive = document.getElementById('upstreamIsActive').checked;
-    const useClaudeFeatures = isKimiOauth ? false : document.getElementById('upstreamUseClaudeFeatures').checked;
-    const useRooFeatures = isKimiOauth ? false : document.getElementById('upstreamUseRooFeatures').checked;
+    const useClaudeFeatures = isManagedOauth ? false : document.getElementById('upstreamUseClaudeFeatures').checked;
+    const useRooFeatures = isManagedOauth ? false : document.getElementById('upstreamUseRooFeatures').checked;
 
-    if (!name || (!isKimiOauth && !targetBaseUrl)) {
-      document.getElementById('upstreamEditError').textContent = isKimiOauth
+    if (!name || (!isManagedOauth && !targetBaseUrl)) {
+      document.getElementById('upstreamEditError').textContent = isManagedOauth
         ? '上游名称不能为空'
         : '名称和基础 URL 不能为空';
       document.getElementById('upstreamEditError').classList.remove('hidden');
@@ -2127,7 +2143,7 @@ function renderModels() {
     const upstreamName = cfg.upstream_name || '<span class="text-zinc-400">-</span>';
     const modeText = cfg.use_multi_upstream ? '<span class="text-purple-500 font-medium">多上游</span>' : '<span class="text-zinc-500">单上游</span>';
     const authMode = cfg.auth_mode || 'api_key';
-    const displayTargetBaseUrl = (cfg.use_multi_upstream || authMode === 'kimi_cli_oauth') ? '-' : (cfg.target_base_url || '-');
+    const displayTargetBaseUrl = (cfg.use_multi_upstream || authMode === 'kimi_cli_oauth' || authMode === 'codex_cli_oauth') ? '-' : (cfg.target_base_url || '-');
     const responsesApiText = cfg.protocol_converter ? `<span class="font-mono text-xs text-blue-600 dark:text-blue-400">${cfg.protocol_converter}</span>` : '<span class="text-zinc-500">无</span>';
     tr.innerHTML = `
       <td class="px-4 py-2 whitespace-nowrap font-mono text-sm">${cfg.model_key}</td>

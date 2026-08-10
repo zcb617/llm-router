@@ -63,11 +63,20 @@ def _make_addon_for_route_tests():
         def reset_upstream_health(self, _upstream_id):
             return None
 
+    class DummyCodexCliAuth:
+        @staticmethod
+        def is_codex_cli_oauth(config):
+            return (config.get("auth_mode") or "api_key") == "codex_cli_oauth"
+
+        def inspect_local_token(self, *, refresh_if_needed=False):
+            return {"available": False, "reason": "test"}
+
     addon = LLMRouterAddon.__new__(LLMRouterAddon)
     addon._capturer = DataCapturer()
     addon._pending_requests = {}
     addon._pending_requests_lock = threading.Lock()
     addon._kimi_cli_auth = DummyKimiAuth()
+    addon._codex_cli_auth = DummyCodexCliAuth()
     addon._storage = DummyStorage()
     addon._external_storage = DummyStorage()
     return addon

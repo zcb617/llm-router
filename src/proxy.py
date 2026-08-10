@@ -18,6 +18,14 @@ from urllib.parse import urlparse
 
 from src.openai_protocol_converter import parse_sse_buffer
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
+from src.codex_cli_auth import (
+    CODEX_CLI_OAUTH_BASE_URL,
+    CodexCliAuthManager,
+    host_from_url,
+    prepare_codex_responses_body,
+    resolve_codex_outbound_url,
+)
+from src.codex_outbound_client import CodexOutboundError, send_via_codex_outbound
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +128,7 @@ class LLMRouterAddon:
         self._http_client = None
         self._http_client_lock = threading.Lock()
         self._kimi_cli_auth = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
+        self._codex_cli_auth = CodexCliAuthManager()
 
         # 多上游流式预探活超时
         self._stream_route_preconnect_timeout_s = max(
@@ -199,12 +208,18 @@ class LLMRouterAddon:
         return self._kimi_cli_auth.is_kimi_cli_auth(cfg or {})
 
     @staticmethod
+    def _is_codex_cli_oauth(cfg: dict) -> bool:
+        return CodexCliAuthManager.is_codex_cli_oauth(cfg or {})
+
+    @staticmethod
     def _is_codex_auth(cfg: dict) -> bool:
         return (cfg or {}).get("auth_mode") == "codex"
 
     def _resolve_target_base_url(self, cfg: dict) -> str:
         if self._is_kimi_cli_auth(cfg):
             return KIMI_CLI_OAUTH_BASE_URL
+        if self._is_codex_cli_oauth(cfg):
+            return CODEX_CLI_OAUTH_BASE_URL
         return cfg.get("target_base_url", "")
 
     @staticmethod
@@ -344,11 +359,12 @@ class LLMRouterAddon:
                 if mk not in routes_by_model:
                     routes_by_model[mk] = []
                 auth_mode = r.get("auth_mode") or "api_key"
-                target_base_url = (
-                    KIMI_CLI_OAUTH_BASE_URL
-                    if auth_mode == "kimi_cli_oauth"
-                    else r["target_base_url"]
-                )
+                if auth_mode == "kimi_cli_oauth":
+                    target_base_url = KIMI_CLI_OAUTH_BASE_URL
+                elif auth_mode == "codex_cli_oauth":
+                    target_base_url = CODEX_CLI_OAUTH_BASE_URL
+                else:
+                    target_base_url = r["target_base_url"]
                 routes_by_model[mk].append({
                     "upstream_id": r["upstream_id"],
                     "target_base_url": target_base_url,
@@ -383,6 +399,8 @@ class LLMRouterAddon:
 
                         if auth_mode == "kimi_cli_oauth":
                             target_base_url = KIMI_CLI_OAUTH_BASE_URL
+                        elif auth_mode == "codex_cli_oauth":
+                            target_base_url = CODEX_CLI_OAUTH_BASE_URL
                         elif not target_base_url:
                             continue
 
@@ -565,6 +583,18 @@ class LLMRouterAddon:
         # 上游处理器。
         if self._is_codex_auth(mapping):
             self._apply_codex_route(flow, mapping, captured_req, model_name, path)
+            return
+
+        # Codex CLI OAuth：走 Rust 出站 + ChatGPT codex responses 专用通道。
+        if self._is_codex_cli_oauth(mapping):
+            await asyncio.to_thread(
+                self._forward_codex_cli_oauth,
+                flow,
+                mapping,
+                captured_req,
+                model_name,
+                path,
+            )
             return
 
         # 判断是否为 Responses API 请求（支持 /v1/responses 和 /responses）
@@ -814,9 +844,9 @@ class LLMRouterAddon:
 
         last_error = "pre-connect failed"
         for route in candidate_routes:
-            if self._is_codex_auth(route):
+            if self._is_codex_auth(route) or self._is_codex_cli_oauth(route):
                 logger.warning(
-                    "Codex upstream %s is not supported in multi-upstream mode; skipping",
+                    "Codex/codex_cli_oauth upstream %s is not supported in multi-upstream mode; skipping",
                     route.get("upstream_id"),
                 )
                 continue
@@ -887,6 +917,89 @@ class LLMRouterAddon:
             )
             flow.metadata["local_response"] = True
 
+    def _forward_codex_cli_oauth(self, flow, mapping, captured_req, model_name, path):
+        """Codex CLI OAuth 专用通道：Rust 出站 + 严格 Codex CLI 请求头/地址。"""
+        forward_model = (mapping.get("forward_model") or model_name or "").strip()
+        try:
+            snap = self._codex_cli_auth.resolve_snapshot(refresh_if_needed=True)
+            if not snap or not snap.access_token:
+                raise RuntimeError(
+                    "No Codex CLI OAuth token available. Sign in with `codex login` "
+                    "so ~/.codex/auth.json contains ChatGPT tokens."
+                )
+
+            session_id = str(uuid.uuid4())
+            thread_id = str(uuid.uuid4())
+            client_metadata = self._codex_cli_auth.build_client_metadata(
+                session_id=session_id,
+                thread_id=thread_id,
+            )
+            req_body, stream = prepare_codex_responses_body(
+                captured_req.body,
+                forward_model=forward_model,
+                session_id=session_id,
+                thread_id=thread_id,
+                client_metadata=client_metadata,
+            )
+            full_url = resolve_codex_outbound_url(self._resolve_target_base_url(mapping))
+            host = host_from_url(full_url)
+            req_headers = self._codex_cli_auth.build_full_headers(
+                host=host,
+                access_token=snap.access_token,
+                account_id=snap.account_id or "",
+                is_fedramp_account=snap.is_fedramp_account,
+                session_id=session_id,
+                thread_id=thread_id,
+                stream=stream,
+            )
+            req_data = req_body.encode("utf-8")
+            self._apply_ordered_headers_to_flow(flow, req_headers)
+            flow.request.content = req_data
+            # Force method/path bookkeeping for capture; actual send is via Rust outbound.
+            flow.request.method = "POST"
+
+            status, resp_headers, resp_body = send_via_codex_outbound(
+                method="POST",
+                url=full_url,
+                headers=req_headers,
+                body=req_data,
+                timeout_ms=600_000,
+            )
+            upstream_headers_time = time.time()
+            first_body_time = upstream_headers_time if resp_body else None
+            flow.response = http.Response.make(
+                status,
+                resp_body,
+                dict(resp_headers),
+            )
+            # 不设 local_response：成功路径需走 response() 写入调用记录（与 kimi 专用通道一致）。
+
+            captured_req.body = req_body
+            captured_req.original_model = model_name
+            captured_req.overridden_model = forward_model or model_name
+            captured_req.url = full_url
+            captured_req.call_id = str(uuid.uuid4())
+            flow.metadata["call_id"] = captured_req.call_id
+            flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
+            flow.metadata["codex_cli_oauth"] = True
+            self._store_pending_request(flow, captured_req)
+        except CodexOutboundError as e:
+            logger.error(f"Codex CLI OAuth outbound failed: {e}")
+            flow.response = http.Response.make(
+                502,
+                json.dumps({"error": f"Codex CLI OAuth outbound failed: {e}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            flow.metadata["local_response"] = True
+        except Exception as e:
+            logger.error(f"Codex CLI OAuth upstream request failed: {e}")
+            flow.response = http.Response.make(
+                502,
+                json.dumps({"error": f"Codex CLI OAuth upstream failed: {e}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            flow.metadata["local_response"] = True
+
     def _forward_single_upstream_kimi_cli(self, flow, mapping, captured_req, model_name, path):
         """kimi-cli auth 单上游非流式专用通道：严格复刻 kimi-cli 头部模板。"""
         target_url = self._resolve_target_base_url(mapping)
@@ -952,9 +1065,9 @@ class LLMRouterAddon:
         client = self._get_http_client()
 
         for route in candidate_routes:
-            if self._is_codex_auth(route):
+            if self._is_codex_auth(route) or self._is_codex_cli_oauth(route):
                 logger.warning(
-                    "Codex upstream %s is not supported in multi-upstream mode; skipping",
+                    "Codex/codex_cli_oauth upstream %s is not supported in multi-upstream mode; skipping",
                     route.get("upstream_id"),
                 )
                 continue
@@ -1269,6 +1382,21 @@ class LLMRouterAddon:
     def _build_health_check_requests(self, target_base_url: str, model_info: dict) -> list[tuple[str, str, dict]]:
         """基于模型配置和匹配上游构造健康检查候选请求。"""
         if self._is_codex_auth(model_info):
+            return []
+        if self._is_codex_cli_oauth(model_info):
+            # Token presence is the health signal; full models probe is expensive.
+            try:
+                status = self._codex_cli_auth.inspect_local_token(refresh_if_needed=False)
+            except Exception as e:
+                logger.warning(f"Health check skipped for codex_cli_oauth: {e}")
+                return []
+            if not status.get("available"):
+                logger.warning(
+                    "Health check skipped for codex_cli_oauth: token unavailable (%s)",
+                    status.get("reason"),
+                )
+                return []
+            # Lightweight POST-less GET is not available on codex backend; skip HTTP probe.
             return []
         if self._is_kimi_cli_auth(model_info):
             target_base_url = KIMI_CLI_OAUTH_BASE_URL

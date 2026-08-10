@@ -32,3 +32,6 @@ log/
 
 #kimi-cli
 kimi-cli/
+
+# Rust outbound build artifacts
+codex_outbound/target/

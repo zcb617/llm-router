@@ -15,6 +15,7 @@ from src.kimi_cli_auth import (
     KIMI_DEFAULT_OAUTH_HOST,
     KIMI_DEFAULT_OAUTH_KEY,
 )
+from src.codex_cli_auth import CODEX_CLI_OAUTH_BASE_URL
 
 
 _MODEL_CONFIG_PATH_RE = re.compile(r'^/api/models/(\d+)$')
@@ -161,14 +162,21 @@ def _validate_codex_forward_model(storage, upstream_id, forward_model: str) -> O
 
 
 def _validate_no_codex_routes(storage, routes: list) -> Optional[str]:
-    """第一阶段保持多上游原有 HTTP 故障转移语义，不接受 Codex 路由。"""
+    """第一阶段保持多上游原有 HTTP 故障转移语义，不接受 Codex 专用上游。"""
     if not hasattr(storage, "get_upstream"):
         return None
     for route in routes or []:
         upstream = _get_upstream_for_validation(storage, route.get("upstream_id"))
-        if upstream and (upstream.get("auth_mode") or "api_key") == "codex":
+        mode = (upstream.get("auth_mode") or "api_key") if upstream else "api_key"
+        if mode == "codex":
             return "当前版本 Codex 上游仅支持单上游模式"
+        if mode == "codex_cli_oauth":
+            return "当前版本 codex_cli_oauth 上游仅支持单上游模式"
     return None
+
+
+def _default_codex_cli_oauth_base_url() -> str:
+    return CODEX_CLI_OAUTH_BASE_URL
 
 
 def _extract_model_routes(body: dict) -> tuple[list, Optional[str]]:
@@ -559,6 +567,21 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 500, {"error": f"检测失败: {e}"})
         return True
 
+    # POST /api/upstreams/codex-token/check - 检测服务器本机 Codex CLI OAuth token
+    if path == "/api/upstreams/codex-token/check" and flow.request.method == "POST":
+        try:
+            from src.codex_cli_auth import CodexCliAuthManager
+
+            manager = CodexCliAuthManager()
+            status = manager.inspect_local_token(refresh_if_needed=True)
+            if status.get("available"):
+                _json_response(flow, 200, {"message": "检测成功：本机 Codex token 可用", **status})
+            else:
+                _json_response(flow, 400, {"error": "检测失败：本机 Codex token 不可用", **status})
+        except Exception as e:
+            _json_response(flow, 500, {"error": f"检测失败: {e}"})
+        return True
+
     # GET /api/upstreams/{id}/codex-models - 查询当前 Codex App Server 模型
     codex_model_match = _CODEX_MODEL_PATH_RE.match(path)
     if codex_model_match and flow.request.method == "GET":
@@ -611,8 +634,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         oauth_key = (body.get("oauth_key") or KIMI_DEFAULT_OAUTH_KEY).strip()
         oauth_host = (body.get("oauth_host") or KIMI_DEFAULT_OAUTH_HOST).strip()
 
-        if auth_mode not in ("api_key", "kimi_cli_oauth", "codex"):
-            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth 或 codex"})
+        if auth_mode not in ("api_key", "kimi_cli_oauth", "codex", "codex_cli_oauth"):
+            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth、codex 或 codex_cli_oauth"})
             return True
         if auth_mode == "kimi_cli_oauth":
             api_key = ""
@@ -621,11 +644,16 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             use_roo_features = False
             oauth_key = KIMI_DEFAULT_OAUTH_KEY
             oauth_host = KIMI_DEFAULT_OAUTH_HOST
+        elif auth_mode == "codex_cli_oauth":
+            api_key = ""
+            target_base_url = _default_codex_cli_oauth_base_url()
+            use_claude_features = False
+            use_roo_features = False
 
         if not name:
             _json_response(flow, 400, {"error": "名称不能为空"})
             return True
-        if auth_mode != "kimi_cli_oauth" and not target_base_url:
+        if auth_mode not in ("kimi_cli_oauth", "codex_cli_oauth") and not target_base_url:
             _json_response(flow, 400, {"error": "名称和基础 URL 不能为空"})
             return True
 
@@ -662,8 +690,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         auth_mode = body.get("auth_mode")
         if isinstance(auth_mode, str):
             auth_mode = auth_mode.strip()
-        if auth_mode is not None and auth_mode not in ("api_key", "kimi_cli_oauth", "codex"):
-            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth 或 codex"})
+        if auth_mode is not None and auth_mode not in ("api_key", "kimi_cli_oauth", "codex", "codex_cli_oauth"):
+            _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth、codex 或 codex_cli_oauth"})
             return True
 
         effective_auth_mode = auth_mode if auth_mode is not None else (existing.get("auth_mode") or "api_key")
@@ -680,6 +708,17 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             body["use_roo_features"] = False
             oauth_key = KIMI_DEFAULT_OAUTH_KEY
             oauth_host = KIMI_DEFAULT_OAUTH_HOST
+        elif effective_auth_mode == "codex_cli_oauth":
+            api_key_value = ""
+            target_base_url = _default_codex_cli_oauth_base_url()
+            body["use_claude_features"] = False
+            body["use_roo_features"] = False
+            oauth_key = body.get("oauth_key")
+            if oauth_key is not None:
+                oauth_key = oauth_key.strip() or KIMI_DEFAULT_OAUTH_KEY
+            oauth_host = body.get("oauth_host")
+            if oauth_host is not None:
+                oauth_host = oauth_host.strip() or KIMI_DEFAULT_OAUTH_HOST
         else:
             if isinstance(raw_target_base_url, str) and not target_base_url:
                 _json_response(flow, 400, {"error": "基础 URL 不能为空"})
@@ -959,8 +998,12 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
 
         upstream = _get_upstream_for_validation(storage, upstream_id)
-        if upstream and (upstream.get("auth_mode") or "api_key") == "codex":
+        upstream_mode = (upstream.get("auth_mode") or "api_key") if upstream else "api_key"
+        if upstream_mode == "codex":
             _json_response(flow, 400, {"error": "当前版本 Codex 上游仅支持单上游模式"})
+            return True
+        if upstream_mode == "codex_cli_oauth":
+            _json_response(flow, 400, {"error": "当前版本 codex_cli_oauth 上游仅支持单上游模式"})
             return True
 
         route_id = storage.create_model_route(config_id, upstream_id, forward_model, protocol_converter, sort_order)
@@ -981,8 +1024,12 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
 
         upstream = _get_upstream_for_validation(storage, body.get("upstream_id"))
-        if upstream and (upstream.get("auth_mode") or "api_key") == "codex":
+        upstream_mode = (upstream.get("auth_mode") or "api_key") if upstream else "api_key"
+        if upstream_mode == "codex":
             _json_response(flow, 400, {"error": "当前版本 Codex 上游仅支持单上游模式"})
+            return True
+        if upstream_mode == "codex_cli_oauth":
+            _json_response(flow, 400, {"error": "当前版本 codex_cli_oauth 上游仅支持单上游模式"})
             return True
 
         updated = storage.update_model_route(

@@ -1,0 +1,22 @@
+[package]
+name = "codex_outbound"
+version = "0.1.0"
+edition = "2021"
+description = "Rust outbound HTTP client for llm_router Codex CLI OAuth fingerprint parity"
+publish = false
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "json",
+    "gzip",
+    "deflate",
+    "brotli",
+    "stream",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
