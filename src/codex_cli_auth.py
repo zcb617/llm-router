@@ -488,6 +488,95 @@ def _pick_codex_responses_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if k in _CODEX_RESPONSES_API_REQUEST_KEYS}
 
 
+def convert_tools_for_codex_responses_api(tools: Any) -> Optional[list]:
+    """Convert tools to Codex/OpenAI Responses API function-tool shape.
+
+    Codex serializes ToolSpec::Function(ResponsesApiTool) as top-level fields
+    (see tools/src/tool_spec.rs + tools/src/responses_api.rs +
+    create_tools_json_for_responses_api_includes_top_level_name test):
+
+        {"type":"function","name":"...","description":"...","strict":false,"parameters":{...}}
+
+    Chat Completions clients typically send nested function objects:
+
+        {"type":"function","function":{"name":"...","description":"...","parameters":{...}}}
+
+    Missing top-level name causes: Missing required parameter: 'tools[0].name'.
+    """
+    if tools is None:
+        return None
+    if not isinstance(tools, list):
+        raise ValueError("tools must be a list")
+
+    converted: list[Any] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            converted.append(tool)
+            continue
+
+        # Already Responses-shaped function tool (top-level name).
+        if tool.get("type") == "function" and isinstance(tool.get("name"), str) and tool.get("name"):
+            item = {
+                "type": "function",
+                "name": tool["name"],
+                "description": tool.get("description") or "",
+                "strict": bool(tool["strict"]) if "strict" in tool else False,
+                "parameters": tool.get("parameters") if tool.get("parameters") is not None else {"type": "object", "properties": {}},
+            }
+            if tool.get("defer_loading") is not None:
+                item["defer_loading"] = tool.get("defer_loading")
+            converted.append(item)
+            continue
+
+        # Chat Completions nested function tool.
+        nested = tool.get("function")
+        if tool.get("type") == "function" and isinstance(nested, dict):
+            name = nested.get("name")
+            if not name:
+                raise ValueError("tools[].function.name is required for Chat Completions tools")
+            item = {
+                "type": "function",
+                "name": str(name),
+                "description": nested.get("description") or "",
+                "strict": bool(nested["strict"]) if "strict" in nested else False,
+                "parameters": nested.get("parameters")
+                if nested.get("parameters") is not None
+                else {"type": "object", "properties": {}},
+            }
+            if nested.get("defer_loading") is not None:
+                item["defer_loading"] = nested.get("defer_loading")
+            converted.append(item)
+            continue
+
+        # Other tool types (web_search, custom, namespace, …): pass through as-is.
+        # Codex ToolSpec includes web_search / custom / namespace variants.
+        converted.append(tool)
+
+    return converted
+
+
+def convert_tool_choice_for_codex_responses_api(tool_choice: Any) -> Any:
+    """Normalize tool_choice for Responses API.
+
+    Chat Completions: {"type":"function","function":{"name":"x"}}
+    Responses / Codex:  {"type":"function","name":"x"}  or "auto"/"none"/"required"
+    """
+    if tool_choice is None:
+        return "auto"
+    if isinstance(tool_choice, str):
+        return tool_choice
+    if not isinstance(tool_choice, dict):
+        return tool_choice
+
+    if tool_choice.get("type") == "function":
+        if isinstance(tool_choice.get("name"), str) and tool_choice.get("name"):
+            return {"type": "function", "name": tool_choice["name"]}
+        nested = tool_choice.get("function")
+        if isinstance(nested, dict) and nested.get("name"):
+            return {"type": "function", "name": str(nested["name"])}
+    return tool_choice
+
+
 def prepare_codex_responses_body(
     body: str | bytes | dict | None,
     *,
@@ -530,8 +619,16 @@ def prepare_codex_responses_body(
             out["include"] = ["reasoning.encrypted_content"]
         if "tool_choice" not in out:
             out["tool_choice"] = "auto"
+        else:
+            out["tool_choice"] = convert_tool_choice_for_codex_responses_api(out.get("tool_choice"))
         if "parallel_tool_calls" not in out:
             out["parallel_tool_calls"] = True
+        if "tools" in out:
+            converted_tools = convert_tools_for_codex_responses_api(out.get("tools"))
+            if converted_tools is None:
+                out.pop("tools", None)
+            else:
+                out["tools"] = converted_tools
         meta = dict(out.get("client_metadata") or {})
         if not isinstance(meta, dict):
             meta = {}
@@ -578,8 +675,10 @@ def prepare_codex_responses_body(
     out: dict[str, Any] = {
         "model": model,
         "input": input_items,
-        # tool_choice: "auto".to_string()
-        "tool_choice": "auto",
+        # tool_choice default in Codex build_responses_request: "auto"
+        "tool_choice": convert_tool_choice_for_codex_responses_api(
+            payload.get("tool_choice") if payload.get("tool_choice") is not None else "auto"
+        ),
         # parallel_tool_calls: prompt.parallel_tool_calls && !use_responses_lite
         "parallel_tool_calls": bool(payload.get("parallel_tool_calls", True)),
         # store: provider.is_azure_responses_endpoint() → false for chatgpt codex base url
@@ -593,9 +692,11 @@ def prepare_codex_responses_body(
     if instructions:
         out["instructions"] = instructions
 
-    tools = payload.get("tools")
-    if tools is not None:
-        out["tools"] = tools
+    # Convert Chat Completions tools → Responses top-level name shape (Codex ToolSpec).
+    if payload.get("tools") is not None:
+        converted_tools = convert_tools_for_codex_responses_api(payload.get("tools"))
+        if converted_tools is not None:
+            out["tools"] = converted_tools
 
     # Only pass reasoning if client already sent a Responses-compatible object.
     if isinstance(payload.get("reasoning"), dict):

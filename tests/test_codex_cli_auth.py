@@ -152,6 +152,51 @@ def test_prepare_responses_passthrough():
     assert payload["reasoning"] == {"effort": "medium"}
 
 
+def test_convert_chat_tools_to_responses_top_level_name():
+    """Match create_tools_json_for_responses_api_includes_top_level_name shape."""
+    body = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "demo",
+                    "description": "A demo tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"foo": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "demo"}},
+    }
+    out, _ = prepare_codex_responses_body(
+        body,
+        forward_model="gpt-5.4",
+        session_id="s",
+        thread_id="t",
+        client_metadata={"session_id": "s"},
+    )
+    payload = json.loads(out)
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "name": "demo",
+            "description": "A demo tool",
+            "strict": False,
+            "parameters": {
+                "type": "object",
+                "properties": {"foo": {"type": "string"}},
+            },
+        }
+    ]
+    assert payload["tool_choice"] == {"type": "function", "name": "demo"}
+    assert "name" in payload["tools"][0]
+    assert "function" not in payload["tools"][0]
+
+
 def test_resolve_codex_outbound_url():
     assert resolve_codex_outbound_url("https://chatgpt.com/backend-api/codex").endswith("/responses")
     assert resolve_codex_outbound_url("https://chatgpt.com/backend-api/codex/responses").endswith(
