@@ -90,6 +90,8 @@ def test_prepare_chat_to_responses_body():
     body = json.dumps({
         "model": "gpt-client",
         "stream": True,
+        "max_tokens": 128,
+        "temperature": 0.2,
         "messages": [
             {"role": "system", "content": "be helpful"},
             {"role": "user", "content": "hi"},
@@ -110,6 +112,9 @@ def test_prepare_chat_to_responses_body():
     assert payload["stream"] is True
     assert payload["client_metadata"]["session_id"] == "s1"
     assert any(item.get("role") == "user" for item in payload["input"])
+    assert "max_tokens" not in payload
+    assert "max_output_tokens" not in payload
+    assert "temperature" not in payload
 
 
 def test_prepare_responses_passthrough():
@@ -117,6 +122,8 @@ def test_prepare_responses_passthrough():
         "model": "m1",
         "input": [{"role": "user", "content": "x"}],
         "stream": False,
+        "max_output_tokens": 256,
+        "temperature": 0.7,
     }
     out, stream = prepare_codex_responses_body(
         body,
@@ -130,6 +137,8 @@ def test_prepare_responses_passthrough():
     assert payload["model"] == "m2"
     assert payload["store"] is False
     assert payload["client_metadata"]["session_id"] == "s"
+    assert "max_output_tokens" not in payload
+    assert "temperature" not in payload
 
 
 def test_resolve_codex_outbound_url():

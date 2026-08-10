@@ -401,6 +401,32 @@ class CodexCliAuthManager:
         }
 
 
+# ChatGPT Codex backend rejects these (not in Codex ResponsesApiRequest).
+_CODEX_UNSUPPORTED_BODY_KEYS = frozenset({
+    "max_output_tokens",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "n",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "user",
+    "seed",
+    "stop",
+    "response_format",
+    "messages",  # chat-only; already converted when present
+    "previous_response_id",  # not used by codex path the same way
+})
+
+
+def _strip_codex_unsupported_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in payload.items() if k not in _CODEX_UNSUPPORTED_BODY_KEYS}
+
+
 def prepare_codex_responses_body(
     body: str | bytes | dict | None,
     *,
@@ -431,7 +457,7 @@ def prepare_codex_responses_body(
 
     # Already Responses-shaped (has input, no messages) → keep structure, enforce fields.
     if "input" in payload and "messages" not in payload:
-        out = dict(payload)
+        out = _strip_codex_unsupported_keys(dict(payload))
         out["model"] = model
         out["stream"] = stream
         if "store" not in out:
@@ -492,10 +518,8 @@ def prepare_codex_responses_body(
         out.pop("tools")
     if payload.get("reasoning") is not None:
         out["reasoning"] = payload.get("reasoning")
-    if payload.get("max_output_tokens") is not None:
-        out["max_output_tokens"] = payload.get("max_output_tokens")
-    elif payload.get("max_tokens") is not None:
-        out["max_output_tokens"] = payload.get("max_tokens")
+    # Intentionally do NOT forward max_tokens / max_output_tokens:
+    # ChatGPT Codex backend returns 400 Unsupported parameter: max_output_tokens.
     return json.dumps(out, ensure_ascii=False), stream
 
 
