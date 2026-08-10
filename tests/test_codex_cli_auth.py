@@ -152,6 +152,46 @@ def test_prepare_responses_passthrough():
     assert payload["reasoning"] == {"effort": "medium"}
 
 
+def test_stream_options_drops_include_usage():
+    """Codex StreamOptions only has reasoning_summary_delivery (common.rs)."""
+    body = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    out, stream = prepare_codex_responses_body(
+        body,
+        forward_model="gpt-5.4",
+        session_id="s",
+        thread_id="t",
+        client_metadata={"session_id": "s"},
+    )
+    assert stream is True
+    payload = json.loads(out)
+    assert "stream_options" not in payload
+
+    body2 = {
+        "model": "m",
+        "input": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "stream_options": {
+            "include_usage": True,
+            "reasoning_summary_delivery": "sequential_cutoff",
+        },
+    }
+    out2, _ = prepare_codex_responses_body(
+        body2,
+        forward_model="gpt-5.4",
+        session_id="s",
+        thread_id="t",
+        client_metadata={"session_id": "s"},
+    )
+    payload2 = json.loads(out2)
+    assert payload2["stream_options"] == {"reasoning_summary_delivery": "sequential_cutoff"}
+    assert "include_usage" not in payload2["stream_options"]
+
+
 def test_convert_chat_tools_to_responses_top_level_name():
     """Match create_tools_json_for_responses_api_includes_top_level_name shape."""
     body = {

@@ -577,6 +577,51 @@ def convert_tool_choice_for_codex_responses_api(tool_choice: Any) -> Any:
     return tool_choice
 
 
+# Nested object shapes from codex-api/src/common.rs (not Chat Completions).
+# StreamOptions { reasoning_summary_delivery: ReasoningSummaryDelivery }
+# ReasoningSummaryDelivery::SequentialCutoff  → "sequential_cutoff"
+_CODEX_STREAM_OPTIONS_KEYS = frozenset({"reasoning_summary_delivery"})
+_CODEX_REASONING_KEYS = frozenset({"effort", "summary", "context"})
+_CODEX_TEXT_KEYS = frozenset({"verbosity", "format"})
+
+
+def convert_stream_options_for_codex_responses_api(stream_options: Any) -> Optional[dict]:
+    """Keep only Codex StreamOptions fields.
+
+    Source: codex-api StreamOptions { reasoning_summary_delivery }.
+    Chat Completions often sends {"include_usage": true} which the Codex
+    backend rejects as Unknown parameter: stream_options.include_usage.
+    """
+    if not isinstance(stream_options, dict):
+        return None
+    out: dict[str, Any] = {}
+    delivery = stream_options.get("reasoning_summary_delivery")
+    if delivery is not None:
+        # Enum serializes as snake_case: SequentialCutoff → sequential_cutoff
+        if isinstance(delivery, str):
+            out["reasoning_summary_delivery"] = delivery
+        else:
+            out["reasoning_summary_delivery"] = str(delivery)
+    # If nothing Codex-recognized remains (e.g. only include_usage), omit entirely.
+    return out or None
+
+
+def convert_reasoning_for_codex_responses_api(reasoning: Any) -> Optional[dict]:
+    """Keep only Codex Reasoning fields: effort, summary, context."""
+    if not isinstance(reasoning, dict):
+        return None
+    out = {k: v for k, v in reasoning.items() if k in _CODEX_REASONING_KEYS}
+    return out or None
+
+
+def convert_text_for_codex_responses_api(text: Any) -> Optional[dict]:
+    """Keep only Codex TextControls fields: verbosity, format."""
+    if not isinstance(text, dict):
+        return None
+    out = {k: v for k, v in text.items() if k in _CODEX_TEXT_KEYS}
+    return out or None
+
+
 def prepare_codex_responses_body(
     body: str | bytes | dict | None,
     *,
@@ -629,6 +674,24 @@ def prepare_codex_responses_body(
                 out.pop("tools", None)
             else:
                 out["tools"] = converted_tools
+        if "stream_options" in out:
+            so = convert_stream_options_for_codex_responses_api(out.get("stream_options"))
+            if so is None:
+                out.pop("stream_options", None)
+            else:
+                out["stream_options"] = so
+        if "reasoning" in out:
+            reasoning = convert_reasoning_for_codex_responses_api(out.get("reasoning"))
+            if reasoning is None:
+                out.pop("reasoning", None)
+            else:
+                out["reasoning"] = reasoning
+        if "text" in out:
+            text = convert_text_for_codex_responses_api(out.get("text"))
+            if text is None:
+                out.pop("text", None)
+            else:
+                out["text"] = text
         meta = dict(out.get("client_metadata") or {})
         if not isinstance(meta, dict):
             meta = {}
@@ -698,13 +761,16 @@ def prepare_codex_responses_body(
         if converted_tools is not None:
             out["tools"] = converted_tools
 
-    # Only pass reasoning if client already sent a Responses-compatible object.
-    if isinstance(payload.get("reasoning"), dict):
-        out["reasoning"] = payload["reasoning"]
-    if isinstance(payload.get("text"), dict):
-        out["text"] = payload["text"]
-    if isinstance(payload.get("stream_options"), dict):
-        out["stream_options"] = payload["stream_options"]
+    # Nested objects: only Codex shapes (common.rs), never Chat Completions extras.
+    reasoning = convert_reasoning_for_codex_responses_api(payload.get("reasoning"))
+    if reasoning is not None:
+        out["reasoning"] = reasoning
+    text = convert_text_for_codex_responses_api(payload.get("text"))
+    if text is not None:
+        out["text"] = text
+    stream_options = convert_stream_options_for_codex_responses_api(payload.get("stream_options"))
+    if stream_options is not None:
+        out["stream_options"] = stream_options
     if payload.get("service_tier") is not None:
         out["service_tier"] = payload.get("service_tier")
     if payload.get("prompt_cache_key") is not None:
