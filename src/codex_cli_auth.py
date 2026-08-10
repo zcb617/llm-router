@@ -461,9 +461,6 @@ class CodexCliAuthManager:
 #   my_codex/codex-rs/codex-api/src/common.rs  struct ResponsesApiRequest
 # Built in:
 #   my_codex/codex-rs/core/src/client.rs       build_responses_request()
-#
-# Only these keys are serialized on the wire. Anything else (e.g. max_output_tokens,
-# max_tokens, temperature) is NOT part of ResponsesApiRequest and must not be sent.
 _CODEX_RESPONSES_API_REQUEST_KEYS = frozenset({
     "model",
     "instructions",
@@ -482,26 +479,61 @@ _CODEX_RESPONSES_API_REQUEST_KEYS = frozenset({
     "client_metadata",
 })
 
+# Nested shapes from common.rs
+_CODEX_STREAM_OPTIONS_KEYS = frozenset({"reasoning_summary_delivery"})
+_CODEX_REASONING_KEYS = frozenset({"effort", "summary", "context"})
+_CODEX_TEXT_KEYS = frozenset({"verbosity", "format"})
+
+# Policy (user decision 2026-08-10): when no request-field mapping exists in Codex source,
+# do NOT invent destinations. Record an unmappable report and apply the decided fallback.
+#   max_tokens / max_output_tokens → B: do not send; log clear warning
+#   stream_options.include_usage   → B: do not send; guarantee usage on response side
+
+
+@dataclass
+class UnmappableFieldReport:
+    """Structured report when a client field has no Codex request-field mapping."""
+
+    field: str
+    client_value: Any
+    reason: str
+    codex_source: str
+    decision: str  # e.g. "B: omit on request; warn" / "B: omit on request; ensure usage on response"
+
+
+@dataclass
+class CodexPrepareResult:
+    """Result of mapping a client body to a Codex Responses outbound body."""
+
+    body_json: str
+    stream: bool
+    include_usage: bool
+    unmappable: list[UnmappableFieldReport]
+
+    def warning_messages(self) -> list[str]:
+        lines = []
+        for item in self.unmappable:
+            lines.append(
+                f"[codex_cli_oauth unmappable] field={item.field} "
+                f"decision={item.decision} reason={item.reason} "
+                f"source={item.codex_source}"
+            )
+        return lines
+
 
 def _pick_codex_responses_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep only ResponsesApiRequest fields (allowlist from Codex source)."""
+    """Keep only ResponsesApiRequest fields (wire allowlist from Codex source)."""
     return {k: v for k, v in payload.items() if k in _CODEX_RESPONSES_API_REQUEST_KEYS}
 
 
 def convert_tools_for_codex_responses_api(tools: Any) -> Optional[list]:
-    """Convert tools to Codex/OpenAI Responses API function-tool shape.
+    """Map tools to Codex Responses function-tool shape (structure map, keep values).
 
-    Codex serializes ToolSpec::Function(ResponsesApiTool) as top-level fields
-    (see tools/src/tool_spec.rs + tools/src/responses_api.rs +
-    create_tools_json_for_responses_api_includes_top_level_name test):
+    Source: tools/src/tool_spec.rs ToolSpec::Function + ResponsesApiTool
+    Test: create_tools_json_for_responses_api_includes_top_level_name
 
-        {"type":"function","name":"...","description":"...","strict":false,"parameters":{...}}
-
-    Chat Completions clients typically send nested function objects:
-
-        {"type":"function","function":{"name":"...","description":"...","parameters":{...}}}
-
-    Missing top-level name causes: Missing required parameter: 'tools[0].name'.
+    Chat:  {"type":"function","function":{"name":..., ...}}
+    Codex: {"type":"function","name":..., ...}  (all nested fields lifted)
     """
     if tools is None:
         return None
@@ -514,52 +546,52 @@ def convert_tools_for_codex_responses_api(tools: Any) -> Optional[list]:
             converted.append(tool)
             continue
 
-        # Already Responses-shaped function tool (top-level name).
+        # Already Responses-shaped (top-level name).
         if tool.get("type") == "function" and isinstance(tool.get("name"), str) and tool.get("name"):
-            item = {
-                "type": "function",
-                "name": tool["name"],
-                "description": tool.get("description") or "",
-                "strict": bool(tool["strict"]) if "strict" in tool else False,
-                "parameters": tool.get("parameters") if tool.get("parameters") is not None else {"type": "object", "properties": {}},
-            }
-            if tool.get("defer_loading") is not None:
-                item["defer_loading"] = tool.get("defer_loading")
+            item = dict(tool)
+            item["type"] = "function"
+            if "strict" not in item:
+                item["strict"] = False
+            if item.get("parameters") is None:
+                item["parameters"] = {"type": "object", "properties": {}}
+            if "description" not in item:
+                item["description"] = ""
             converted.append(item)
             continue
 
-        # Chat Completions nested function tool.
+        # Chat Completions nested function → lift function{} fields to top level.
         nested = tool.get("function")
         if tool.get("type") == "function" and isinstance(nested, dict):
-            name = nested.get("name")
-            if not name:
+            if not nested.get("name"):
                 raise ValueError("tools[].function.name is required for Chat Completions tools")
-            item = {
-                "type": "function",
-                "name": str(name),
-                "description": nested.get("description") or "",
-                "strict": bool(nested["strict"]) if "strict" in nested else False,
-                "parameters": nested.get("parameters")
-                if nested.get("parameters") is not None
-                else {"type": "object", "properties": {}},
-            }
-            if nested.get("defer_loading") is not None:
-                item["defer_loading"] = nested.get("defer_loading")
+            item = {k: v for k, v in nested.items()}  # preserve every nested key/value
+            item["type"] = "function"
+            # outer tool keys (except type/function) also preserved if present
+            for k, v in tool.items():
+                if k in ("type", "function"):
+                    continue
+                if k not in item:
+                    item[k] = v
+            if "strict" not in item:
+                item["strict"] = False
+            if item.get("parameters") is None:
+                item["parameters"] = {"type": "object", "properties": {}}
+            if "description" not in item:
+                item["description"] = ""
             converted.append(item)
             continue
 
-        # Other tool types (web_search, custom, namespace, …): pass through as-is.
-        # Codex ToolSpec includes web_search / custom / namespace variants.
+        # Other ToolSpec variants (web_search / custom / namespace): pass through.
         converted.append(tool)
 
     return converted
 
 
 def convert_tool_choice_for_codex_responses_api(tool_choice: Any) -> Any:
-    """Normalize tool_choice for Responses API.
+    """Map tool_choice structure (preserve selected name/value).
 
-    Chat Completions: {"type":"function","function":{"name":"x"}}
-    Responses / Codex:  {"type":"function","name":"x"}  or "auto"/"none"/"required"
+    Chat: {"type":"function","function":{"name":"x"}}
+    Codex/Responses: {"type":"function","name":"x"} or "auto"/"none"/"required"
     """
     if tool_choice is None:
         return "auto"
@@ -577,49 +609,167 @@ def convert_tool_choice_for_codex_responses_api(tool_choice: Any) -> Any:
     return tool_choice
 
 
-# Nested object shapes from codex-api/src/common.rs (not Chat Completions).
-# StreamOptions { reasoning_summary_delivery: ReasoningSummaryDelivery }
-# ReasoningSummaryDelivery::SequentialCutoff  → "sequential_cutoff"
-_CODEX_STREAM_OPTIONS_KEYS = frozenset({"reasoning_summary_delivery"})
-_CODEX_REASONING_KEYS = frozenset({"effort", "summary", "context"})
-_CODEX_TEXT_KEYS = frozenset({"verbosity", "format"})
+def convert_stream_options_for_codex_responses_api(
+    stream_options: Any,
+    *,
+    unmappable: list[UnmappableFieldReport],
+) -> tuple[Optional[dict], bool]:
+    """Map stream_options to Codex StreamOptions.
 
+    Source: common.rs
+      StreamOptions { reasoning_summary_delivery: ReasoningSummaryDelivery }
 
-def convert_stream_options_for_codex_responses_api(stream_options: Any) -> Optional[dict]:
-    """Keep only Codex StreamOptions fields.
-
-    Source: codex-api StreamOptions { reasoning_summary_delivery }.
-    Chat Completions often sends {"include_usage": true} which the Codex
-    backend rejects as Unknown parameter: stream_options.include_usage.
+    include_usage: NO request-field mapping (user decision B).
+      → omit on request; response side must ensure usage is returned.
+    Returns (mapped_stream_options_or_None, include_usage_flag).
     """
+    include_usage = False
     if not isinstance(stream_options, dict):
-        return None
+        return None, False
+
+    if "include_usage" in stream_options:
+        include_usage = bool(stream_options.get("include_usage"))
+        unmappable.append(
+            UnmappableFieldReport(
+                field="stream_options.include_usage",
+                client_value=stream_options.get("include_usage"),
+                reason=(
+                    "Codex StreamOptions has only reasoning_summary_delivery; "
+                    "no include_usage field. Upstream rejects Unknown parameter."
+                ),
+                codex_source="codex-rs/codex-api/src/common.rs StreamOptions",
+                decision="B: omit on request; ensure usage on response side",
+            )
+        )
+
     out: dict[str, Any] = {}
     delivery = stream_options.get("reasoning_summary_delivery")
     if delivery is not None:
-        # Enum serializes as snake_case: SequentialCutoff → sequential_cutoff
-        if isinstance(delivery, str):
-            out["reasoning_summary_delivery"] = delivery
-        else:
-            out["reasoning_summary_delivery"] = str(delivery)
-    # If nothing Codex-recognized remains (e.g. only include_usage), omit entirely.
-    return out or None
+        out["reasoning_summary_delivery"] = delivery if isinstance(delivery, str) else str(delivery)
+
+    # Any other keys under stream_options: report as unmappable (no silent drop).
+    for key, value in stream_options.items():
+        if key in ("include_usage", "reasoning_summary_delivery"):
+            continue
+        unmappable.append(
+            UnmappableFieldReport(
+                field=f"stream_options.{key}",
+                client_value=value,
+                reason="Not a field of Codex StreamOptions { reasoning_summary_delivery }",
+                codex_source="codex-rs/codex-api/src/common.rs StreamOptions",
+                decision="B: omit on request; report (no invented mapping)",
+            )
+        )
+
+    return (out or None), include_usage
 
 
-def convert_reasoning_for_codex_responses_api(reasoning: Any) -> Optional[dict]:
-    """Keep only Codex Reasoning fields: effort, summary, context."""
+def convert_reasoning_for_codex_responses_api(
+    reasoning: Any,
+    *,
+    unmappable: list[UnmappableFieldReport],
+) -> Optional[dict]:
+    """Map reasoning to Codex Reasoning { effort, summary, context }."""
     if not isinstance(reasoning, dict):
         return None
     out = {k: v for k, v in reasoning.items() if k in _CODEX_REASONING_KEYS}
+    for key, value in reasoning.items():
+        if key not in _CODEX_REASONING_KEYS:
+            unmappable.append(
+                UnmappableFieldReport(
+                    field=f"reasoning.{key}",
+                    client_value=value,
+                    reason="Not a field of Codex Reasoning { effort, summary, context }",
+                    codex_source="codex-rs/codex-api/src/common.rs Reasoning",
+                    decision="B: omit on request; report (no invented mapping)",
+                )
+            )
     return out or None
 
 
-def convert_text_for_codex_responses_api(text: Any) -> Optional[dict]:
-    """Keep only Codex TextControls fields: verbosity, format."""
+def convert_text_for_codex_responses_api(
+    text: Any,
+    *,
+    unmappable: list[UnmappableFieldReport],
+) -> Optional[dict]:
+    """Map text to Codex TextControls { verbosity, format }."""
     if not isinstance(text, dict):
         return None
     out = {k: v for k, v in text.items() if k in _CODEX_TEXT_KEYS}
+    for key, value in text.items():
+        if key not in _CODEX_TEXT_KEYS:
+            unmappable.append(
+                UnmappableFieldReport(
+                    field=f"text.{key}",
+                    client_value=value,
+                    reason="Not a field of Codex TextControls { verbosity, format }",
+                    codex_source="codex-rs/codex-api/src/common.rs TextControls",
+                    decision="B: omit on request; report (no invented mapping)",
+                )
+            )
     return out or None
+
+
+def _collect_top_level_unmappable(
+    payload: dict[str, Any],
+    *,
+    unmappable: list[UnmappableFieldReport],
+    chat_mode: bool,
+) -> None:
+    """Report client top-level keys with no ResponsesApiRequest mapping (user policy B)."""
+    # Keys handled by chat→responses conversion (not "dropped", they become input/instructions).
+    chat_consumed = {"messages", "max_tokens"} if chat_mode else set()
+    special = {
+        "max_tokens",
+        "max_output_tokens",
+        "temperature",
+        "top_p",
+        "top_k",
+        "n",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "user",
+        "seed",
+        "stop",
+        "response_format",
+    }
+    for key, value in payload.items():
+        if key in _CODEX_RESPONSES_API_REQUEST_KEYS:
+            continue
+        if key in chat_consumed and key != "max_tokens":
+            continue
+        if key == "messages" and chat_mode:
+            continue  # mapped to input/instructions
+        if key in ("max_tokens", "max_output_tokens"):
+            unmappable.append(
+                UnmappableFieldReport(
+                    field=key,
+                    client_value=value,
+                    reason=(
+                        "ResponsesApiRequest has no max_tokens/max_output_tokens. "
+                        "Upstream rejects Unsupported parameter: max_output_tokens."
+                    ),
+                    codex_source="codex-rs/codex-api/src/common.rs ResponsesApiRequest",
+                    decision="B: omit on request; log clear warning",
+                )
+            )
+            continue
+        if key in special or key not in _CODEX_RESPONSES_API_REQUEST_KEYS:
+            # Already reported max_*; remaining non-wire keys.
+            if key in ("max_tokens", "max_output_tokens"):
+                continue
+            unmappable.append(
+                UnmappableFieldReport(
+                    field=key,
+                    client_value=value,
+                    reason=f"Not a field of Codex ResponsesApiRequest allowlist",
+                    codex_source="codex-rs/codex-api/src/common.rs ResponsesApiRequest",
+                    decision="B: omit on request; report (no invented mapping)",
+                )
+            )
 
 
 def prepare_codex_responses_body(
@@ -629,11 +779,11 @@ def prepare_codex_responses_body(
     session_id: str,
     thread_id: str,
     client_metadata: dict[str, str],
-) -> tuple[str, bool]:
-    """Build outbound body matching Codex ResponsesApiRequest fields only.
+) -> CodexPrepareResult:
+    """Map client body → Codex ResponsesApiRequest wire body.
 
-    Field set is an allowlist from codex-api ResponsesApiRequest / build_responses_request.
-    Returns (json_text, stream_flag).
+    Mapping when source defines a structure transform.
+    Unmappable fields: report + apply user decision B (omit on request; warn / response-side).
     """
     if body is None or body == "":
         payload: dict[str, Any] = {}
@@ -646,20 +796,23 @@ def prepare_codex_responses_body(
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
 
+    unmappable: list[UnmappableFieldReport] = []
     stream = bool(payload.get("stream", False))
     model = (forward_model or payload.get("model") or "").strip()
     if not model:
         raise ValueError("model is required")
 
-    # Already Responses-shaped (has input, no messages) → allowlist + required overrides.
+    include_usage = False
+    chat_mode = "messages" in payload and "input" not in payload
+
+    # --- Responses-shaped path ---
     if "input" in payload and "messages" not in payload:
+        _collect_top_level_unmappable(payload, unmappable=unmappable, chat_mode=False)
         out = _pick_codex_responses_fields(payload)
         out["model"] = model
         out["stream"] = stream
-        # Codex: store = provider.is_azure_responses_endpoint() → false for ChatGPT codex.
         if "store" not in out:
             out["store"] = False
-        # Codex always sends include for reasoning encrypted content when building request.
         if "include" not in out:
             out["include"] = ["reasoning.encrypted_content"]
         if "tool_choice" not in out:
@@ -674,20 +827,29 @@ def prepare_codex_responses_body(
                 out.pop("tools", None)
             else:
                 out["tools"] = converted_tools
-        if "stream_options" in out:
-            so = convert_stream_options_for_codex_responses_api(out.get("stream_options"))
+        if "stream_options" in out or "stream_options" in payload:
+            so, include_usage = convert_stream_options_for_codex_responses_api(
+                payload.get("stream_options"),
+                unmappable=unmappable,
+            )
             if so is None:
                 out.pop("stream_options", None)
             else:
                 out["stream_options"] = so
-        if "reasoning" in out:
-            reasoning = convert_reasoning_for_codex_responses_api(out.get("reasoning"))
+        if "reasoning" in out or "reasoning" in payload:
+            reasoning = convert_reasoning_for_codex_responses_api(
+                payload.get("reasoning"),
+                unmappable=unmappable,
+            )
             if reasoning is None:
                 out.pop("reasoning", None)
             else:
                 out["reasoning"] = reasoning
-        if "text" in out:
-            text = convert_text_for_codex_responses_api(out.get("text"))
+        if "text" in out or "text" in payload:
+            text = convert_text_for_codex_responses_api(
+                payload.get("text"),
+                unmappable=unmappable,
+            )
             if text is None:
                 out.pop("text", None)
             else:
@@ -695,14 +857,22 @@ def prepare_codex_responses_body(
         meta = dict(out.get("client_metadata") or {})
         if not isinstance(meta, dict):
             meta = {}
-        meta.update(client_metadata)
+        # client_metadata values must be strings for Codex HashMap<String,String>
+        for k, v in client_metadata.items():
+            meta[str(k)] = v if isinstance(v, str) else str(v)
         out["client_metadata"] = meta
-        # instructions: skip empty string serialization in Codex; keep only if non-empty.
         if not (out.get("instructions") or "").strip():
             out.pop("instructions", None)
-        return json.dumps(out, ensure_ascii=False), stream
+        out = _pick_codex_responses_fields(out)
+        return CodexPrepareResult(
+            body_json=json.dumps(out, ensure_ascii=False),
+            stream=stream,
+            include_usage=include_usage,
+            unmappable=unmappable,
+        )
 
-    # Chat Completions → ResponsesApiRequest-shaped body (only allowlisted keys).
+    # --- Chat Completions → ResponsesApiRequest ---
+    _collect_top_level_unmappable(payload, unmappable=unmappable, chat_mode=True)
     messages = payload.get("messages") or []
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
@@ -711,64 +881,73 @@ def prepare_codex_responses_body(
     input_items: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict):
+            # Preserve non-dict entries as-is under input (no silent drop).
+            input_items.append(msg)  # type: ignore[arg-type]
             continue
         role = msg.get("role") or "user"
         content = msg.get("content")
         if role == "system":
+            # Map system → instructions (preserve full text content).
             if isinstance(content, str):
                 instructions_parts.append(content)
             elif isinstance(content, list):
-                texts = [
-                    str(part.get("text") or "")
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") in (None, "text", "input_text")
-                ]
-                instructions_parts.append("\n".join(t for t in texts if t))
+                # Preserve each part's text in order; keep non-text parts as JSON text.
+                chunks: list[str] = []
+                for part in content:
+                    if isinstance(part, dict):
+                        if part.get("type") in (None, "text", "input_text") and "text" in part:
+                            chunks.append(str(part.get("text") or ""))
+                        else:
+                            chunks.append(json.dumps(part, ensure_ascii=False))
+                    else:
+                        chunks.append(str(part))
+                instructions_parts.append("\n".join(chunks))
+            elif content is not None:
+                instructions_parts.append(json.dumps(content, ensure_ascii=False))
             continue
-        if isinstance(content, str):
-            input_items.append({"role": role, "content": content})
-        elif isinstance(content, list):
-            input_items.append({"role": role, "content": content})
-        elif content is None and msg.get("tool_calls"):
-            input_items.append(msg)
-        else:
-            input_items.append({"role": role, "content": "" if content is None else content})
+        # Map user/assistant/tool messages → input items (full message object fields kept).
+        item = dict(msg)
+        input_items.append(item)
 
-    # Mirror defaults from build_responses_request() for ChatGPT/OpenAI provider.
-    out: dict[str, Any] = {
+    out = {
         "model": model,
         "input": input_items,
-        # tool_choice default in Codex build_responses_request: "auto"
         "tool_choice": convert_tool_choice_for_codex_responses_api(
             payload.get("tool_choice") if payload.get("tool_choice") is not None else "auto"
         ),
-        # parallel_tool_calls: prompt.parallel_tool_calls && !use_responses_lite
         "parallel_tool_calls": bool(payload.get("parallel_tool_calls", True)),
-        # store: provider.is_azure_responses_endpoint() → false for chatgpt codex base url
         "store": False,
         "stream": stream,
-        # include = vec!["reasoning.encrypted_content".to_string()]
         "include": ["reasoning.encrypted_content"],
-        "client_metadata": client_metadata,
+        "client_metadata": {
+            str(k): (v if isinstance(v, str) else str(v)) for k, v in client_metadata.items()
+        },
     }
     instructions = "\n\n".join(p for p in instructions_parts if p)
     if instructions:
         out["instructions"] = instructions
 
-    # Convert Chat Completions tools → Responses top-level name shape (Codex ToolSpec).
     if payload.get("tools") is not None:
         converted_tools = convert_tools_for_codex_responses_api(payload.get("tools"))
         if converted_tools is not None:
             out["tools"] = converted_tools
 
-    # Nested objects: only Codex shapes (common.rs), never Chat Completions extras.
-    reasoning = convert_reasoning_for_codex_responses_api(payload.get("reasoning"))
+    reasoning = convert_reasoning_for_codex_responses_api(
+        payload.get("reasoning"),
+        unmappable=unmappable,
+    )
     if reasoning is not None:
         out["reasoning"] = reasoning
-    text = convert_text_for_codex_responses_api(payload.get("text"))
+    text = convert_text_for_codex_responses_api(
+        payload.get("text"),
+        unmappable=unmappable,
+    )
     if text is not None:
         out["text"] = text
-    stream_options = convert_stream_options_for_codex_responses_api(payload.get("stream_options"))
+    stream_options, include_usage = convert_stream_options_for_codex_responses_api(
+        payload.get("stream_options"),
+        unmappable=unmappable,
+    )
     if stream_options is not None:
         out["stream_options"] = stream_options
     if payload.get("service_tier") is not None:
@@ -776,9 +955,77 @@ def prepare_codex_responses_body(
     if payload.get("prompt_cache_key") is not None:
         out["prompt_cache_key"] = payload.get("prompt_cache_key")
 
-    # Final guard: only ResponsesApiRequest keys leave this function.
     out = _pick_codex_responses_fields(out)
-    return json.dumps(out, ensure_ascii=False), stream
+    return CodexPrepareResult(
+        body_json=json.dumps(out, ensure_ascii=False),
+        stream=stream,
+        include_usage=include_usage,
+        unmappable=unmappable,
+    )
+
+
+def ensure_usage_in_upstream_response(
+    response_body: bytes | str | None,
+    *,
+    include_usage: bool,
+    stream: bool,
+) -> tuple[bytes, list[str]]:
+    """Response-side mapping for stream_options.include_usage (user decision B).
+
+    Codex/Responses returns usage on response.completed (SSE) or body.usage (JSON).
+    We do not re-fetch tokens; we verify presence and only warn if missing.
+    Returns (body_bytes, warning_messages).
+    """
+    warnings: list[str] = []
+    if not include_usage:
+        if response_body is None:
+            return b"", warnings
+        return response_body if isinstance(response_body, (bytes, bytearray)) else str(response_body).encode("utf-8"), warnings
+
+    raw = b"" if response_body is None else (
+        response_body if isinstance(response_body, (bytes, bytearray)) else str(response_body).encode("utf-8")
+    )
+    text = raw.decode("utf-8", errors="replace")
+
+    has_usage = False
+    if stream or "data:" in text:
+        # SSE: look for usage in any event payload (typically response.completed).
+        for line in text.splitlines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("usage") is not None:
+                has_usage = True
+                break
+            resp = obj.get("response")
+            if isinstance(resp, dict) and resp.get("usage") is not None:
+                has_usage = True
+                break
+    else:
+        try:
+            obj = json.loads(text) if text.strip() else {}
+        except json.JSONDecodeError:
+            obj = {}
+        if isinstance(obj, dict):
+            if obj.get("usage") is not None:
+                has_usage = True
+            elif isinstance(obj.get("response"), dict) and obj["response"].get("usage") is not None:
+                has_usage = True
+
+    if not has_usage:
+        warnings.append(
+            "[codex_cli_oauth response mapping] include_usage=true but upstream body "
+            "has no usage field (expected on response.completed / body.usage)"
+        )
+    return raw, warnings
 
 
 def resolve_codex_outbound_url(base_url: str | None = None) -> str:

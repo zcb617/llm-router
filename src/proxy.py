@@ -20,6 +20,7 @@ from src.openai_protocol_converter import parse_sse_buffer
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
     CodexCliAuthManager,
+    ensure_usage_in_upstream_response,
     host_from_url,
     prepare_codex_responses_body,
     resolve_codex_base_url,
@@ -935,13 +936,18 @@ class LLMRouterAddon:
                 session_id=session_id,
                 thread_id=thread_id,
             )
-            req_body, stream = prepare_codex_responses_body(
+            prepared = prepare_codex_responses_body(
                 captured_req.body,
                 forward_model=forward_model,
                 session_id=session_id,
                 thread_id=thread_id,
                 client_metadata=client_metadata,
             )
+            # Unmappable fields: structured report + decision B (warn, do not invent mapping).
+            for warning in prepared.warning_messages():
+                logger.warning(warning)
+            stream = prepared.stream
+            req_body = prepared.body_json
             full_url = resolve_codex_outbound_url(self._resolve_target_base_url(mapping))
             host = host_from_url(full_url)
             req_headers = self._codex_cli_auth.build_full_headers(
@@ -966,6 +972,14 @@ class LLMRouterAddon:
                 body=req_data,
                 timeout_ms=600_000,
             )
+            # include_usage decision B: ensure response carries usage (Responses completed/body.usage).
+            resp_body, usage_warnings = ensure_usage_in_upstream_response(
+                resp_body,
+                include_usage=prepared.include_usage,
+                stream=stream,
+            )
+            for warning in usage_warnings:
+                logger.warning(warning)
             upstream_headers_time = time.time()
             first_body_time = upstream_headers_time if resp_body else None
             flow.response = http.Response.make(
@@ -983,6 +997,15 @@ class LLMRouterAddon:
             flow.metadata["call_id"] = captured_req.call_id
             flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
             flow.metadata["codex_cli_oauth"] = True
+            flow.metadata["codex_include_usage"] = prepared.include_usage
+            flow.metadata["codex_unmappable"] = [
+                {
+                    "field": u.field,
+                    "decision": u.decision,
+                    "reason": u.reason,
+                }
+                for u in prepared.unmappable
+            ]
             self._store_pending_request(flow, captured_req)
         except CodexOutboundError as e:
             logger.error(f"Codex CLI OAuth outbound failed: {e}")
