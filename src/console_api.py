@@ -15,7 +15,7 @@ from src.kimi_cli_auth import (
     KIMI_DEFAULT_OAUTH_HOST,
     KIMI_DEFAULT_OAUTH_KEY,
 )
-from src.codex_cli_auth import CODEX_CLI_OAUTH_BASE_URL
+from src.codex_cli_auth import resolve_codex_base_url
 
 
 _MODEL_CONFIG_PATH_RE = re.compile(r'^/api/models/(\d+)$')
@@ -176,7 +176,8 @@ def _validate_no_codex_routes(storage, routes: list) -> Optional[str]:
 
 
 def _default_codex_cli_oauth_base_url() -> str:
-    return CODEX_CLI_OAUTH_BASE_URL
+    # Prefer Codex config.toml openai_base_url; else ChatGPT codex default.
+    return resolve_codex_base_url()
 
 
 def _extract_model_routes(body: dict) -> tuple[list, Optional[str]]:

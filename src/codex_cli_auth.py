@@ -24,6 +24,8 @@ import httpx
 # Fixed Codex CLI fingerprint version (must match real codex_cli_rs clients).
 CODEX_CLI_VERSION = "0.147.0"
 CODEX_ORIGINATOR = "codex_cli_rs"
+# Default when ~/.codex/config.toml has no openai_base_url (Codex ChatGPT OAuth).
+# Source: model-provider-info CHATGPT_CODEX_BASE_URL + AuthMode::Chatgpt branch.
 CODEX_CLI_OAUTH_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -42,8 +44,62 @@ def _auth_json_path() -> Path:
     return _codex_home() / "auth.json"
 
 
+def _config_toml_path() -> Path:
+    # Codex loads config from $CODEX_HOME/config.toml
+    return _codex_home() / "config.toml"
+
+
 def _installation_id_path() -> Path:
     return _codex_home() / "installation_id"
+
+
+def _parse_top_level_toml_string(text: str, key: str) -> Optional[str]:
+    """Read a top-level string key from config.toml without a full TOML parser.
+
+    Only matches unindented `key = "..."` / `key = '...'` lines (Codex root keys
+    such as openai_base_url live at the top level, not under tables).
+    """
+    import re
+
+    pattern = re.compile(
+        rf'^{re.escape(key)}\s*=\s*(?:"([^"]*)"|\'([^\']*)\')\s*(?:#.*)?$',
+        flags=re.MULTILINE,
+    )
+    match = pattern.search(text or "")
+    if not match:
+        return None
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def read_openai_base_url_from_codex_config() -> Optional[str]:
+    """Return openai_base_url from Codex config.toml, or None if missing/empty.
+
+    Codex config key: openai_base_url (config_toml.rs / ConfigToml).
+    """
+    path = _config_toml_path()
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    value = _parse_top_level_toml_string(text, "openai_base_url")
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def resolve_codex_base_url() -> str:
+    """Base URL for Codex CLI OAuth outbound.
+
+    Prefer $CODEX_HOME/config.toml openai_base_url when set and non-empty;
+    otherwise use CODEX_CLI_OAUTH_BASE_URL (chatgpt.com/backend-api/codex).
+    """
+    configured = read_openai_base_url_from_codex_config()
+    if configured:
+        return configured.rstrip("/")
+    return CODEX_CLI_OAUTH_BASE_URL
 
 
 def _ensure_private_file(path: Path) -> None:
@@ -559,8 +615,12 @@ def prepare_codex_responses_body(
 
 
 def resolve_codex_outbound_url(base_url: str | None = None) -> str:
-    base = (base_url or CODEX_CLI_OAUTH_BASE_URL).rstrip("/")
-    # Codex ChatGPT OAuth always posts to {base}/responses
+    """Full Responses endpoint URL: {base}/responses.
+
+    base defaults to resolve_codex_base_url() (config openai_base_url or default).
+    """
+    base = (base_url or resolve_codex_base_url()).rstrip("/")
+    # Codex posts to provider base + "responses" (WireApi::Responses path).
     if base.endswith("/responses"):
         return base
     return f"{base}/responses"

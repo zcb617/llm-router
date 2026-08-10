@@ -19,10 +19,10 @@ from urllib.parse import urlparse
 from src.openai_protocol_converter import parse_sse_buffer
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
-    CODEX_CLI_OAUTH_BASE_URL,
     CodexCliAuthManager,
     host_from_url,
     prepare_codex_responses_body,
+    resolve_codex_base_url,
     resolve_codex_outbound_url,
 )
 from src.codex_outbound_client import CodexOutboundError, send_via_codex_outbound
@@ -219,7 +219,8 @@ class LLMRouterAddon:
         if self._is_kimi_cli_auth(cfg):
             return KIMI_CLI_OAUTH_BASE_URL
         if self._is_codex_cli_oauth(cfg):
-            return CODEX_CLI_OAUTH_BASE_URL
+            # Prefer ~/.codex/config.toml openai_base_url; fallback to Codex default.
+            return resolve_codex_base_url()
         return cfg.get("target_base_url", "")
 
     @staticmethod
@@ -362,7 +363,7 @@ class LLMRouterAddon:
                 if auth_mode == "kimi_cli_oauth":
                     target_base_url = KIMI_CLI_OAUTH_BASE_URL
                 elif auth_mode == "codex_cli_oauth":
-                    target_base_url = CODEX_CLI_OAUTH_BASE_URL
+                    target_base_url = resolve_codex_base_url()
                 else:
                     target_base_url = r["target_base_url"]
                 routes_by_model[mk].append({
@@ -400,7 +401,7 @@ class LLMRouterAddon:
                         if auth_mode == "kimi_cli_oauth":
                             target_base_url = KIMI_CLI_OAUTH_BASE_URL
                         elif auth_mode == "codex_cli_oauth":
-                            target_base_url = CODEX_CLI_OAUTH_BASE_URL
+                            target_base_url = resolve_codex_base_url()
                         elif not target_base_url:
                             continue
 

@@ -7,6 +7,9 @@
 `https://chatgpt.com/backend-api/codex/responses`
 
 - Token：本机 `~/.codex/auth.json`（可用 `CODEX_HOME` 覆盖）
+- 上游地址：读取 `$CODEX_HOME/config.toml` 顶层 **`openai_base_url`**；未配置或为空时回退  
+  `https://chatgpt.com/backend-api/codex`
+- 实际请求：`{base}/responses`
 - 版本指纹固定：`0.147.0`
 - `originator`: `codex_cli_rs`
 - 出站由 **Rust** 二进制 `codex_outbound` 发送（reqwest + rustls）

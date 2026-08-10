@@ -6,12 +6,15 @@ import time
 from pathlib import Path
 
 from src.codex_cli_auth import (
+    CODEX_CLI_OAUTH_BASE_URL,
     CODEX_CLI_VERSION,
     CODEX_ORIGINATOR,
     CodexCliAuthManager,
     _CODEX_RESPONSES_API_REQUEST_KEYS,
     build_codex_user_agent,
     prepare_codex_responses_body,
+    read_openai_base_url_from_codex_config,
+    resolve_codex_base_url,
     resolve_codex_outbound_url,
 )
 
@@ -150,8 +153,36 @@ def test_prepare_responses_passthrough():
 
 
 def test_resolve_codex_outbound_url():
-    assert resolve_codex_outbound_url(None).endswith("/responses")
     assert resolve_codex_outbound_url("https://chatgpt.com/backend-api/codex").endswith("/responses")
     assert resolve_codex_outbound_url("https://chatgpt.com/backend-api/codex/responses").endswith(
         "/responses"
     )
+    assert resolve_codex_outbound_url("http://127.0.0.1:48787/v1") == "http://127.0.0.1:48787/v1/responses"
+
+
+def test_openai_base_url_from_codex_config(monkeypatch, tmp_path: Path):
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    # No config → default ChatGPT codex base.
+    assert read_openai_base_url_from_codex_config() is None
+    assert resolve_codex_base_url() == CODEX_CLI_OAUTH_BASE_URL
+
+    (codex_home / "config.toml").write_text(
+        'model = "gpt-5.4"\n'
+        'openai_base_url = "http://127.0.0.1:48787/v1"\n'
+        "\n"
+        "[features]\n"
+        "memories = true\n"
+        'openai_base_url = "http://should-not-use"\n',
+        encoding="utf-8",
+    )
+    assert read_openai_base_url_from_codex_config() == "http://127.0.0.1:48787/v1"
+    assert resolve_codex_base_url() == "http://127.0.0.1:48787/v1"
+    assert resolve_codex_outbound_url(None) == "http://127.0.0.1:48787/v1/responses"
+
+    # Empty string → fall back to default.
+    (codex_home / "config.toml").write_text('openai_base_url = ""\n', encoding="utf-8")
+    assert read_openai_base_url_from_codex_config() is None
+    assert resolve_codex_base_url() == CODEX_CLI_OAUTH_BASE_URL
