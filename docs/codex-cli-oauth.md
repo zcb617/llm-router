@@ -9,7 +9,7 @@
 - Token：本机 `~/.codex/auth.json`（可用 `CODEX_HOME` 覆盖）
 - 上游地址：读取 `$CODEX_HOME/config.toml` 顶层 **`openai_base_url`**；未配置或为空时回退  
   `https://chatgpt.com/backend-api/codex`
-- 实际请求：`{base}/responses`
+- 实际下游请求统一使用 `{base}/responses`
 - 版本指纹固定：`0.147.0`
 - `originator`: `codex_cli_rs`
 - 出站由 **Rust** 二进制 `codex_outbound` 发送（reqwest + rustls）
@@ -43,8 +43,8 @@ export CODEX_OUTBOUND_BIN=/path/to/codex_outbound
 
 支持：
 
-- OpenAI Chat Completions（自动转成 Responses 再出站）
-- OpenAI Responses（补齐 Codex 字段后出站）
+- OpenAI Chat Completions：入口保持 `/v1/chat/completions`；请求转为 Responses，响应再转回 Chat
+- OpenAI Responses：入口保持 `/v1/responses`；请求和响应按 Responses 格式处理
 
 当前版本 **仅单上游**；不可加入多上游故障转移。
 

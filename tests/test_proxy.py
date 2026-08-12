@@ -7,6 +7,7 @@ import json
 import sys
 import threading
 import types
+from types import SimpleNamespace
 
 
 mitmproxy_stub = types.ModuleType("mitmproxy")
@@ -30,6 +31,7 @@ sys.modules.setdefault("mitmproxy.http", http_stub)
 sys.modules.setdefault("mitmproxy.addonmanager", addonmanager_stub)
 
 from src.proxy import LLMRouterAddon
+import src.proxy as proxy_module
 from src.capture import CapturedRequest, DataCapturer
 
 
@@ -353,6 +355,87 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
     assert captured_req.overridden_model == "kimi-k2"
     assert "call_id" in flow.metadata
     assert id(flow) in addon._pending_requests
+
+
+def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
+    addon = _make_addon_for_route_tests()
+    addon._resolve_target_base_url = lambda _mapping: "http://upstream.example/v1"
+
+    class DummyCodexAuth:
+        @staticmethod
+        def resolve_snapshot(*, refresh_if_needed):
+            return SimpleNamespace(
+                access_token="oauth-token",
+                account_id="account-1",
+                is_fedramp_account=False,
+            )
+
+        @staticmethod
+        def build_client_metadata(*, session_id, thread_id):
+            return {"session_id": session_id, "thread_id": thread_id}
+
+        @staticmethod
+        def build_full_headers(**kwargs):
+            return [
+                ("Host", kwargs["host"]),
+                ("Accept", "text/event-stream" if kwargs["stream"] else "application/json"),
+                ("Content-Type", "application/json"),
+                ("Authorization", f"Bearer {kwargs['access_token']}"),
+            ]
+
+    addon._codex_cli_auth = DummyCodexAuth()
+    sent = []
+
+    def fake_send(**kwargs):
+        sent.append(kwargs)
+        if "/chat/completions" in kwargs["url"]:
+            raise AssertionError("codex-cli oauth must send both public protocols to /responses")
+        if len(sent) == 1:
+            return (
+                200,
+                [("Content-Type", "text/event-stream")],
+                b'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}}\n\n',
+            )
+        return 200, [("Content-Type", "application/json")], b'{"id":"resp_2","output":[]}'
+
+    monkeypatch.setattr(proxy_module, "send_via_codex_outbound", fake_send)
+
+    def run(path, body):
+        flow = _make_flow()
+        flow.request.url = f"http://router.test{path}"
+        flow.request.content = json.dumps(body).encode("utf-8")
+        captured = _make_captured_request(flow)
+        addon._forward_codex_cli_oauth(
+            flow,
+            {"auth_mode": "codex_cli_oauth", "forward_model": "gpt-5.4"},
+            captured,
+            "router-model",
+            path,
+        )
+        return flow, captured
+
+    chat_flow, chat_captured = run(
+        "/v1/chat/completions",
+        {"model": "router-model", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    responses_flow, responses_captured = run(
+        "/v1/responses",
+        {"model": "router-model", "stream": True, "input": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert sent[0]["url"] == "http://upstream.example/v1/responses"
+    chat_body = json.loads(sent[0]["body"])
+    assert "input" in chat_body and "messages" not in chat_body
+    assert sent[1]["url"] == "http://upstream.example/v1/responses"
+    responses_body = json.loads(sent[1]["body"])
+    assert "input" in responses_body and "messages" not in responses_body
+    assert chat_captured.url == sent[0]["url"]
+    assert responses_captured.url == sent[1]["url"]
+    assert chat_flow.response["status"] == 200
+    assert chat_flow.response["headers"]["Content-Type"] == "text/event-stream"
+    assert b'"object":"chat.completion.chunk"' in chat_flow.response["content"]
+    assert b"response.completed" not in chat_flow.response["content"]
+    assert responses_flow.response["status"] == 200
 
 
 def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():

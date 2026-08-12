@@ -799,6 +799,116 @@ def _collect_top_level_unmappable(
         )
 
 
+def _convert_chat_content_to_codex_responses(
+    content: Any,
+    *,
+    role: str,
+) -> Any:
+    """Convert Chat message content parts to Codex Responses content parts."""
+    response_text_type = "output_text" if role == "assistant" else "input_text"
+
+    if isinstance(content, str):
+        return [{"type": response_text_type, "text": content}]
+    if content is None:
+        return []
+    if not isinstance(content, list):
+        return [{"type": response_text_type, "text": str(content)}]
+
+    converted: list[Any] = []
+    for part in content:
+        if isinstance(part, str):
+            converted.append({"type": response_text_type, "text": part})
+            continue
+        if not isinstance(part, dict):
+            converted.append({"type": response_text_type, "text": str(part)})
+            continue
+
+        part_type = part.get("type")
+        if part_type in (None, "text", "input_text", "output_text"):
+            converted.append({
+                "type": response_text_type,
+                "text": str(part.get("text") or ""),
+            })
+            continue
+
+        if part_type in ("image_url", "input_image"):
+            image_url = part.get("image_url")
+            detail = part.get("detail")
+            if isinstance(image_url, dict):
+                detail = image_url.get("detail", detail)
+                image_url = image_url.get("url")
+            image_part: dict[str, Any] = {
+                "type": "input_image",
+                "image_url": image_url or "",
+            }
+            if detail is not None:
+                image_part["detail"] = detail
+            converted.append(image_part)
+            continue
+
+        # Keep Responses-native parts unchanged when a client already supplied one.
+        converted.append(dict(part))
+    return converted
+
+
+def _convert_chat_tool_output_to_codex_responses(content: Any) -> Any:
+    if isinstance(content, str):
+        return content
+    return _convert_chat_content_to_codex_responses(content, role="user")
+
+
+def _convert_chat_tool_call_to_codex_responses(
+    tool_call: Any,
+    *,
+    index: int,
+) -> dict[str, Any]:
+    if not isinstance(tool_call, dict):
+        return {
+            "type": "function_call",
+            "call_id": f"call_{index}",
+            "name": "",
+            "arguments": json.dumps(tool_call, ensure_ascii=False),
+        }
+
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        function = {}
+    arguments = function.get("arguments", "")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    return {
+        "type": "function_call",
+        "call_id": str(tool_call.get("id") or tool_call.get("call_id") or f"call_{index}"),
+        "name": str(function.get("name") or ""),
+        "arguments": arguments,
+    }
+
+
+def _convert_chat_message_to_codex_responses(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert one legacy Chat message into one or more Responses input items."""
+    role = str(message.get("role") or "user")
+    content = message.get("content")
+
+    if role == "tool":
+        call_id = message.get("tool_call_id") or message.get("call_id") or message.get("id") or ""
+        return [{
+            "type": "function_call_output",
+            "call_id": str(call_id),
+            "output": _convert_chat_tool_output_to_codex_responses(content),
+        }]
+
+    items: list[dict[str, Any]] = []
+    converted_content = _convert_chat_content_to_codex_responses(content, role=role)
+    if content is not None or not message.get("tool_calls"):
+        items.append({"role": role, "content": converted_content})
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for index, tool_call in enumerate(tool_calls):
+            items.append(_convert_chat_tool_call_to_codex_responses(tool_call, index=index))
+    return items
+
+
 def prepare_codex_responses_body(
     body: str | bytes | dict | None,
     *,
@@ -933,9 +1043,8 @@ def prepare_codex_responses_body(
             elif content is not None:
                 instructions_parts.append(json.dumps(content, ensure_ascii=False))
             continue
-        # Map user/assistant/tool messages → input items (full message object fields kept).
-        item = dict(msg)
-        input_items.append(item)
+        # Map user/assistant/tool messages → Responses input items.
+        input_items.extend(_convert_chat_message_to_codex_responses(msg))
 
     out = {
         "model": model,
@@ -993,6 +1102,416 @@ def prepare_codex_responses_body(
         include_usage=include_usage,
         unmappable=unmappable,
     )
+
+
+def _codex_usage_to_chat(usage: Any) -> dict[str, Any] | None:
+    if not isinstance(usage, dict):
+        return None
+
+    result: dict[str, Any] = {
+        "prompt_tokens": usage.get("input_tokens", 0),
+        "completion_tokens": usage.get("output_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    input_details = usage.get("input_tokens_details")
+    if isinstance(input_details, dict) and input_details.get("cached_tokens") is not None:
+        result["prompt_tokens_details"] = {
+            "cached_tokens": input_details.get("cached_tokens", 0),
+        }
+    output_details = usage.get("output_tokens_details")
+    if isinstance(output_details, dict) and output_details.get("reasoning_tokens") is not None:
+        result["completion_tokens_details"] = {
+            "reasoning_tokens": output_details.get("reasoning_tokens", 0),
+        }
+    return result
+
+
+def _codex_response_payload(body: str | bytes | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(body, dict):
+        payload = dict(body)
+    elif isinstance(body, (bytes, bytearray)):
+        payload = json.loads(body.decode("utf-8") or "{}")
+    else:
+        payload = json.loads(str(body) or "{}")
+    if not isinstance(payload, dict):
+        raise ValueError("Codex Responses response must be a JSON object")
+
+    completed_response = payload.get("response")
+    if payload.get("type") == "response.completed" and isinstance(completed_response, dict):
+        return completed_response
+    return payload
+
+
+def _codex_response_finish_reason(response: dict[str, Any], has_tool_calls: bool) -> str:
+    if has_tool_calls:
+        return "tool_calls"
+    if response.get("status") == "incomplete":
+        return "length"
+    return "stop"
+
+
+def convert_codex_responses_body_to_chat(
+    body: str | bytes | dict[str, Any],
+    *,
+    fallback_model: str = "",
+) -> dict[str, Any]:
+    """Convert one successful Codex Responses JSON result to Chat format."""
+    response = _codex_response_payload(body)
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    refusal: str | None = None
+
+    for item in response.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            for part in item.get("content") or []:
+                if isinstance(part, dict) and part.get("type") in (
+                    "reasoning_text",
+                    "summary_text",
+                ):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        reasoning_parts.append(text)
+        elif item_type == "message":
+            for part in item.get("content") or []:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type in ("output_text", "text"):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
+                elif part_type == "refusal":
+                    refusal = str(part.get("refusal") or part.get("text") or "")
+        elif item_type == "function_call":
+            tool_calls.append(
+                {
+                    "id": item.get("call_id") or item.get("id") or f"call_{len(tool_calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name") or "",
+                        "arguments": item.get("arguments") or "",
+                    },
+                }
+            )
+
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(text_parts) if text_parts else (None if tool_calls or refusal else ""),
+    }
+    if refusal is not None:
+        message["refusal"] = refusal
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    response_id = response.get("id") or f"resp_{uuid.uuid4().hex[:16]}"
+    model = response.get("model") or fallback_model
+    result: dict[str, Any] = {
+        "id": response_id,
+        "object": "chat.completion",
+        "created": response.get("created_at") or int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": _codex_response_finish_reason(response, bool(tool_calls)),
+            }
+        ],
+    }
+    usage = _codex_usage_to_chat(response.get("usage"))
+    if usage is not None:
+        result["usage"] = usage
+    return result
+
+
+def _codex_sse_data_events(body: str | bytes) -> list[str]:
+    text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+    normalized = text.replace("\r\n", "\n")
+    events: list[str] = []
+    for block in normalized.split("\n\n"):
+        data_lines = [
+            line[5:].lstrip()
+            for line in block.split("\n")
+            if line.startswith("data:")
+        ]
+        if data_lines:
+            events.append("\n".join(data_lines))
+    return events
+
+
+def _chat_stream_chunk(
+    *,
+    response_id: str,
+    created: int,
+    model: str,
+    delta: dict[str, Any],
+    finish_reason: str | None = None,
+    usage: dict[str, Any] | None = None,
+) -> bytes:
+    payload: dict[str, Any] = {
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
+
+
+def _chat_response_to_sse(response: dict[str, Any], *, include_usage: bool) -> bytes:
+    response_id = str(response.get("id") or f"chatcmpl_{uuid.uuid4().hex[:16]}")
+    created = int(response.get("created") or time.time())
+    model = str(response.get("model") or "")
+    chunks: list[bytes] = [
+        _chat_stream_chunk(
+            response_id=response_id,
+            created=created,
+            model=model,
+            delta={"role": "assistant", "content": ""},
+        )
+    ]
+    choice = (response.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    reasoning = message.get("reasoning_content")
+    if reasoning:
+        chunks.append(
+            _chat_stream_chunk(
+                response_id=response_id,
+                created=created,
+                model=model,
+                delta={"reasoning_content": reasoning},
+            )
+        )
+    content = message.get("content")
+    if content:
+        chunks.append(
+            _chat_stream_chunk(
+                response_id=response_id,
+                created=created,
+                model=model,
+                delta={"content": content},
+            )
+        )
+    for index, tool_call in enumerate(message.get("tool_calls") or []):
+        function = tool_call.get("function") or {}
+        chunks.append(
+            _chat_stream_chunk(
+                response_id=response_id,
+                created=created,
+                model=model,
+                delta={
+                    "tool_calls": [
+                        {
+                            "index": index,
+                            "id": tool_call.get("id") or f"call_{index}",
+                            "type": "function",
+                            "function": {
+                                "name": function.get("name") or "",
+                                "arguments": function.get("arguments") or "",
+                            },
+                        }
+                    ]
+                },
+            )
+        )
+    usage = response.get("usage") if include_usage else None
+    chunks.append(
+        _chat_stream_chunk(
+            response_id=response_id,
+            created=created,
+            model=model,
+            delta={},
+            finish_reason=choice.get("finish_reason") or "stop",
+            usage=usage,
+        )
+    )
+    chunks.append(b"data: [DONE]\n\n")
+    return b"".join(chunks)
+
+
+def convert_codex_responses_sse_to_chat(
+    body: str | bytes,
+    *,
+    fallback_model: str = "",
+    include_usage: bool = False,
+) -> bytes:
+    """Convert a buffered Codex Responses SSE body to Chat SSE."""
+    response_id = f"resp_{uuid.uuid4().hex[:16]}"
+    created = int(time.time())
+    model = fallback_model
+    status = "completed"
+    usage: dict[str, Any] | None = None
+    role_sent = False
+    finished = False
+    tool_indexes: dict[str, int] = {}
+    next_tool_index = 0
+    output_chunks: list[bytes] = []
+
+    def emit_role() -> None:
+        nonlocal role_sent
+        if role_sent:
+            return
+        role_sent = True
+        output_chunks.append(
+            _chat_stream_chunk(
+                response_id=response_id,
+                created=created,
+                model=model,
+                delta={"role": "assistant", "content": ""},
+            )
+        )
+
+    def tool_index(key: str) -> int:
+        nonlocal next_tool_index
+        if key not in tool_indexes:
+            tool_indexes[key] = next_tool_index
+            next_tool_index += 1
+        return tool_indexes[key]
+
+    for raw_event in _codex_sse_data_events(body):
+        if raw_event.strip() == "[DONE]":
+            break
+        try:
+            event = json.loads(raw_event)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        event_type = str(event.get("type") or "")
+        response = event.get("response")
+        if isinstance(response, dict):
+            response_id = str(response.get("id") or response_id)
+            created = int(response.get("created_at") or created)
+            model = str(response.get("model") or model)
+            status = str(response.get("status") or status)
+            mapped_usage = _codex_usage_to_chat(response.get("usage"))
+            if mapped_usage is not None:
+                usage = mapped_usage
+
+        if event_type == "response.output_item.added":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                emit_role()
+                key = str(event.get("output_index") or item.get("id") or len(tool_indexes))
+                index = tool_index(key)
+                function = {
+                    "name": item.get("name") or "",
+                    "arguments": item.get("arguments") or "",
+                }
+                output_chunks.append(
+                    _chat_stream_chunk(
+                        response_id=response_id,
+                        created=created,
+                        model=model,
+                        delta={
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "id": item.get("call_id") or item.get("id") or f"call_{index}",
+                                    "type": "function",
+                                    "function": function,
+                                }
+                            ]
+                        },
+                    )
+                )
+        elif event_type == "response.output_text.delta":
+            emit_role()
+            output_chunks.append(
+                _chat_stream_chunk(
+                    response_id=response_id,
+                    created=created,
+                    model=model,
+                    delta={"content": event.get("delta") or ""},
+                )
+            )
+        elif event_type in (
+            "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta",
+        ):
+            emit_role()
+            output_chunks.append(
+                _chat_stream_chunk(
+                    response_id=response_id,
+                    created=created,
+                    model=model,
+                    delta={"reasoning_content": event.get("delta") or ""},
+                )
+            )
+        elif event_type == "response.function_call_arguments.delta":
+            emit_role()
+            key = str(event.get("output_index") or event.get("item_id") or len(tool_indexes))
+            index = tool_index(key)
+            output_chunks.append(
+                _chat_stream_chunk(
+                    response_id=response_id,
+                    created=created,
+                    model=model,
+                    delta={
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "function": {"arguments": event.get("delta") or ""},
+                            }
+                        ]
+                    },
+                )
+            )
+        elif event_type == "response.completed":
+            finished = True
+
+    emit_role()
+    if not finished:
+        status = "completed"
+    finish_reason = "tool_calls" if tool_indexes else ("length" if status == "incomplete" else "stop")
+    output_chunks.append(
+        _chat_stream_chunk(
+            response_id=response_id,
+            created=created,
+            model=model,
+            delta={},
+            finish_reason=finish_reason,
+            usage=usage if include_usage else None,
+        )
+    )
+    output_chunks.append(b"data: [DONE]\n\n")
+    return b"".join(output_chunks)
+
+
+def convert_codex_responses_to_chat(
+    body: str | bytes,
+    *,
+    stream: bool,
+    fallback_model: str = "",
+    include_usage: bool = False,
+) -> bytes:
+    """Convert only the legacy Chat response; Responses callers are untouched."""
+    text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body or "")
+    if "data:" in text:
+        return convert_codex_responses_sse_to_chat(
+            body,
+            fallback_model=fallback_model,
+            include_usage=include_usage,
+        )
+    response = convert_codex_responses_body_to_chat(body, fallback_model=fallback_model)
+    if stream:
+        return _chat_response_to_sse(response, include_usage=include_usage)
+    return json.dumps(response, ensure_ascii=False).encode("utf-8")
 
 
 def ensure_usage_in_upstream_response(
@@ -1059,15 +1578,22 @@ def ensure_usage_in_upstream_response(
     return raw, warnings
 
 
-def resolve_codex_outbound_url(base_url: str | None = None) -> str:
-    """Full Responses endpoint URL: {base}/responses.
+def is_chat_completions_path(path: str | None) -> bool:
+    """Return whether an inbound path requests Chat Completions semantics."""
+    normalized = urlparse(path or "").path
+    return normalized in ("/v1/chat/completions", "/chat/completions")
 
-    base defaults to resolve_codex_base_url() (config openai_base_url or default).
-    """
+
+def resolve_codex_outbound_url(
+    base_url: str | None = None,
+    path: str = "/v1/responses",
+) -> str:
+    """Resolve the codex-cli oauth URL; its downstream protocol is Responses."""
     base = (base_url or resolve_codex_base_url()).rstrip("/")
-    # Codex posts to provider base + "responses" (WireApi::Responses path).
-    if base.endswith("/responses"):
-        return base
+    for known_endpoint in ("/chat/completions", "/responses"):
+        if base.endswith(known_endpoint):
+            base = base[: -len(known_endpoint)]
+            break
     return f"{base}/responses"
 
 

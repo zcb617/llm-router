@@ -12,7 +12,10 @@ from src.codex_cli_auth import (
     CodexCliAuthManager,
     _CODEX_RESPONSES_API_REQUEST_KEYS,
     build_codex_user_agent,
+    convert_codex_responses_body_to_chat,
+    convert_codex_responses_sse_to_chat,
     ensure_usage_in_upstream_response,
+    is_chat_completions_path,
     prepare_codex_responses_body,
     read_openai_base_url_from_codex_config,
     resolve_codex_base_url,
@@ -138,10 +141,74 @@ def test_prepare_chat_to_responses_body():
         assert len(line) < 160
 
 
+def test_prepare_chat_content_and_tools_use_responses_shapes():
+    body = {
+        "model": "m",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/a.png", "detail": "high"},
+                    },
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "I will inspect it",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+        ],
+    }
+    prepared = prepare_codex_responses_body(
+        body,
+        forward_model="gpt-5.4",
+        session_id="s",
+        thread_id="t",
+        client_metadata={"session_id": "s"},
+    )
+    payload = json.loads(prepared.body_json)
+
+    user_content = payload["input"][0]["content"]
+    assert user_content[0] == {"type": "input_text", "text": "Describe this"}
+    assert user_content[1] == {
+        "type": "input_image",
+        "image_url": "https://example.com/a.png",
+        "detail": "high",
+    }
+    assert payload["input"][1] == {
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "I will inspect it"}],
+    }
+    assert payload["input"][2] == {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "inspect",
+        "arguments": "{}",
+    }
+    assert payload["input"][3] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "done",
+    }
+
+
 def test_prepare_responses_passthrough():
     body = {
         "model": "m1",
-        "input": [{"role": "user", "content": "x"}],
+        "input": [{
+            "role": "user",
+            "content": [{"type": "input_text", "text": "x"}],
+        }],
         "stream": False,
         "max_output_tokens": 256,
         "temperature": 0.7,
@@ -162,6 +229,7 @@ def test_prepare_responses_passthrough():
     assert set(payload.keys()) <= _CODEX_RESPONSES_API_REQUEST_KEYS
     assert "max_output_tokens" not in payload
     assert payload["reasoning"] == {"effort": "medium"}
+    assert payload["input"][0]["content"] == [{"type": "input_text", "text": "x"}]
     assert any(u.field == "max_output_tokens" for u in prepared.unmappable)
 
 
@@ -257,6 +325,67 @@ def test_ensure_usage_in_upstream_response():
         stream=True,
     )
     assert warns2 and "no usage" in warns2[0]
+
+
+def test_legacy_chat_response_is_converted_from_responses_json():
+    response = {
+        "id": "resp_1",
+        "model": "gpt-5.4",
+        "created_at": 1710000000,
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            }
+        ],
+        "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+    }
+
+    result = convert_codex_responses_body_to_chat(response)
+
+    assert result["object"] == "chat.completion"
+    assert result["id"] == "resp_1"
+    assert result["choices"][0]["message"]["content"] == "hello"
+    assert result["choices"][0]["finish_reason"] == "stop"
+    assert result["usage"] == {
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "total_tokens": 6,
+    }
+
+
+def test_legacy_chat_stream_is_converted_from_responses_sse():
+    assert is_chat_completions_path("/v1/chat/completions?x=1") is True
+    assert is_chat_completions_path("/v1/responses") is False
+
+    body = (
+        'event: response.created\n'
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","created_at":1710000000}}\n\n'
+        'event: response.output_text.delta\n'
+        'data: {"type":"response.output_text.delta","delta":"hel"}\n\n'
+        'event: response.output_text.delta\n'
+        'data: {"type":"response.output_text.delta","delta":"lo"}\n\n'
+        'event: response.completed\n'
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}\n\n'
+        'data: [DONE]\n\n'
+    )
+
+    converted = convert_codex_responses_sse_to_chat(body, include_usage=True).decode()
+    assert '"object":"chat.completion.chunk"' in converted
+    assert '"content":"hel"' in converted
+    assert '"content":"lo"' in converted
+    assert '"finish_reason":"stop"' in converted
+    assert '"prompt_tokens":4' in converted
+    assert converted.endswith("data: [DONE]\n\n")
+
+
+def test_resolve_codex_outbound_url_uses_responses_for_both_public_protocols():
+    base = "http://127.0.0.1:48787/v1"
+    assert resolve_codex_outbound_url(base, "/v1/responses") == "http://127.0.0.1:48787/v1/responses"
+    assert resolve_codex_outbound_url(base, "/v1/chat/completions") == "http://127.0.0.1:48787/v1/responses"
+    assert resolve_codex_outbound_url(f"{base}/responses", "/v1/chat/completions") == "http://127.0.0.1:48787/v1/responses"
 
 
 def test_resolve_codex_outbound_url():

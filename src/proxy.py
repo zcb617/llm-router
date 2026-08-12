@@ -20,8 +20,10 @@ from src.openai_protocol_converter import parse_sse_buffer
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
     CodexCliAuthManager,
+    convert_codex_responses_to_chat,
     ensure_usage_in_upstream_response,
     host_from_url,
+    is_chat_completions_path,
     prepare_codex_responses_body,
     resolve_codex_base_url,
     resolve_codex_outbound_url,
@@ -936,6 +938,7 @@ class LLMRouterAddon:
                 session_id=session_id,
                 thread_id=thread_id,
             )
+            legacy_chat = is_chat_completions_path(path)
             prepared = prepare_codex_responses_body(
                 captured_req.body,
                 forward_model=forward_model,
@@ -980,6 +983,29 @@ class LLMRouterAddon:
             )
             for warning in usage_warnings:
                 logger.warning(warning)
+            if legacy_chat and 200 <= status < 300:
+                resp_body = convert_codex_responses_to_chat(
+                    resp_body,
+                    stream=stream,
+                    fallback_model=forward_model,
+                    include_usage=prepared.include_usage,
+                )
+                resp_headers = [
+                    (key, value)
+                    for key, value in resp_headers
+                    if key.lower() not in {
+                        "content-encoding",
+                        "content-length",
+                        "content-type",
+                        "transfer-encoding",
+                    }
+                ]
+                resp_headers.append(
+                    (
+                        "Content-Type",
+                        "text/event-stream" if stream else "application/json",
+                    )
+                )
             upstream_headers_time = time.time()
             first_body_time = upstream_headers_time if resp_body else None
             flow.response = http.Response.make(
