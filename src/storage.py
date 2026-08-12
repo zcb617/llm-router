@@ -2347,8 +2347,9 @@ class CallStorage:
                 self._sqlite_close(conn, cur)
 
 
-    def increment_upstream_failures(self, upstream_id: int, max_failures: int = 3):
-        """递增上游连续失败计数，达阈值时标记为 unhealthy"""
+    def increment_upstream_failures(self, upstream_id: int, max_failures: int = 3) -> bool:
+        """递增上游连续失败计数，返回本次是否达到 unhealthy 阈值。"""
+        reached_threshold = False
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
@@ -2360,6 +2361,7 @@ class CallStorage:
                 row = cur.fetchone()
                 new_count = row[0] if row else 0
                 if new_count >= max_failures:
+                    reached_threshold = True
                     cur.execute(
                         "UPDATE upstreams SET health_status = 'unhealthy', consecutive_failures = 0, "
                         "updated_at = CURRENT_TIMESTAMP WHERE id = %s", (upstream_id,)
@@ -2379,9 +2381,12 @@ class CallStorage:
                 row = cur.fetchone()
                 new_count = row[0] if row else 0
                 if new_count >= max_failures:
+                    reached_threshold = True
                     cur.execute(
                         "UPDATE upstreams SET health_status = 'unhealthy', consecutive_failures = 0, "
                         "updated_at = datetime('now') WHERE id = ?", (upstream_id,)
                     )
             finally:
                 self._sqlite_close(conn, cur, commit=True)
+
+        return reached_threshold

@@ -645,24 +645,24 @@ def test_responseheaders_streams_and_captures_chunks():
     assert flow.metadata["first_token_time"] is not None
 
 
-def test_route_multi_upstream_streaming_can_fallback_after_kimi_route_setup_failure():
+def test_route_multi_upstream_streaming_registers_relay_candidates():
     addon = _make_addon_for_route_tests()
     flow = _make_flow()
     captured_req = _make_captured_request(flow)
-    attempts = []
+    registered = []
 
     addon._is_route_reachable = lambda _url: True
 
-    def _apply(flow_obj, route, captured_req_obj, model_name, path):
-        attempts.append(route["upstream_id"])
-        if route["upstream_id"] == 1:
-            raise RuntimeError("token unavailable")
-        flow_obj.metadata["multi_upstream_id"] = route["upstream_id"]
-        captured_req_obj.url = f"https://ok.example.com{path}"
+    class RelayStub:
+        async def ensure_started(self):
+            return "http://127.0.0.1:39001"
 
-    addon._apply_multi_upstream_route = _apply
+        def register(self, token, attempts):
+            registered.append((token, attempts))
 
-    addon._route_multi_upstream_streaming(
+    addon._stream_relay = RelayStub()
+
+    asyncio.run(addon._route_multi_upstream_streaming(
         flow,
         [
             {"upstream_id": 1, "target_base_url": "https://api.kimi.com", "auth_mode": "kimi_cli_oauth", "sort_order": 0},
@@ -671,12 +671,79 @@ def test_route_multi_upstream_streaming_can_fallback_after_kimi_route_setup_fail
         captured_req,
         "claude-opus",
         "/v1/messages",
-    )
+    ))
 
-    assert attempts == [1, 2]
+    assert len(registered) == 1
+    assert [item["upstream_id"] for item in registered[0][1]] == [1, 2]
+    assert flow.request.url == "http://127.0.0.1:39001/stream"
     assert flow.metadata["multi_upstream_native"] is True
-    assert flow.metadata["multi_upstream_id"] == 2
+    assert flow.metadata["multi_upstream_stream_relay"] is True
     assert getattr(flow, "response", None) is None
+
+
+def test_record_upstream_failure_marks_cached_routes_unhealthy_at_threshold():
+    addon = _make_addon_for_route_tests()
+    failure_count = 0
+    reload_calls = []
+
+    def _increment(_upstream_id):
+        nonlocal failure_count
+        failure_count += 1
+        return failure_count >= 3
+
+    addon._storage.increment_upstream_failures = _increment
+    addon.reload_model_configs = lambda: reload_calls.append(True)
+
+    addon._record_upstream_failure(7)
+    addon._record_upstream_failure(7)
+    assert reload_calls == []
+
+    addon._record_upstream_failure(7)
+
+    assert reload_calls == [True]
+
+
+def test_get_candidate_routes_skips_route_after_cached_health_update():
+    addon = _make_addon_for_route_tests()
+    routes = [
+        {"upstream_id": 1, "sort_order": 0, "health_status": "unhealthy"},
+        {"upstream_id": 2, "sort_order": 1, "health_status": "healthy"},
+    ]
+
+    candidates = addon._get_candidate_routes(routes, "router-model")
+
+    assert [route["upstream_id"] for route in candidates] == [2]
+
+
+def test_increment_upstream_failures_returns_threshold_and_marks_sqlite_unhealthy(tmp_path):
+    import sqlite3
+    from src.storage import CallStorage
+
+    db_path = tmp_path / "router.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE upstreams ("
+        "id INTEGER PRIMARY KEY, consecutive_failures INTEGER DEFAULT 0, "
+        "health_status TEXT DEFAULT 'healthy', updated_at TEXT)"
+    )
+    conn.execute("INSERT INTO upstreams (id) VALUES (7)")
+    conn.commit()
+    conn.close()
+
+    storage = CallStorage(str(db_path))
+    assert storage.increment_upstream_failures(7) is False
+    assert storage.increment_upstream_failures(7) is False
+    assert storage.increment_upstream_failures(7) is True
+    assert storage.increment_upstream_failures(7) is False
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT health_status, consecutive_failures FROM upstreams WHERE id = 7"
+    ).fetchone()
+    conn.close()
+    storage.close()
+
+    assert row == ("unhealthy", 1)
 
 
 def test_forward_multi_upstream_kimi_cli_syncs_body_and_flow_headers():

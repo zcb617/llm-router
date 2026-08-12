@@ -29,6 +29,14 @@ from src.codex_cli_auth import (
     resolve_codex_outbound_url,
 )
 from src.codex_outbound_client import CodexOutboundError, send_via_codex_outbound
+from src.stream_relay import (
+    FAILURE_RECORDED_HEADER,
+    RELAY_TOKEN_HEADER,
+    SELECTED_UPSTREAM_HEADER,
+    SELECTED_URL_HEADER,
+    SELECTED_FORWARD_MODEL_HEADER,
+    StreamRelayServer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +145,10 @@ class LLMRouterAddon:
         self._stream_route_preconnect_timeout_s = max(
             0.1,
             getattr(self.config.proxy, "stream_route_preconnect_timeout_ms", 800) / 1000.0,
+        )
+        self._stream_relay = StreamRelayServer(
+            self._record_upstream_failure,
+            connect_timeout=self._stream_route_preconnect_timeout_s,
         )
     
     @property
@@ -484,7 +496,7 @@ class LLMRouterAddon:
 
         # 启动健康检查定时器
         self._start_health_check_timer()
-    
+
     async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
         path = flow.request.path
@@ -664,7 +676,9 @@ class LLMRouterAddon:
         # 多上游模式：带重试和故障转移的转发
         if mapping.get("multi_upstream"):
             if self._is_stream_request(captured_req.body):
-                self._route_multi_upstream_streaming(flow, mapping["routes"], captured_req, model_name, path)
+                await self._route_multi_upstream_streaming(
+                    flow, mapping["routes"], captured_req, model_name, path
+                )
                 return
 
             await asyncio.to_thread(
@@ -832,62 +846,141 @@ class LLMRouterAddon:
         for h, v in self._get_roo_headers(flow).items():
             flow.request.headers[h] = v
 
-    def _route_multi_upstream_streaming(self, flow, routes, captured_req, model_name, path):
-        """多上游流式转发：选择一个可用上游后交给 mitmproxy 原生流式代理。"""
+    async def _route_multi_upstream_streaming(self, flow, routes, captured_req, model_name, path):
+        """多上游流式转发：首字节前失败时在本地中继内切换上游。"""
         candidate_routes = self._get_candidate_routes(routes, model_name)
         if not candidate_routes:
             last_error = "no upstream routes configured"
             logger.error(f"All upstreams failed for model {model_name}: {last_error}")
             flow.response = http.Response.make(
                 502,
-                json.dumps({"error": f"All upstreams unavailable: {last_error}"}, ensure_ascii=False).encode("utf-8"),
-                {"Content-Type": "application/json"}
+                json.dumps(
+                    {"error": f"All upstreams unavailable: {last_error}"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                {"Content-Type": "application/json"},
             )
             flow.metadata["local_response"] = True
             return
 
+        try:
+            relay_base_url = await self._stream_relay.ensure_started()
+        except Exception as exc:
+            logger.exception("Failed to start stream relay")
+            flow.response = http.Response.make(
+                503,
+                json.dumps({"error": f"Stream relay unavailable: {exc}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            flow.metadata["local_response"] = True
+            return
+
+        original_url = flow.request.url
+        original_query = urlparse(original_url).query
+        relay_attempts = []
         last_error = "pre-connect failed"
+
         for route in candidate_routes:
+            upstream_id = route.get("upstream_id")
             if self._is_codex_auth(route) or self._is_codex_cli_oauth(route):
                 logger.warning(
                     "Codex/codex_cli_oauth upstream %s is not supported in multi-upstream mode; skipping",
-                    route.get("upstream_id"),
+                    upstream_id,
                 )
                 continue
-            target_url = self._resolve_target_base_url(route)
-            if self._is_route_reachable(target_url):
-                try:
-                    self._apply_multi_upstream_route(flow, route, captured_req, model_name, path)
-                    flow.metadata["multi_upstream_native"] = True
-                    logger.info(
-                        f"Multi-upstream streaming selected upstream {route['upstream_id']}: "
-                        f"{target_url} for model {model_name}"
-                    )
-                    return
-                except Exception as e:
-                    upstream_id = route.get("upstream_id")
-                    last_error = f"{upstream_id}: {e}"
-                    logger.warning(
-                        f"Streaming upstream apply failed: {upstream_id} {target_url}: {e}, trying next"
-                    )
-                    if upstream_id is not None:
-                        self.storage.increment_upstream_failures(upstream_id)
-                    continue
 
-            upstream_id = route.get("upstream_id")
-            last_error = f"{upstream_id}: pre-connect failed"
-            logger.warning(
-                f"Streaming upstream pre-connect failed: {upstream_id} {target_url}, trying next"
+            target_base_url = self._resolve_target_base_url(route)
+            if not self._is_route_reachable(target_base_url):
+                last_error = f"{upstream_id}: pre-connect failed"
+                logger.warning(
+                    "Streaming upstream pre-connect failed: %s %s, trying next",
+                    upstream_id,
+                    target_base_url,
+                )
+                if upstream_id is not None:
+                    self._record_upstream_failure(upstream_id)
+                continue
+
+            try:
+                normalized_path = (
+                    self._normalize_path_for_base(target_base_url, path)
+                    if self._is_kimi_cli_auth(route)
+                    else path
+                )
+                target_url = f"{target_base_url.rstrip('/')}{normalized_path}"
+                if original_query:
+                    target_url = f"{target_url}?{original_query}"
+
+                req_body = self._prepare_forward_body(
+                    captured_req.body,
+                    route.get("forward_model", ""),
+                    path,
+                )
+                if self._is_kimi_cli_auth(route):
+                    relay_headers = dict(self._build_kimi_cli_headers(target_url, route))
+                else:
+                    relay_headers = self._build_upstream_headers(
+                        flow.request.headers,
+                        route.get("api_key", ""),
+                    )
+                    if route.get("use_claude_features"):
+                        self._apply_claude_feature_headers(relay_headers, flow)
+                    elif route.get("use_roo_features"):
+                        self._apply_roo_feature_headers(relay_headers, flow)
+
+                relay_attempts.append(
+                    {
+                        "upstream_id": upstream_id,
+                        "url": target_url,
+                        "body": req_body.encode("utf-8") if isinstance(req_body, str) else req_body,
+                        "headers": relay_headers,
+                        "forward_model": route.get("forward_model", ""),
+                    }
+                )
+            except Exception as exc:
+                last_error = f"{upstream_id}: {exc}"
+                logger.warning(
+                    "Streaming upstream request preparation failed: %s %s: %s, trying next",
+                    upstream_id,
+                    target_base_url,
+                    exc,
+                )
+                if upstream_id is not None:
+                    self._record_upstream_failure(upstream_id)
+
+        if not relay_attempts:
+            flow.response = http.Response.make(
+                502,
+                json.dumps(
+                    {"error": f"All upstreams unavailable: {last_error}"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                {"Content-Type": "application/json"},
             )
-            if upstream_id is not None:
-                self.storage.increment_upstream_failures(upstream_id)
+            flow.metadata["local_response"] = True
+            return
 
-        flow.response = http.Response.make(
-            502,
-            json.dumps({"error": f"All upstreams unavailable: {last_error}"}, ensure_ascii=False).encode("utf-8"),
-            {"Content-Type": "application/json"}
+        token = uuid.uuid4().hex
+        self._stream_relay.register(token, relay_attempts)
+        flow.request.url = f"{relay_base_url}/stream"
+        flow.request.headers.clear()
+        flow.request.headers[RELAY_TOKEN_HEADER] = token
+        flow.request.headers["Content-Type"] = "application/json"
+        flow.request.content = (
+            captured_req.body.encode("utf-8")
+            if isinstance(captured_req.body, str)
+            else (captured_req.body or b"")
         )
-        flow.metadata["local_response"] = True
+
+        captured_req.original_model = model_name
+        captured_req.overridden_model = model_name
+        captured_req.url = flow.request.url
+        captured_req.call_id = str(uuid.uuid4())
+        flow.metadata["call_id"] = captured_req.call_id
+        flow.metadata["multi_upstream_native"] = True
+        flow.metadata["multi_upstream_stream_relay"] = True
+        flow.metadata["multi_upstream_original_path"] = path
+        self._store_pending_request(flow, captured_req)
 
     def _apply_single_upstream_kimi_cli_route(self, flow, mapping, captured_req, model_name, path):
         """单上游 kimi-cli auth 流式通道：走 mitmproxy 原生转发，但使用专用头模板。"""
@@ -1201,12 +1294,12 @@ class LLMRouterAddon:
                     return
                 else:
                     logger.warning(f"Upstream {upstream_id} returned {status_code}, trying next")
-                    self.storage.increment_upstream_failures(upstream_id)
+                    self._record_upstream_failure(upstream_id)
                     last_error = f"Upstream {upstream_id} returned {status_code}"
 
             except Exception as e:
                 logger.error(f"Upstream {upstream_id} request failed: {e}, trying next")
-                self.storage.increment_upstream_failures(upstream_id)
+                self._record_upstream_failure(upstream_id)
                 last_error = f"Upstream {upstream_id}: {str(e)}"
 
         # 所有上游都失败
@@ -1260,6 +1353,15 @@ class LLMRouterAddon:
         if ordered_routes:
             logger.warning(f"All upstreams are marked unhealthy for model {model_name}; retrying them anyway")
         return ordered_routes
+
+    def _record_upstream_failure(self, upstream_id: int) -> None:
+        """记录上游失败，并在达到阈值后立即同步内存路由状态。"""
+        reached_threshold = self.storage.increment_upstream_failures(upstream_id)
+        if not reached_threshold:
+            return
+
+        self.reload_model_configs()
+        logger.warning("Upstream %s reached failure threshold; reloaded cached routes", upstream_id)
 
     def _apply_multi_upstream_route(self, flow, route, captured_req, model_name, path):
         """把当前 flow 改写到选中的多上游路由。"""
@@ -2272,6 +2374,7 @@ class LLMRouterAddon:
         flow.metadata["headers_time"] = time.time()
         if not self._is_stream_request(flow.metadata.get("request_body_for_stream")):
             return
+        self._capture_stream_relay_selection(flow)
         # 上游返回非 2xx 时不进行协议转换，直接透传错误响应
         status = getattr(flow.response, "status_code", 0) if flow.response else 0
         if status and not (200 <= status < 300):
@@ -2334,6 +2437,13 @@ class LLMRouterAddon:
         if captured_req is None:
             logger.warning("No captured request found for this response")
             return
+
+        selected_url = flow.metadata.get("multi_upstream_selected_url")
+        if selected_url:
+            captured_req.url = selected_url
+        selected_forward_model = flow.metadata.get("multi_upstream_selected_forward_model")
+        if selected_forward_model:
+            captured_req.overridden_model = selected_forward_model
 
         streamed_chunks = flow.metadata.pop("streamed_response_chunks", None)
         if streamed_chunks is not None and flow.response and flow.response.raw_content is None:
@@ -2645,11 +2755,27 @@ class LLMRouterAddon:
         if upstream_id is None:
             return
         logger.warning(f"Multi-upstream native request failed for upstream {upstream_id}: {flow.error}")
-        self.storage.increment_upstream_failures(upstream_id)
+        if not flow.metadata.get("multi_upstream_stream_relay"):
+            self._record_upstream_failure(upstream_id)
 
     def _update_native_multi_upstream_health(self, flow, status_code: int):
         """根据原生转发结果更新多上游健康状态。"""
         if not flow.metadata.get("multi_upstream_native"):
+            return
+        if flow.metadata.get("multi_upstream_stream_relay"):
+            selected_id = flow.metadata.get("multi_upstream_id")
+            if selected_id is not None:
+                failure_recorded = flow.metadata.get("multi_upstream_failure_recorded")
+                if 200 <= status_code < 300 and not failure_recorded:
+                    self.storage.reset_upstream_health(selected_id)
+                elif status_code < 200 or status_code >= 300:
+                    if not failure_recorded:
+                        self._record_upstream_failure(selected_id)
+                elif failure_recorded:
+                    logger.warning(
+                        "Stream relay returned %s after recording upstream failures; keeping health state",
+                        status_code,
+                    )
             return
         upstream_id = flow.metadata.get("multi_upstream_id")
         if upstream_id is None:
@@ -2658,7 +2784,32 @@ class LLMRouterAddon:
             self.storage.reset_upstream_health(upstream_id)
         else:
             logger.warning(f"Multi-upstream native upstream {upstream_id} returned {status_code}")
-            self.storage.increment_upstream_failures(upstream_id)
+            self._record_upstream_failure(upstream_id)
+
+    @staticmethod
+    def _capture_stream_relay_selection(flow) -> None:
+        """读取中继选择结果，并移除仅供代理内部使用的响应头。"""
+        if not flow.metadata.get("multi_upstream_stream_relay") or not flow.response:
+            return
+
+        headers = flow.response.headers
+        flow.metadata["multi_upstream_failure_recorded"] = bool(
+            headers.get(FAILURE_RECORDED_HEADER)
+        )
+        selected_upstream_id = headers.pop(SELECTED_UPSTREAM_HEADER, None)
+        selected_url = headers.pop(SELECTED_URL_HEADER, None)
+        selected_forward_model = headers.pop(SELECTED_FORWARD_MODEL_HEADER, None)
+        headers.pop(FAILURE_RECORDED_HEADER, None)
+        if selected_upstream_id:
+            try:
+                flow.metadata["multi_upstream_id"] = int(selected_upstream_id)
+            except (TypeError, ValueError):
+                logger.warning("Invalid selected stream upstream id: %r", selected_upstream_id)
+        if selected_url:
+            flow.metadata["multi_upstream_selected_url"] = selected_url
+        if selected_forward_model:
+            flow.metadata["multi_upstream_selected_forward_model"] = selected_forward_model
+            flow.metadata["overridden_model"] = selected_forward_model
 
     def done(self):
         """mitmproxy addon 退出时释放资源。"""
@@ -2672,6 +2823,14 @@ class LLMRouterAddon:
                 self._http_client.close()
             except Exception:
                 pass
+
+        if self._stream_relay is not None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self._stream_relay.stop())
+            else:
+                loop.create_task(self._stream_relay.stop())
 
         if self._external_storage is None and self._storage is not None:
             try:
