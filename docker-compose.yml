@@ -10,6 +10,7 @@ services:
       - ./certs:/app/certs
       - ./log:/app/log
       - /home/zhangcb/.kimi:/home/zhangcb/.kimi
+      - /home/zhangcb/.codex:/root/.codex
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
