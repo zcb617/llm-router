@@ -964,6 +964,9 @@ class LLMRouterAddon:
         self._stream_relay.register(token, relay_attempts)
         flow.request.url = f"{relay_base_url}/stream"
         flow.request.headers.clear()
+        # mitmproxy does not recreate Host after an explicit header clear.  The
+        # relay is an ordinary HTTP/1.1 server and rejects requests without it.
+        flow.request.headers["Host"] = urlparse(relay_base_url).netloc
         flow.request.headers[RELAY_TOKEN_HEADER] = token
         flow.request.headers["Content-Type"] = "application/json"
         flow.request.content = (
@@ -1596,7 +1599,7 @@ class LLMRouterAddon:
         session_id = flow.metadata.get("claude_session_id") or str(uuid.uuid4())
         flow.metadata["claude_session_id"] = session_id
         return {
-            "User-Agent": "claude-cli/2.1.132 (external, cli)",
+            "User-Agent": "claude-cli/2.1.232 (external, cli)",
             "X-Claude-Code-Session-Id": session_id,
             "X-Stainless-Arch": "x64",
             "X-Stainless-Lang": "js",

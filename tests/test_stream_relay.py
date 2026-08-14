@@ -51,9 +51,11 @@ class _Client:
     def __init__(self, responses):
         self.responses = list(responses)
         self.urls = []
+        self.requests = []
 
     def stream(self, _method, url, **_kwargs):
         self.urls.append(url)
+        self.requests.append((_method, url, _kwargs))
         return _StreamContext(self.responses.pop(0))
 
 
@@ -147,6 +149,43 @@ def test_stream_relay_switches_when_2xx_closes_before_first_chunk(monkeypatch):
         "http://second.test/stream",
     ]
     assert failures == [1]
+
+
+def test_stream_relay_forwards_prepared_headers_and_body_to_selected_upstream(monkeypatch):
+    downstream_responses = []
+
+    def _stream_response(status, headers):
+        response = _DownstreamResponse(status, headers)
+        downstream_responses.append(response)
+        return response
+
+    monkeypatch.setattr(stream_relay.web, "StreamResponse", _stream_response)
+    relay = stream_relay.StreamRelayServer()
+    client = _Client([_UpstreamResponse(200, [b"data: ok\n\n"])])
+    relay._client = client
+    relay.register("token", [{
+        "upstream_id": 2,
+        "url": "https://api.example.com/v1/messages",
+        "body": b'{"model":"target-model"}',
+        "headers": {
+            "Authorization": "Bearer sk-upstream",
+            "anthropic-version": "2023-06-01",
+            "X-Claude-Code-Session-Id": "client-session",
+        },
+    }])
+
+    asyncio.run(relay._handle_stream(_Request("token")))
+
+    method, url, kwargs = client.requests[0]
+    assert method == "POST"
+    assert url == "https://api.example.com/v1/messages"
+    assert kwargs["content"] == b'{"model":"target-model"}'
+    assert kwargs["headers"] == {
+        "Authorization": "Bearer sk-upstream",
+        "anthropic-version": "2023-06-01",
+        "X-Claude-Code-Session-Id": "client-session",
+    }
+    assert downstream_responses[0].chunks == [b"data: ok\n\n"]
 
 
 def test_stream_relay_does_not_switch_after_downstream_has_received_data(monkeypatch):

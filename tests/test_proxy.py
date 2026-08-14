@@ -279,7 +279,7 @@ def test_apply_multi_upstream_route_injects_claude_headers_for_plain_client():
         "/v1/messages",
     )
 
-    assert flow.request.headers["User-Agent"] == "claude-cli/2.1.132 (external, cli)"
+    assert flow.request.headers["User-Agent"] == "claude-cli/2.1.232 (external, cli)"
     assert flow.request.headers["X-Stainless-Package-Version"] == "0.81.0"
     assert flow.request.headers["X-Claude-Code-Session-Id"]
 
@@ -676,9 +676,57 @@ def test_route_multi_upstream_streaming_registers_relay_candidates():
     assert len(registered) == 1
     assert [item["upstream_id"] for item in registered[0][1]] == [1, 2]
     assert flow.request.url == "http://127.0.0.1:39001/stream"
+    assert flow.request.headers["Host"] == "127.0.0.1:39001"
     assert flow.metadata["multi_upstream_native"] is True
     assert flow.metadata["multi_upstream_stream_relay"] is True
     assert getattr(flow, "response", None) is None
+
+
+def test_route_multi_upstream_streaming_keeps_upstream_headers_out_of_relay_request():
+    addon = _make_addon_for_route_tests()
+    flow = _make_flow({
+        "User-Agent": "claude-cli/2.2.0 (external, cli)",
+        "X-Claude-Code-Session-Id": "client-session",
+        "anthropic-version": "2023-06-01",
+    })
+    captured_req = _make_captured_request(flow)
+    registered = []
+
+    addon._is_route_reachable = lambda _url: True
+
+    class RelayStub:
+        async def ensure_started(self):
+            return "http://127.0.0.1:39001"
+
+        def register(self, token, attempts):
+            registered.append((token, attempts))
+
+    addon._stream_relay = RelayStub()
+
+    asyncio.run(addon._route_multi_upstream_streaming(
+        flow,
+        [{
+            "upstream_id": 2,
+            "target_base_url": "https://api.example.com/anthropic",
+            "api_key": "sk-upstream",
+            "auth_mode": "api_key",
+            "use_claude_features": True,
+            "sort_order": 0,
+        }],
+        captured_req,
+        "claude-opus",
+        "/v1/messages",
+    ))
+
+    assert flow.request.headers["Host"] == "127.0.0.1:39001"
+    assert "Authorization" not in flow.request.headers
+    assert "X-Claude-Code-Session-Id" not in flow.request.headers
+
+    upstream_headers = registered[0][1][0]["headers"]
+    assert upstream_headers["Authorization"] == "Bearer sk-upstream"
+    assert upstream_headers["User-Agent"] == "claude-cli/2.2.0 (external, cli)"
+    assert upstream_headers["X-Claude-Code-Session-Id"] == "client-session"
+    assert upstream_headers["anthropic-version"] == "2023-06-01"
 
 
 def test_record_upstream_failure_marks_cached_routes_unhealthy_at_threshold():
