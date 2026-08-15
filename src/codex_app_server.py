@@ -157,14 +157,12 @@ class CodexAppServerClient:
         token: str,
         *,
         connect_timeout: float = 10.0,
-        read_timeout: float = 120.0,
-        turn_timeout: float = 900.0,
+        read_timeout: float = 300.0,
     ):
         self.url = (url or "").strip()
         self.token = token or ""
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
-        self.turn_timeout = turn_timeout
         self._websocket = None
         self._next_request_id = 1
         self._notifications: Deque[dict[str, Any]] = deque()
@@ -362,25 +360,15 @@ class CodexAppServerClient:
             if not isinstance(turn_id, str) or not turn_id:
                 raise CodexAppServerError("Codex App Server turn/start 未返回 turn id")
 
-            deadline = asyncio.get_running_loop().time() + self.turn_timeout
             full_text: list[str] = []
             emitted_by_item: dict[str, str] = {}
             completed_text = ""
 
             while True:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise CodexAppServerError("等待 Codex App Server turn 完成超时")
-
                 if self._notifications:
                     incoming = self._notifications.popleft()
                 else:
-                    previous_timeout = self.read_timeout
-                    self.read_timeout = min(previous_timeout, max(1.0, remaining))
-                    try:
-                        incoming = await self._receive()
-                    finally:
-                        self.read_timeout = previous_timeout
+                    incoming = await self._receive()
 
                 if incoming.get("method") and "id" in incoming:
                     await self._handle_server_request(incoming)

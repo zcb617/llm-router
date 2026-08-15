@@ -212,7 +212,7 @@ class LLMRouterAddon:
 
             import httpx
             self._http_client = httpx.Client(
-                timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+                timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
                 limits=httpx.Limits(max_connections=256, max_keepalive_connections=64),
                 follow_redirects=False,
                 http2=False,

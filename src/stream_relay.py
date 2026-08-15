@@ -74,7 +74,7 @@ class StreamRelayServer:
         self.port = sockets[0].getsockname()[1]
         self.base_url = f"http://{self.host}:{self.port}"
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=self.connect_timeout, read=120.0, write=30.0, pool=10.0),
+            timeout=httpx.Timeout(connect=self.connect_timeout, read=300.0, write=30.0, pool=10.0),
             follow_redirects=False,
             http2=False,
         )
