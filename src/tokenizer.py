@@ -4,9 +4,8 @@ Token计算模块 - API响应解析优先，tiktoken本地计算降级
 import json
 from typing import Optional, Tuple
 
-from src.chat_completion_cache_tokens import (
-    extract_cache_tokens as extract_chat_completion_cache_tokens,
-)
+from src.anthropic_cache_tokens import anthropic_cache_tokens_parser
+from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 
 
 def _safe_int(value) -> int:
@@ -20,15 +19,19 @@ def _safe_int(value) -> int:
 def extract_cache_miss_tokens(
     response_body: str, prefer_claude_code_usage: bool = False
 ) -> Optional[int]:
-    """从 Chat Completion 响应中提取缓存未命中 token 数量。"""
-    _, cache_miss_tokens = extract_chat_completion_cache_tokens(response_body)
-    return cache_miss_tokens
+    """委托原有线路对应的解析器提取缓存未命中 token。"""
+    if prefer_claude_code_usage:
+        return anthropic_cache_tokens_parser.get_cache_miss_tokens(response_body)
+    return chat_completion_cache_tokens_parser.get_cache_miss_tokens(response_body)
 
 
-def extract_cached_hit_tokens(response_body: str) -> Optional[int]:
-    """从 Chat Completion 响应中提取缓存命中 token 数量。"""
-    cached_hit_tokens, _ = extract_chat_completion_cache_tokens(response_body)
-    return cached_hit_tokens
+def extract_cached_hit_tokens(
+    response_body: str, prefer_claude_code_usage: bool = False
+) -> Optional[int]:
+    """委托原有线路对应的解析器提取缓存命中 token。"""
+    if prefer_claude_code_usage:
+        return anthropic_cache_tokens_parser.get_cached_hit_tokens(response_body)
+    return chat_completion_cache_tokens_parser.get_cached_hit_tokens(response_body)
 
 def _extract_usage_tokens(usage, prefer_claude_code_usage: bool = False) -> Optional[Tuple[int, int]]:
     """Extract token pair from usage object in either OpenAI/Kimi/Responses shapes."""

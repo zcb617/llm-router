@@ -51,7 +51,7 @@ def test_send_via_codex_outbound_mock_binary(tmp_path: Path, monkeypatch):
     script.chmod(0o755)
     monkeypatch.setenv("CODEX_OUTBOUND_BIN", str(script))
 
-    status, headers, body = send_via_codex_outbound(
+    status, headers, body, first_body_at_ms = send_via_codex_outbound(
         method="POST",
         url="https://example.com/responses",
         headers=[("Authorization", "Bearer x")],
@@ -61,3 +61,52 @@ def test_send_via_codex_outbound_mock_binary(tmp_path: Path, monkeypatch):
     assert status == 200
     assert dict(headers).get("content-type") == "application/json"
     assert json.loads(body.decode()) == {"ok": True}
+    assert first_body_at_ms is None
+
+
+def test_send_via_codex_outbound_returns_matching_first_body_time(tmp_path: Path, monkeypatch):
+    script = tmp_path / "fake_outbound"
+    script.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '{\"ok\":true,\"request_id\":\"request-1\",\"source\":\"codex_cli_oauth:responses\",\"status\":200,\"headers\":[],\"body_b64\":\"e30=\",\"first_body_at_ms\":123456789}'\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("CODEX_OUTBOUND_BIN", str(script))
+
+    _, _, _, first_body_at_ms = send_via_codex_outbound(
+        method="GET",
+        url="https://example.com/",
+        headers=[],
+        body=b"",
+        timeout_ms=5000,
+        request_id="request-1",
+        source="codex_cli_oauth:responses",
+    )
+
+    assert first_body_at_ms == 123456789
+
+
+def test_send_via_codex_outbound_ignores_first_body_time_from_other_source(
+    tmp_path: Path, monkeypatch
+):
+    script = tmp_path / "fake_outbound"
+    script.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '{\"ok\":true,\"request_id\":\"request-1\",\"source\":\"other-source\",\"status\":200,\"headers\":[],\"body_b64\":\"e30=\",\"first_body_at_ms\":123456789}'\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("CODEX_OUTBOUND_BIN", str(script))
+
+    _, _, _, first_body_at_ms = send_via_codex_outbound(
+        method="GET",
+        url="https://example.com/",
+        headers=[],
+        body=b"",
+        timeout_ms=5000,
+        request_id="request-1",
+        source="codex_cli_oauth:responses",
+    )
+
+    assert first_body_at_ms is None

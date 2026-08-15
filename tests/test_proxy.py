@@ -4,6 +4,7 @@
 import asyncio
 import inspect
 import json
+import pytest
 import sys
 import threading
 import types
@@ -357,42 +358,6 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
     assert id(flow) in addon._pending_requests
 
 
-def test_codex_oauth_cache_parser_selects_response_protocol_adapter():
-    responses_sse = (
-        'data: {"type":"response.completed","response":{"usage":'
-        '{"input_tokens":100,"input_tokens_details":{"cached_tokens":60}}}}\n\n'
-    )
-    chat_sse = (
-        'data: {"choices":[],"usage":'
-        '{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":60}}}\n\n'
-    )
-
-    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
-        responses_sse,
-        codex_cli_oauth=True,
-        response_protocol="responses",
-        prefer_claude_code_usage=False,
-    ) == (60, 40)
-    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
-        chat_sse,
-        codex_cli_oauth=True,
-        response_protocol="chat_completions",
-        prefer_claude_code_usage=False,
-    ) == (60, 40)
-    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
-        responses_sse,
-        codex_cli_oauth=False,
-        response_protocol="responses",
-        prefer_claude_code_usage=False,
-    ) == (None, None)
-
-    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
-        responses_sse,
-        codex_cli_oauth=True,
-        response_protocol="unsupported",
-        prefer_claude_code_usage=False,
-    ) == (None, None)
-
 def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
     addon = _make_addon_for_route_tests()
     addon._resolve_target_base_url = lambda _mapping: "http://upstream.example/v1"
@@ -431,8 +396,9 @@ def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
                 200,
                 [("Content-Type", "text/event-stream")],
                 b'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}}\n\n',
+                1250,
             )
-        return 200, [("Content-Type", "application/json")], b'{"id":"resp_2","output":[]}'
+        return 200, [("Content-Type", "application/json")], b'{"id":"resp_2","output":[]}', 1500
 
     monkeypatch.setattr(proxy_module, "send_via_codex_outbound", fake_send)
 
@@ -467,11 +433,55 @@ def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
     assert "input" in responses_body and "messages" not in responses_body
     assert chat_captured.url == sent[0]["url"]
     assert responses_captured.url == sent[1]["url"]
+    assert sent[0]["source"] == "codex_cli_oauth:chat_completions"
+    assert sent[1]["source"] == "codex_cli_oauth:responses"
+    assert sent[0]["request_id"] == chat_captured.call_id
+    assert sent[1]["request_id"] == responses_captured.call_id
+    assert chat_flow.metadata["codex_cli_oauth_first_body_at_ms"] == 1250
+    assert responses_flow.metadata["codex_cli_oauth_first_body_at_ms"] == 1500
     assert chat_flow.response["status"] == 200
     assert chat_flow.response["headers"]["Content-Type"] == "text/event-stream"
     assert b'"object":"chat.completion.chunk"' in chat_flow.response["content"]
     assert b"response.completed" not in chat_flow.response["content"]
     assert responses_flow.response["status"] == 200
+
+
+@pytest.mark.parametrize(
+    ("first_body_at_ms", "expected_first_token_ms"),
+    [(1250, 250), (None, None)],
+)
+def test_response_uses_codex_rust_first_body_time_without_fallback(
+    first_body_at_ms, expected_first_token_ms
+):
+    addon = _make_addon_for_route_tests()
+    addon._auto_retry_max_attempts = 0
+    addon._update_native_multi_upstream_health = lambda *_args: None
+    addon._build_full_context_for_save = lambda *_args, **_kwargs: None
+    saved_calls = []
+    addon._enqueue_call_save = saved_calls.append
+
+    flow = _make_flow()
+    flow.response = SimpleNamespace(
+        status_code=200,
+        content=b'{"id":"resp_1"}',
+        headers={"Content-Type": "application/json"},
+    )
+    captured_req = _make_captured_request(flow)
+    captured_req.call_id = "call-1"
+    captured_req.start_time = 1.0
+    flow.metadata.update(
+        {
+            "codex_cli_oauth": True,
+            "codex_cli_oauth_first_body_at_ms": first_body_at_ms,
+            "first_token_time": 9.0,
+            "headers_time": 9.0,
+        }
+    )
+    addon._store_pending_request(flow, captured_req)
+
+    addon.response(flow)
+
+    assert saved_calls[0]["first_token_ms"] == expected_first_token_ms
 
 
 def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():

@@ -55,10 +55,12 @@ def send_via_codex_outbound(
     body: bytes | str | None,
     timeout_ms: int = 600_000,
     bin_path: Optional[Path] = None,
-) -> tuple[int, list[tuple[str, str]], bytes]:
+    request_id: str | None = None,
+    source: str | None = None,
+) -> tuple[int, list[tuple[str, str]], bytes, int | None]:
     """Send one HTTP request through the Rust outbound client.
 
-    Returns (status_code, response_headers, body_bytes).
+    Returns (status_code, response_headers, body_bytes, first_body_at_ms).
     """
     binary = bin_path or resolve_codex_outbound_bin()
     if isinstance(body, str):
@@ -75,6 +77,10 @@ def send_via_codex_outbound(
         "body_b64": base64.b64encode(body_bytes).decode("ascii") if body_bytes else "",
         "timeout_ms": int(timeout_ms),
     }
+    if request_id is not None:
+        request_payload["request_id"] = request_id
+    if source is not None:
+        request_payload["source"] = source
     raw_req = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
 
     try:
@@ -130,4 +136,15 @@ def send_via_codex_outbound(
         # Non-zero without status usually means hard failure already handled via ok=false.
         logger.warning("codex_outbound exit=%s stderr=%s", completed.returncode, stderr)
 
-    return status, resp_headers, resp_body
+    first_body_at_ms = payload.get("first_body_at_ms")
+    if type(first_body_at_ms) is not int:
+        first_body_at_ms = None
+
+    if request_id is not None and payload.get("request_id") != request_id:
+        logger.warning("codex_outbound request_id mismatch; ignoring first_body_at_ms")
+        first_body_at_ms = None
+    if source is not None and payload.get("source") != source:
+        logger.warning("codex_outbound source mismatch; ignoring first_body_at_ms")
+        first_body_at_ms = None
+
+    return status, resp_headers, resp_body, first_body_at_ms

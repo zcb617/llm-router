@@ -1,4 +1,4 @@
-"""Chat Completion API 缓存 token 解析。"""
+"""Anthropic API 缓存 token 解析。"""
 
 from __future__ import annotations
 
@@ -6,44 +6,58 @@ import json
 from typing import Any, Optional
 
 
-class ChatCompletionCacheTokensParser:
-    """只解析 Chat Completion 响应中的缓存 token。"""
+class AnthropicCacheTokensParser:
+    """只解析 Anthropic 响应中的缓存 token。"""
 
     @staticmethod
-    def _as_int(value: Any) -> Optional[int]:
+    def _safe_int(value: Any) -> int:
         try:
             return int(value)
         except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _extract_cached_hit_tokens(usage: Any) -> Optional[int]:
+        if not isinstance(usage, dict):
+            return None
+        cache_read_tokens = usage.get("cache_read_input_tokens")
+        if cache_read_tokens is None:
+            return None
+        try:
+            return int(cache_read_tokens)
+        except (TypeError, ValueError):
             return None
 
-    def _extract_usage_cache_tokens(
-        self, usage: Any
-    ) -> tuple[Optional[int], Optional[int]]:
+    def _extract_cache_miss_tokens(self, usage: Any) -> Optional[int]:
         if not isinstance(usage, dict):
-            return None, None
-
-        prompt_tokens = self._as_int(usage.get("prompt_tokens"))
-        details = usage.get("prompt_tokens_details")
-        cached_tokens = (
-            self._as_int(details.get("cached_tokens"))
-            if isinstance(details, dict)
-            else None
-        )
-        if prompt_tokens is None or cached_tokens is None:
-            return None, None
-        return cached_tokens, max(0, prompt_tokens - cached_tokens)
+            return None
+        # 保留原 Claude Code 口径：input_tokens 即未命中缓存输入。
+        if "input_tokens" in usage:
+            return self._safe_int(usage.get("input_tokens"))
+        prompt_tokens = usage.get("prompt_tokens")
+        cache_read_tokens = usage.get("cache_read_input_tokens")
+        if prompt_tokens is None or cache_read_tokens is None:
+            return None
+        try:
+            return max(0, int(prompt_tokens) - int(cache_read_tokens))
+        except (TypeError, ValueError):
+            return None
 
     def _extract_from_json(
         self, data: Any
     ) -> tuple[Optional[int], Optional[int]]:
         if not isinstance(data, dict):
             return None, None
-        return self._extract_usage_cache_tokens(data.get("usage"))
+        usage = data.get("usage")
+        return (
+            self._extract_cached_hit_tokens(usage),
+            self._extract_cache_miss_tokens(usage),
+        )
 
     def get_cache_tokens(
         self, response_body: str
     ) -> tuple[Optional[int], Optional[int]]:
-        """提取 Chat Completion JSON 或 SSE 响应中的缓存 token。"""
+        """提取 Anthropic JSON 或 SSE 响应中的缓存 token。"""
         try:
             return self._extract_from_json(json.loads(response_body))
         except (TypeError, json.JSONDecodeError):
@@ -69,18 +83,34 @@ class ChatCompletionCacheTokensParser:
     def get_cache_miss_tokens(self, response_body: str) -> Optional[int]:
         return self.get_cache_tokens(response_body)[1]
 
-    def _extract_usage_output_tokens(self, usage: Any) -> Optional[int]:
-        if not isinstance(usage, dict) or "completion_tokens" not in usage:
+    @staticmethod
+    def _as_optional_int(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
             return None
-        return self._as_int(usage.get("completion_tokens"))
+
+    def _extract_usage_output_tokens(self, usage: Any) -> Optional[int]:
+        if not isinstance(usage, dict):
+            return None
+        if not any(key in usage for key in ("input_tokens", "output_tokens", "completion_tokens")):
+            return None
+        output_tokens = usage.get("output_tokens")
+        if output_tokens is None:
+            output_tokens = usage.get("completion_tokens")
+        return self._as_optional_int(output_tokens)
 
     def _extract_output_tokens_from_json(self, data: Any) -> Optional[int]:
         if not isinstance(data, dict):
             return None
-        return self._extract_usage_output_tokens(data.get("usage"))
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            message = data.get("message")
+            usage = message.get("usage") if isinstance(message, dict) else None
+        return self._extract_usage_output_tokens(usage)
 
     def get_output_tokens(self, response_body: str) -> Optional[int]:
-        """按既有 Chat Completion usage 口径取最后一个有效输出 token。"""
+        """按既有 Claude usage 口径取最后一个有效输出 token。"""
         try:
             return self._extract_output_tokens_from_json(json.loads(response_body))
         except (TypeError, json.JSONDecodeError):
@@ -117,4 +147,4 @@ class ChatCompletionCacheTokensParser:
         return round(output_tokens / (generation_duration_ms / 1000), 2)
 
 
-chat_completion_cache_tokens_parser = ChatCompletionCacheTokensParser()
+anthropic_cache_tokens_parser = AnthropicCacheTokensParser()

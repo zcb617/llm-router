@@ -16,11 +16,10 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+from src.anthropic_cache_tokens import anthropic_cache_tokens_parser
 from src.openai_protocol_converter import parse_sse_buffer
+from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
-from src.chat_completion_cache_tokens import (
-    extract_cache_tokens as extract_chat_completion_cache_tokens,
-)
 from src.codex_cli_auth import (
     CodexCliAuthManager,
     convert_codex_responses_to_chat,
@@ -32,7 +31,7 @@ from src.codex_cli_auth import (
     resolve_codex_outbound_url,
 )
 from src.codex_outbound_client import CodexOutboundError, send_via_codex_outbound
-from src.responses_cache_tokens import extract_cache_tokens as extract_responses_cache_tokens
+from src.responses_cache_tokens import responses_cache_tokens_parser
 from src.stream_relay import (
     FAILURE_RECORDED_HEADER,
     RELAY_TOKEN_HEADER,
@@ -229,32 +228,6 @@ class LLMRouterAddon:
     @staticmethod
     def _is_codex_cli_oauth(cfg: dict) -> bool:
         return CodexCliAuthManager.is_codex_cli_oauth(cfg or {})
-
-    @staticmethod
-    def _extract_cache_tokens_for_protocol(
-        response_body: str,
-        *,
-        codex_cli_oauth: bool,
-        response_protocol: Optional[str],
-        prefer_claude_code_usage: bool,
-    ) -> tuple[Optional[int], Optional[int]]:
-        """仅为 Codex CLI OAuth 按响应协议选择缓存 token 解析器。"""
-        if codex_cli_oauth:
-            if response_protocol == "responses":
-                return extract_responses_cache_tokens(response_body)
-            if response_protocol == "chat_completions":
-                return extract_chat_completion_cache_tokens(response_body)
-            return None, None
-
-        from src.tokenizer import extract_cached_hit_tokens, extract_cache_miss_tokens
-
-        return (
-            extract_cached_hit_tokens(response_body),
-            extract_cache_miss_tokens(
-                response_body,
-                prefer_claude_code_usage=prefer_claude_code_usage,
-            ),
-        )
 
     @staticmethod
     def _is_codex_auth(cfg: dict) -> bool:
@@ -1065,6 +1038,12 @@ class LLMRouterAddon:
                 thread_id=thread_id,
             )
             legacy_chat = is_chat_completions_path(path)
+            outbound_source = (
+                "codex_cli_oauth:chat_completions"
+                if legacy_chat
+                else "codex_cli_oauth:responses"
+            )
+            captured_req.call_id = str(uuid.uuid4())
             prepared = prepare_codex_responses_body(
                 captured_req.body,
                 forward_model=forward_model,
@@ -1094,12 +1073,14 @@ class LLMRouterAddon:
             # Force method/path bookkeeping for capture; actual send is via Rust outbound.
             flow.request.method = "POST"
 
-            status, resp_headers, resp_body = send_via_codex_outbound(
+            status, resp_headers, resp_body, first_body_at_ms = send_via_codex_outbound(
                 method="POST",
                 url=full_url,
                 headers=req_headers,
                 body=req_data,
                 timeout_ms=600_000,
+                request_id=captured_req.call_id,
+                source=outbound_source,
             )
             # include_usage decision B: ensure response carries usage (Responses completed/body.usage).
             resp_body, usage_warnings = ensure_usage_in_upstream_response(
@@ -1132,8 +1113,6 @@ class LLMRouterAddon:
                         "text/event-stream" if stream else "application/json",
                     )
                 )
-            upstream_headers_time = time.time()
-            first_body_time = upstream_headers_time if resp_body else None
             flow.response = http.Response.make(
                 status,
                 resp_body,
@@ -1145,10 +1124,9 @@ class LLMRouterAddon:
             captured_req.original_model = model_name
             captured_req.overridden_model = forward_model or model_name
             captured_req.url = full_url
-            captured_req.call_id = str(uuid.uuid4())
             flow.metadata["call_id"] = captured_req.call_id
-            flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
             flow.metadata["codex_cli_oauth"] = True
+            flow.metadata["codex_cli_oauth_first_body_at_ms"] = first_body_at_ms
             flow.metadata["codex_response_protocol"] = (
                 "chat_completions" if legacy_chat else "responses"
             )
@@ -1538,6 +1516,42 @@ class LLMRouterAddon:
             chunks.append(chunk)
 
         return b"".join(chunks), first_body_time
+
+    @staticmethod
+    def _get_tokens_per_second_for_protocol(
+        response_body: str,
+        duration_ms: Optional[int],
+        first_token_ms: Optional[int],
+        *,
+        codex_cli_oauth: bool,
+        response_protocol: Optional[str],
+        prefer_claude_code_usage: bool,
+    ) -> Optional[float]:
+        if codex_cli_oauth:
+            if response_protocol == "responses":
+                return responses_cache_tokens_parser.get_tokens_per_second(
+                    response_body,
+                    duration_ms,
+                    first_token_ms,
+                )
+            if response_protocol == "chat_completions":
+                return chat_completion_cache_tokens_parser.get_tokens_per_second(
+                    response_body,
+                    duration_ms,
+                    first_token_ms,
+                )
+            return None
+        if prefer_claude_code_usage:
+            return anthropic_cache_tokens_parser.get_tokens_per_second(
+                response_body,
+                duration_ms,
+                first_token_ms,
+            )
+        return chat_completion_cache_tokens_parser.get_tokens_per_second(
+            response_body,
+            duration_ms,
+            first_token_ms,
+        )
 
     def _capture_stream_chunk(self, flow, chunk: bytes):
         """透传流式响应 chunk，并保留一份用于调用记录。"""
@@ -2462,7 +2476,11 @@ class LLMRouterAddon:
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
-        from src.tokenizer import calculate_tokens
+        from src.tokenizer import (
+            calculate_tokens,
+            extract_cache_miss_tokens,
+            extract_cached_hit_tokens,
+        )
 
         # 跳过本地响应的请求（探活、查询API等）
         if flow.metadata.get("local_response"):
@@ -2620,29 +2638,70 @@ class LLMRouterAddon:
         except Exception:
             pass
 
-        # 首字耗时 = 响应头到达时间 - 请求发送时间
-        # 对于流式响应，响应头到达时首字节数据也基本到了
         first_token_ms = None
-        first_token_time = flow.metadata.get("first_token_time") or flow.metadata.get("headers_time")
-        if first_token_time and stream_type == "stream":
-            first_token_ms = int((first_token_time - captured_req.start_time) * 1000)
+        if flow.metadata.get("codex_cli_oauth"):
+            first_body_at_ms = flow.metadata.get("codex_cli_oauth_first_body_at_ms")
+            if stream_type == "stream" and type(first_body_at_ms) is int:
+                first_token_ms = int(first_body_at_ms - captured_req.start_time * 1000)
+                if first_token_ms < 0:
+                    first_token_ms = None
+        else:
+            first_token_time = flow.metadata.get("first_token_time") or flow.metadata.get("headers_time")
+            if first_token_time and stream_type == "stream":
+                first_token_ms = int((first_token_time - captured_req.start_time) * 1000)
         claude_code_feature_request = bool(flow.metadata.get("claude_code_feature_request"))
 
-        tokens_input, tokens_output, token_source = calculate_tokens(
-            model=model,
-            request_body=captured_req.body,
-            response_body=captured_resp.body,
-            prefer_claude_code_usage=claude_code_feature_request,
-        )
-        cached_hit_tokens, cache_miss_tokens = self._extract_cache_tokens_for_protocol(
+        if flow.metadata.get("codex_response_protocol") == "responses":
+            tokens_input = responses_cache_tokens_parser.get_input_tokens(
+                captured_resp.body or ""
+            )
+            tokens_output = responses_cache_tokens_parser.get_output_tokens(
+                captured_resp.body or ""
+            )
+            token_source = (
+                "api"
+                if tokens_input is not None or tokens_output is not None
+                else None
+            )
+        else:
+            tokens_input, tokens_output, token_source = calculate_tokens(
+                model=model,
+                request_body=captured_req.body,
+                response_body=captured_resp.body,
+                prefer_claude_code_usage=claude_code_feature_request,
+            )
+        if flow.metadata.get("codex_cli_oauth"):
+            if flow.metadata.get("codex_response_protocol") == "responses":
+                cached_hit_tokens, cache_miss_tokens = (
+                    responses_cache_tokens_parser.get_cache_tokens(
+                        captured_resp.body or ""
+                    )
+                )
+            elif flow.metadata.get("codex_response_protocol") == "chat_completions":
+                cached_hit_tokens, cache_miss_tokens = (
+                    chat_completion_cache_tokens_parser.get_cache_tokens(
+                        captured_resp.body or ""
+                    )
+                )
+            else:
+                cached_hit_tokens, cache_miss_tokens = None, None
+        else:
+            cached_hit_tokens = extract_cached_hit_tokens(
+                captured_resp.body or "",
+                prefer_claude_code_usage=claude_code_feature_request,
+            )
+            cache_miss_tokens = extract_cache_miss_tokens(
+                captured_resp.body or "",
+                prefer_claude_code_usage=claude_code_feature_request,
+            )
+        tokens_per_second = self._get_tokens_per_second_for_protocol(
             captured_resp.body or "",
+            captured_resp.duration_ms,
+            first_token_ms,
             codex_cli_oauth=bool(flow.metadata.get("codex_cli_oauth")),
             response_protocol=flow.metadata.get("codex_response_protocol"),
             prefer_claude_code_usage=claude_code_feature_request,
         )
-        tokens_per_second = None
-        if tokens_output and tokens_output > 0 and captured_resp.duration_ms and captured_resp.duration_ms > 0:
-            tokens_per_second = round(tokens_output / (captured_resp.duration_ms / 1000), 2)
 
         logger.debug(
             f"Token calculation: "
@@ -2712,7 +2771,11 @@ class LLMRouterAddon:
 
         # 兜底保存：客户端断开但上游已正常响应时，用累积的流式数据保存记录
         if captured_req and resp_status is not None and 200 <= resp_status < 300 and has_stream_chunks:
-            from src.tokenizer import calculate_tokens
+            from src.tokenizer import (
+                calculate_tokens,
+                extract_cache_miss_tokens,
+                extract_cached_hit_tokens,
+            )
             import json
             import time
 
@@ -2737,21 +2800,58 @@ class LLMRouterAddon:
             except Exception:
                 pass
 
+        if flow.metadata.get("codex_response_protocol") == "responses":
+            tokens_input = responses_cache_tokens_parser.get_input_tokens(response_body)
+            tokens_output = responses_cache_tokens_parser.get_output_tokens(response_body)
+            token_source = (
+                "api"
+                if tokens_input is not None or tokens_output is not None
+                else None
+            )
+        else:
             tokens_input, tokens_output, token_source = calculate_tokens(
                 model=model,
                 request_body=captured_req.body,
                 response_body=response_body,
-                prefer_claude_code_usage=bool(flow.metadata.get("claude_code_feature_request")),
+                prefer_claude_code_usage=bool(
+                    flow.metadata.get("claude_code_feature_request")
+                ),
             )
-            cached_hit_tokens, cache_miss_tokens = self._extract_cache_tokens_for_protocol(
+            if flow.metadata.get("codex_cli_oauth"):
+                if flow.metadata.get("codex_response_protocol") == "responses":
+                    cached_hit_tokens, cache_miss_tokens = (
+                        responses_cache_tokens_parser.get_cache_tokens(response_body)
+                    )
+                elif flow.metadata.get("codex_response_protocol") == "chat_completions":
+                    cached_hit_tokens, cache_miss_tokens = (
+                        chat_completion_cache_tokens_parser.get_cache_tokens(
+                            response_body
+                        )
+                    )
+                else:
+                    cached_hit_tokens, cache_miss_tokens = None, None
+            else:
+                prefer_claude_code_usage = bool(
+                    flow.metadata.get("claude_code_feature_request")
+                )
+                cached_hit_tokens = extract_cached_hit_tokens(
+                    response_body,
+                    prefer_claude_code_usage=prefer_claude_code_usage,
+                )
+                cache_miss_tokens = extract_cache_miss_tokens(
+                    response_body,
+                    prefer_claude_code_usage=prefer_claude_code_usage,
+                )
+            tokens_per_second = self._get_tokens_per_second_for_protocol(
                 response_body,
+                duration_ms,
+                first_token_ms,
                 codex_cli_oauth=bool(flow.metadata.get("codex_cli_oauth")),
                 response_protocol=flow.metadata.get("codex_response_protocol"),
-                prefer_claude_code_usage=bool(flow.metadata.get("claude_code_feature_request")),
+                prefer_claude_code_usage=bool(
+                    flow.metadata.get("claude_code_feature_request")
+                ),
             )
-            tokens_per_second = None
-            if tokens_output and tokens_output > 0 and duration_ms and duration_ms > 0:
-                tokens_per_second = round(tokens_output / (duration_ms / 1000), 2)
 
             logger.warning(
                 f"[ERROR_SAVE] Client disconnected, saving fallback record for call_id={call_id}, "

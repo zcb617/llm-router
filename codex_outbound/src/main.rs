@@ -17,15 +17,19 @@
 //!   "headers": [["name", "value"], ...],
 //!   "body_b64": "..."
 //! }
+//!
+//! Optional request correlation fields (`request_id`, `source`) are echoed in
+//! responses. Successful responses also include `first_body_at_ms`, the Unix
+//! millisecond timestamp of the first non-empty response body chunk.
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize)]
 struct OutboundRequest {
@@ -37,6 +41,10 @@ struct OutboundRequest {
     body_b64: Option<String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -47,13 +55,35 @@ fn default_timeout_ms() -> u64 {
 struct OutboundResponse {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     headers: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body_b64: Option<String>,
+    first_body_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+fn unix_time_ms() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+fn record_first_body_at_ms(
+    first_body_at_ms: &mut Option<u64>,
+    chunk: &[u8],
+    observed_at_ms: Option<u64>,
+) {
+    if !chunk.is_empty() && first_body_at_ms.is_none() {
+        *first_body_at_ms = observed_at_ms;
+    }
 }
 
 fn emit(resp: &OutboundResponse) {
@@ -72,9 +102,12 @@ async fn main() {
     if let Err(err) = io::stdin().read_to_end(&mut stdin_buf) {
         emit(&OutboundResponse {
             ok: false,
+            request_id: None,
+            source: None,
             status: None,
             headers: vec![],
             body_b64: None,
+            first_body_at_ms: None,
             error: Some(format!("failed to read stdin: {err}")),
         });
         std::process::exit(2);
@@ -85,16 +118,19 @@ async fn main() {
         Err(err) => {
             emit(&OutboundResponse {
                 ok: false,
+                request_id: None,
+                source: None,
                 status: None,
                 headers: vec![],
                 body_b64: None,
+                first_body_at_ms: None,
                 error: Some(format!("invalid request json: {err}")),
             });
             std::process::exit(2);
         }
     };
 
-    match run(req).await {
+    match run(&req).await {
         Ok(resp) => {
             emit(&resp);
             if !resp.ok {
@@ -104,9 +140,12 @@ async fn main() {
         Err(err) => {
             emit(&OutboundResponse {
                 ok: false,
+                request_id: req.request_id.clone(),
+                source: req.source.clone(),
                 status: None,
                 headers: vec![],
                 body_b64: None,
+                first_body_at_ms: None,
                 error: Some(err),
             });
             std::process::exit(1);
@@ -114,7 +153,7 @@ async fn main() {
     }
 }
 
-async fn run(req: OutboundRequest) -> Result<OutboundResponse, String> {
+async fn run(req: &OutboundRequest) -> Result<OutboundResponse, String> {
     let method = Method::from_bytes(req.method.as_bytes())
         .map_err(|e| format!("invalid method {}: {e}", req.method))?;
 
@@ -166,17 +205,22 @@ async fn run(req: OutboundRequest) -> Result<OutboundResponse, String> {
     }
 
     let mut body = Vec::new();
+    let mut first_body_at_ms = None;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("read body failed: {e}"))?;
+        record_first_body_at_ms(&mut first_body_at_ms, &chunk, unix_time_ms());
         body.extend_from_slice(&chunk);
     }
 
     Ok(OutboundResponse {
         ok: true,
+        request_id: req.request_id.clone(),
+        source: req.source.clone(),
         status: Some(status),
         headers: out_headers,
         body_b64: Some(B64.encode(body)),
+        first_body_at_ms,
         error: None,
     })
 }

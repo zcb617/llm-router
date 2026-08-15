@@ -108,7 +108,7 @@ data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":n
     assert source == "api"
     assert input_tokens == 25600
     assert output_tokens == 83
-    assert extract_cache_miss_tokens(response, prefer_claude_code_usage=True) is None
+    assert extract_cache_miss_tokens(response, prefer_claude_code_usage=True) == 25600
 
 
 def test_calculate_tokens_claude_code_tool_use_usage_mapping():
@@ -126,7 +126,7 @@ data:{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":n
     assert source == "api"
     assert input_tokens == 3412
     assert output_tokens == 80
-    assert extract_cache_miss_tokens(response, prefer_claude_code_usage=True) is None
+    assert extract_cache_miss_tokens(response, prefer_claude_code_usage=True) == 3412
 
     # 默认逻辑保持不变（不影响非 Claude Code 特征路径）
     plain_input, plain_output, _ = calculate_tokens(
