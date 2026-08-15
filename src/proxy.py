@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from src.anthropic_cache_tokens import anthropic_cache_tokens_parser
 from src.openai_protocol_converter import parse_sse_buffer
 from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
@@ -1517,42 +1516,6 @@ class LLMRouterAddon:
 
         return b"".join(chunks), first_body_time
 
-    @staticmethod
-    def _get_tokens_per_second_for_protocol(
-        response_body: str,
-        duration_ms: Optional[int],
-        first_token_ms: Optional[int],
-        *,
-        codex_cli_oauth: bool,
-        response_protocol: Optional[str],
-        prefer_claude_code_usage: bool,
-    ) -> Optional[float]:
-        if codex_cli_oauth:
-            if response_protocol == "responses":
-                return responses_cache_tokens_parser.get_tokens_per_second(
-                    response_body,
-                    duration_ms,
-                    first_token_ms,
-                )
-            if response_protocol == "chat_completions":
-                return chat_completion_cache_tokens_parser.get_tokens_per_second(
-                    response_body,
-                    duration_ms,
-                    first_token_ms,
-                )
-            return None
-        if prefer_claude_code_usage:
-            return anthropic_cache_tokens_parser.get_tokens_per_second(
-                response_body,
-                duration_ms,
-                first_token_ms,
-            )
-        return chat_completion_cache_tokens_parser.get_tokens_per_second(
-            response_body,
-            duration_ms,
-            first_token_ms,
-        )
-
     def _capture_stream_chunk(self, flow, chunk: bytes):
         """透传流式响应 chunk，并保留一份用于调用记录。"""
         if chunk and flow.metadata.get("first_token_time") is None:
@@ -2694,14 +2657,16 @@ class LLMRouterAddon:
                 captured_resp.body or "",
                 prefer_claude_code_usage=claude_code_feature_request,
             )
-        tokens_per_second = self._get_tokens_per_second_for_protocol(
-            captured_resp.body or "",
-            captured_resp.duration_ms,
-            first_token_ms,
-            codex_cli_oauth=bool(flow.metadata.get("codex_cli_oauth")),
-            response_protocol=flow.metadata.get("codex_response_protocol"),
-            prefer_claude_code_usage=claude_code_feature_request,
-        )
+        if flow.metadata.get("codex_response_protocol") == "responses":
+            tokens_per_second = responses_cache_tokens_parser.get_tokens_per_second(
+                captured_resp.body or "",
+                captured_resp.duration_ms,
+                first_token_ms,
+            )
+        else:
+            tokens_per_second = None
+            if tokens_output and tokens_output > 0 and captured_resp.duration_ms and captured_resp.duration_ms > 0:
+                tokens_per_second = round(tokens_output / (captured_resp.duration_ms / 1000), 2)
 
         logger.debug(
             f"Token calculation: "
@@ -2842,15 +2807,17 @@ class LLMRouterAddon:
                     response_body,
                     prefer_claude_code_usage=prefer_claude_code_usage,
                 )
-            tokens_per_second = self._get_tokens_per_second_for_protocol(
+        if flow.metadata.get("codex_response_protocol") == "responses":
+            tokens_per_second = responses_cache_tokens_parser.get_tokens_per_second(
                 response_body,
                 duration_ms,
                 first_token_ms,
-                codex_cli_oauth=bool(flow.metadata.get("codex_cli_oauth")),
-                response_protocol=flow.metadata.get("codex_response_protocol"),
-                prefer_claude_code_usage=bool(
-                    flow.metadata.get("claude_code_feature_request")
-                ),
+            )
+        else:
+            tokens_per_second = (
+                round(tokens_output / (duration_ms / 1000), 2)
+                if tokens_output and tokens_output > 0 and duration_ms > 0
+                else None
             )
 
             logger.warning(
