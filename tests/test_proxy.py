@@ -357,6 +357,42 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
     assert id(flow) in addon._pending_requests
 
 
+def test_codex_oauth_cache_parser_selects_response_protocol_adapter():
+    responses_sse = (
+        'data: {"type":"response.completed","response":{"usage":'
+        '{"input_tokens":100,"input_tokens_details":{"cached_tokens":60}}}}\n\n'
+    )
+    chat_sse = (
+        'data: {"choices":[],"usage":'
+        '{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":60}}}\n\n'
+    )
+
+    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
+        responses_sse,
+        codex_cli_oauth=True,
+        response_protocol="responses",
+        prefer_claude_code_usage=False,
+    ) == (60, 40)
+    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
+        chat_sse,
+        codex_cli_oauth=True,
+        response_protocol="chat_completions",
+        prefer_claude_code_usage=False,
+    ) == (60, 40)
+    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
+        responses_sse,
+        codex_cli_oauth=False,
+        response_protocol="responses",
+        prefer_claude_code_usage=False,
+    ) == (None, None)
+
+    assert LLMRouterAddon._extract_cache_tokens_for_protocol(
+        responses_sse,
+        codex_cli_oauth=True,
+        response_protocol="unsupported",
+        prefer_claude_code_usage=False,
+    ) == (None, None)
+
 def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
     addon = _make_addon_for_route_tests()
     addon._resolve_target_base_url = lambda _mapping: "http://upstream.example/v1"

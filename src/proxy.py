@@ -18,6 +18,9 @@ from urllib.parse import urlparse
 
 from src.openai_protocol_converter import parse_sse_buffer
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
+from src.chat_completion_cache_tokens import (
+    extract_cache_tokens as extract_chat_completion_cache_tokens,
+)
 from src.codex_cli_auth import (
     CodexCliAuthManager,
     convert_codex_responses_to_chat,
@@ -29,6 +32,7 @@ from src.codex_cli_auth import (
     resolve_codex_outbound_url,
 )
 from src.codex_outbound_client import CodexOutboundError, send_via_codex_outbound
+from src.responses_cache_tokens import extract_cache_tokens as extract_responses_cache_tokens
 from src.stream_relay import (
     FAILURE_RECORDED_HEADER,
     RELAY_TOKEN_HEADER,
@@ -225,6 +229,32 @@ class LLMRouterAddon:
     @staticmethod
     def _is_codex_cli_oauth(cfg: dict) -> bool:
         return CodexCliAuthManager.is_codex_cli_oauth(cfg or {})
+
+    @staticmethod
+    def _extract_cache_tokens_for_protocol(
+        response_body: str,
+        *,
+        codex_cli_oauth: bool,
+        response_protocol: Optional[str],
+        prefer_claude_code_usage: bool,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """仅为 Codex CLI OAuth 按响应协议选择缓存 token 解析器。"""
+        if codex_cli_oauth:
+            if response_protocol == "responses":
+                return extract_responses_cache_tokens(response_body)
+            if response_protocol == "chat_completions":
+                return extract_chat_completion_cache_tokens(response_body)
+            return None, None
+
+        from src.tokenizer import extract_cached_hit_tokens, extract_cache_miss_tokens
+
+        return (
+            extract_cached_hit_tokens(response_body),
+            extract_cache_miss_tokens(
+                response_body,
+                prefer_claude_code_usage=prefer_claude_code_usage,
+            ),
+        )
 
     @staticmethod
     def _is_codex_auth(cfg: dict) -> bool:
@@ -1119,6 +1149,9 @@ class LLMRouterAddon:
             flow.metadata["call_id"] = captured_req.call_id
             flow.metadata["first_token_time"] = first_body_time or upstream_headers_time
             flow.metadata["codex_cli_oauth"] = True
+            flow.metadata["codex_response_protocol"] = (
+                "chat_completions" if legacy_chat else "responses"
+            )
             flow.metadata["codex_include_usage"] = prepared.include_usage
             flow.metadata["codex_unmappable"] = [
                 {
@@ -2429,7 +2462,7 @@ class LLMRouterAddon:
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
-        from src.tokenizer import calculate_tokens, extract_cached_hit_tokens, extract_cache_miss_tokens
+        from src.tokenizer import calculate_tokens
 
         # 跳过本地响应的请求（探活、查询API等）
         if flow.metadata.get("local_response"):
@@ -2601,9 +2634,10 @@ class LLMRouterAddon:
             response_body=captured_resp.body,
             prefer_claude_code_usage=claude_code_feature_request,
         )
-        cached_hit_tokens = extract_cached_hit_tokens(captured_resp.body or "")
-        cache_miss_tokens = extract_cache_miss_tokens(
+        cached_hit_tokens, cache_miss_tokens = self._extract_cache_tokens_for_protocol(
             captured_resp.body or "",
+            codex_cli_oauth=bool(flow.metadata.get("codex_cli_oauth")),
+            response_protocol=flow.metadata.get("codex_response_protocol"),
             prefer_claude_code_usage=claude_code_feature_request,
         )
         tokens_per_second = None
@@ -2678,7 +2712,7 @@ class LLMRouterAddon:
 
         # 兜底保存：客户端断开但上游已正常响应时，用累积的流式数据保存记录
         if captured_req and resp_status is not None and 200 <= resp_status < 300 and has_stream_chunks:
-            from src.tokenizer import calculate_tokens, extract_cached_hit_tokens, extract_cache_miss_tokens
+            from src.tokenizer import calculate_tokens
             import json
             import time
 
@@ -2709,9 +2743,10 @@ class LLMRouterAddon:
                 response_body=response_body,
                 prefer_claude_code_usage=bool(flow.metadata.get("claude_code_feature_request")),
             )
-            cached_hit_tokens = extract_cached_hit_tokens(response_body)
-            cache_miss_tokens = extract_cache_miss_tokens(
+            cached_hit_tokens, cache_miss_tokens = self._extract_cache_tokens_for_protocol(
                 response_body,
+                codex_cli_oauth=bool(flow.metadata.get("codex_cli_oauth")),
+                response_protocol=flow.metadata.get("codex_response_protocol"),
                 prefer_claude_code_usage=bool(flow.metadata.get("claude_code_feature_request")),
             )
             tokens_per_second = None
