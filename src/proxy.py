@@ -1030,8 +1030,21 @@ class LLMRouterAddon:
                     "so ~/.codex/auth.json contains ChatGPT tokens."
                 )
 
-            session_id = str(uuid.uuid4())
-            thread_id = str(uuid.uuid4())
+            try:
+                request_payload = json.loads(captured_req.body)
+            except (TypeError, ValueError):
+                request_payload = {}
+            prompt_cache_key = (
+                request_payload.get("prompt_cache_key")
+                if isinstance(request_payload, dict)
+                else None
+            )
+            if not isinstance(prompt_cache_key, str) or not prompt_cache_key:
+                prompt_cache_key = None
+            session_id, thread_id = self._codex_cli_auth.get_or_create_session_thread(
+                account_id=snap.account_id or "",
+                prompt_cache_key=prompt_cache_key,
+            )
             client_metadata = self._codex_cli_auth.build_client_metadata(
                 session_id=session_id,
                 thread_id=thread_id,
@@ -1064,6 +1077,7 @@ class LLMRouterAddon:
                 is_fedramp_account=snap.is_fedramp_account,
                 session_id=session_id,
                 thread_id=thread_id,
+                request_id=captured_req.call_id,
                 stream=stream,
             )
             req_data = req_body.encode("utf-8")

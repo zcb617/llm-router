@@ -372,6 +372,10 @@ def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
             )
 
         @staticmethod
+        def get_or_create_session_thread(*, account_id, prompt_cache_key):
+            return "session-1", "thread-1"
+
+        @staticmethod
         def build_client_metadata(*, session_id, thread_id):
             return {"session_id": session_id, "thread_id": thread_id}
 

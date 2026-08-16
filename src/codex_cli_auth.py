@@ -31,6 +31,7 @@ CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 # Refresh when access token JWT expires within this many seconds.
 CODEX_ACCESS_TOKEN_REFRESH_WINDOW_SECONDS = 5 * 60
+CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS = 30 * 60
 
 
 def _codex_home() -> Path:
@@ -213,13 +214,57 @@ class CodexTokenSnapshot:
         return _jwt_exp_unix(self.access_token)
 
 
+@dataclass
+class _CodexPromptCacheAffinity:
+    session_id: str
+    thread_id: str
+    last_used_at: float
+
+
 class CodexCliAuthManager:
     """Resolve Codex CLI ChatGPT OAuth credentials and build outbound headers."""
 
     def __init__(self) -> None:
         self._lock = Lock()
+        self._prompt_cache_affinity_lock = Lock()
+        self._prompt_cache_affinity: dict[
+            tuple[str, str], _CodexPromptCacheAffinity
+        ] = {}
         self.version = CODEX_CLI_VERSION
         self.originator = CODEX_ORIGINATOR
+
+    def get_or_create_session_thread(
+        self,
+        *,
+        account_id: str,
+        prompt_cache_key: Optional[str],
+    ) -> tuple[str, str]:
+        if not prompt_cache_key:
+            return str(uuid.uuid4()), str(uuid.uuid4())
+
+        now = time.time()
+        key = (account_id, prompt_cache_key)
+        with self._prompt_cache_affinity_lock:
+            expired_keys = [
+                item_key
+                for item_key, value in self._prompt_cache_affinity.items()
+                if now - value.last_used_at >= CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS
+            ]
+            for item_key in expired_keys:
+                del self._prompt_cache_affinity[item_key]
+
+            affinity = self._prompt_cache_affinity.get(key)
+            if affinity is None:
+                affinity = _CodexPromptCacheAffinity(
+                    session_id=str(uuid.uuid4()),
+                    thread_id=str(uuid.uuid4()),
+                    last_used_at=now,
+                )
+                self._prompt_cache_affinity[key] = affinity
+            else:
+                affinity.last_used_at = now
+
+            return affinity.session_id, affinity.thread_id
 
     @staticmethod
     def is_codex_cli_oauth(config: dict) -> bool:
@@ -424,6 +469,7 @@ class CodexCliAuthManager:
         is_fedramp_account: bool = False,
         session_id: str,
         thread_id: str,
+        request_id: str,
         stream: bool = True,
     ) -> list[tuple[str, str]]:
         headers: list[tuple[str, str]] = [
@@ -445,7 +491,7 @@ class CodexCliAuthManager:
             headers.append(("session-id", session_id))
         if thread_id:
             headers.append(("thread-id", thread_id))
-            headers.append(("x-client-request-id", thread_id))
+        headers.append(("x-client-request-id", request_id))
         return [(k, _ascii_header_value(v) if k != "Authorization" else v) for k, v in headers]
 
     def build_client_metadata(self, *, session_id: str, thread_id: str) -> dict[str, str]:

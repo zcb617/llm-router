@@ -42,6 +42,7 @@ def test_build_headers_fingerprint(monkeypatch, tmp_path: Path):
         is_fedramp_account=False,
         session_id="sess-1",
         thread_id="thread-1",
+        request_id="request-1",
         stream=True,
     )
     d = dict(headers)
@@ -52,9 +53,38 @@ def test_build_headers_fingerprint(monkeypatch, tmp_path: Path):
     assert d["Accept"] == "text/event-stream"
     assert d["session-id"] == "sess-1"
     assert d["thread-id"] == "thread-1"
-    assert d["x-client-request-id"] == "thread-1"
+    assert d["x-client-request-id"] == "request-1"
     assert d["User-Agent"].startswith(f"{CODEX_ORIGINATOR}/{CODEX_CLI_VERSION} ")
     assert build_codex_user_agent().startswith(f"{CODEX_ORIGINATOR}/{CODEX_CLI_VERSION} ")
+
+
+def test_prompt_cache_affinity_reuses_only_same_account_and_key():
+    mgr = CodexCliAuthManager()
+
+    first = mgr.get_or_create_session_thread(
+        account_id="account-1",
+        prompt_cache_key="cache-1",
+    )
+    repeated = mgr.get_or_create_session_thread(
+        account_id="account-1",
+        prompt_cache_key="cache-1",
+    )
+    different_account = mgr.get_or_create_session_thread(
+        account_id="account-2",
+        prompt_cache_key="cache-1",
+    )
+    different_key = mgr.get_or_create_session_thread(
+        account_id="account-1",
+        prompt_cache_key="cache-2",
+    )
+
+    assert repeated == first
+    assert different_account != first
+    assert different_key != first
+    affinity = mgr._prompt_cache_affinity[("account-1", "cache-1")]
+    assert affinity.session_id == first[0]
+    assert affinity.thread_id == first[1]
+    assert affinity.last_used_at > 0
 
 
 def test_resolve_snapshot_and_refresh_threshold(monkeypatch, tmp_path: Path):
