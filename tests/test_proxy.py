@@ -376,8 +376,24 @@ def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
             return "session-1", "thread-1"
 
         @staticmethod
-        def build_client_metadata(*, session_id, thread_id):
-            return {"session_id": session_id, "thread_id": thread_id}
+        def build_client_metadata(
+            *,
+            session_id,
+            thread_id,
+            incoming_client_metadata=None,
+            fallback_turn_id=None,
+        ):
+            metadata = dict(incoming_client_metadata or {})
+            metadata.update(
+                {
+                    "session_id": session_id,
+                    "thread_id": thread_id,
+                    "x-codex-installation-id": "installation-1",
+                    "x-codex-window-id": session_id,
+                    "turn_id": fallback_turn_id or "turn-1",
+                }
+            )
+            return metadata
 
         @staticmethod
         def build_full_headers(**kwargs):
@@ -435,6 +451,12 @@ def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
     assert sent[1]["url"] == "http://upstream.example/v1/responses"
     responses_body = json.loads(sent[1]["body"])
     assert "input" in responses_body and "messages" not in responses_body
+    for body in (chat_body, responses_body):
+        assert body["client_metadata"]["session_id"] == "session-1"
+        assert body["client_metadata"]["thread_id"] == "thread-1"
+        assert body["client_metadata"]["x-codex-installation-id"] == "installation-1"
+        assert body["client_metadata"]["x-codex-window-id"] == "session-1"
+        assert body["client_metadata"]["turn_id"]
     assert chat_captured.url == sent[0]["url"]
     assert responses_captured.url == sent[1]["url"]
     assert sent[0]["source"] == "codex_cli_oauth:chat_completions"
@@ -443,6 +465,10 @@ def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
     assert sent[1]["request_id"] == responses_captured.call_id
     assert chat_flow.metadata["codex_cli_oauth_first_body_at_ms"] == 1250
     assert responses_flow.metadata["codex_cli_oauth_first_body_at_ms"] == 1500
+    assert chat_flow.metadata["codex_outbound_diagnostics"]["context"]["protocol"] == "chat_completions"
+    assert responses_flow.metadata["codex_outbound_diagnostics"]["context"]["protocol"] == "responses"
+    assert chat_flow.metadata["codex_outbound_diagnostics"]["outbound_request_headers"]["Authorization"] == "[redacted]"
+    assert chat_flow.metadata["codex_outbound_diagnostics"]["upstream_response_headers"]["Content-Type"] == "text/event-stream"
     assert chat_flow.response["status"] == 200
     assert chat_flow.response["headers"]["Content-Type"] == "text/event-stream"
     assert b'"object":"chat.completion.chunk"' in chat_flow.response["content"]

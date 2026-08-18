@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,104 @@ _DEFAULT_CANDIDATES = [
 
 class CodexOutboundError(RuntimeError):
     pass
+
+
+_DIAGNOSTIC_SENSITIVE_HEADERS = {
+    "authorization",
+    "api-key",
+    "x-api-key",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+}
+
+
+def _diagnostic_headers(headers) -> dict[str, str]:
+    """返回可持久化的请求/响应头，敏感值只保留脱敏标记。"""
+    if isinstance(headers, dict):
+        items = headers.items()
+    else:
+        items = headers or []
+
+    result: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        name, value = str(item[0]), str(item[1])
+        result[name] = (
+            "[redacted]"
+            if name.lower() in _DIAGNOSTIC_SENSITIVE_HEADERS
+            else value
+        )
+    return result
+
+
+def _header_value(headers, name: str) -> str | None:
+    wanted = name.lower()
+    if isinstance(headers, dict):
+        items = headers.items()
+    else:
+        items = headers or []
+    for item in items:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            if str(item[0]).lower() == wanted:
+                return str(item[1])
+    return None
+
+
+def _body_bytes(body: bytes | str | None) -> bytes:
+    if body is None:
+        return b""
+    if isinstance(body, bytes):
+        return body
+    return str(body).encode("utf-8")
+
+
+def build_outbound_diagnostics(
+    *,
+    method: str,
+    url: str,
+    headers,
+    body: bytes | str | None,
+    request_id: str | None,
+    source: str | None,
+    status: int | None,
+    response_headers,
+    response_body: bytes | str | None,
+    first_body_at_ms: int | None,
+    context: dict | None = None,
+) -> dict:
+    """构建可写入 llm_calls 的 Codex 出站诊断信息。"""
+    request_body = _body_bytes(body)
+    response_body_bytes = _body_bytes(response_body)
+    upstream_request_id = None
+    for header_name in (
+        "x-request-id",
+        "request-id",
+        "openai-request-id",
+        "x-openai-request-id",
+    ):
+        upstream_request_id = _header_value(response_headers, header_name)
+        if upstream_request_id:
+            break
+
+    return {
+        "version": 1,
+        "source": source,
+        "method": method,
+        "url": url,
+        "request_id": request_id,
+        "outbound_request_headers": _diagnostic_headers(headers),
+        "request_body_length": len(request_body),
+        "request_body_sha256": hashlib.sha256(request_body).hexdigest(),
+        "status": status,
+        "upstream_request_id": upstream_request_id,
+        "upstream_response_headers": _diagnostic_headers(response_headers),
+        "response_body_length": len(response_body_bytes),
+        "response_body_sha256": hashlib.sha256(response_body_bytes).hexdigest(),
+        "first_body_at_ms": first_body_at_ms,
+        "context": context or {},
+    }
 
 
 def resolve_codex_outbound_bin() -> Path:

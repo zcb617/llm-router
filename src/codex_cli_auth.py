@@ -221,6 +221,37 @@ class _CodexPromptCacheAffinity:
     last_used_at: float
 
 
+def _stringify_codex_metadata_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def _extract_turn_id_from_client_metadata(metadata: Any) -> Optional[str]:
+    if not isinstance(metadata, dict):
+        return None
+
+    direct_turn_id = str(metadata.get("turn_id") or "").strip()
+    if direct_turn_id:
+        return direct_turn_id
+
+    nested = metadata.get("x-codex-turn-metadata")
+    if isinstance(nested, str):
+        try:
+            nested = json.loads(nested)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(nested, dict):
+        nested_turn_id = str(nested.get("turn_id") or "").strip()
+        if nested_turn_id:
+            return nested_turn_id
+    return None
+
+
 class CodexCliAuthManager:
     """Resolve Codex CLI ChatGPT OAuth credentials and build outbound headers."""
 
@@ -494,13 +525,31 @@ class CodexCliAuthManager:
         headers.append(("x-client-request-id", request_id))
         return [(k, _ascii_header_value(v) if k != "Authorization" else v) for k, v in headers]
 
-    def build_client_metadata(self, *, session_id: str, thread_id: str) -> dict[str, str]:
-        return {
-            "session_id": session_id,
-            "thread_id": thread_id,
-            "x-codex-installation-id": self.get_or_create_installation_id(),
-            "x-codex-window-id": session_id,
-        }
+    def build_client_metadata(
+        self,
+        *,
+        session_id: str,
+        thread_id: str,
+        incoming_client_metadata: Optional[dict[str, Any]] = None,
+        fallback_turn_id: Optional[str] = None,
+    ) -> dict[str, str]:
+        metadata: dict[str, str] = {}
+        if isinstance(incoming_client_metadata, dict):
+            for key, value in incoming_client_metadata.items():
+                metadata[str(key)] = _stringify_codex_metadata_value(value)
+
+        turn_id = _extract_turn_id_from_client_metadata(metadata) or (fallback_turn_id or "").strip()
+        metadata.update(
+            {
+                "session_id": session_id,
+                "thread_id": thread_id,
+                "x-codex-installation-id": self.get_or_create_installation_id(),
+                "x-codex-window-id": session_id,
+            }
+        )
+        if turn_id:
+            metadata["turn_id"] = turn_id
+        return metadata
 
 
 # Allowlist from Codex CLI source:
@@ -1038,9 +1087,11 @@ def prepare_codex_responses_body(
             else:
                 out["text"] = text
         _apply_reasoning_effort_and_verbosity(payload, out)
-        meta = dict(out.get("client_metadata") or {})
-        if not isinstance(meta, dict):
-            meta = {}
+        raw_meta = out.get("client_metadata")
+        meta: dict[str, str] = {}
+        if isinstance(raw_meta, dict):
+            for key, value in raw_meta.items():
+                meta[str(key)] = _stringify_codex_metadata_value(value)
         # client_metadata values must be strings for Codex HashMap<String,String>
         for k, v in client_metadata.items():
             meta[str(k)] = v if isinstance(v, str) else str(v)

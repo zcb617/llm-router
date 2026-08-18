@@ -1,6 +1,7 @@
 """Rust codex_outbound binary bridge tests."""
 
 import base64
+import hashlib
 import json
 from pathlib import Path
 
@@ -8,9 +9,46 @@ import pytest
 
 from src.codex_outbound_client import (
     CodexOutboundError,
+    build_outbound_diagnostics,
     resolve_codex_outbound_bin,
     send_via_codex_outbound,
 )
+
+
+def test_build_outbound_diagnostics_sanitizes_headers_and_hashes_bodies():
+    request_body = b'{"model":"gpt-5.5"}'
+    response_body = b'{"usage":{"input_tokens_details":{"cached_tokens":0}}}'
+
+    diagnostics = build_outbound_diagnostics(
+        method="POST",
+        url="https://api.openai.com/v1/responses",
+        headers=[
+            ("Authorization", "Bearer secret"),
+            ("session_id", "session-1"),
+            ("Content-Type", "application/json"),
+        ],
+        body=request_body,
+        request_id="call-1",
+        source="codex_cli_oauth:responses",
+        status=200,
+        response_headers=[
+            ("x-request-id", "upstream-1"),
+            ("set-cookie", "secret-cookie"),
+        ],
+        response_body=response_body,
+        first_body_at_ms=123,
+        context={"prompt_cache_key": "cache-key"},
+    )
+
+    assert diagnostics["outbound_request_headers"]["Authorization"] == "[redacted]"
+    assert diagnostics["outbound_request_headers"]["session_id"] == "session-1"
+    assert diagnostics["upstream_response_headers"]["set-cookie"] == "[redacted]"
+    assert diagnostics["upstream_request_id"] == "upstream-1"
+    assert diagnostics["request_body_length"] == len(request_body)
+    assert diagnostics["request_body_sha256"] == hashlib.sha256(request_body).hexdigest()
+    assert diagnostics["response_body_length"] == len(response_body)
+    assert diagnostics["response_body_sha256"] == hashlib.sha256(response_body).hexdigest()
+    assert diagnostics["context"]["prompt_cache_key"] == "cache-key"
 
 
 def test_resolve_codex_outbound_bin_exists():

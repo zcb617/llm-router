@@ -18,6 +18,7 @@
      - upstreams.auth_mode
      - upstreams.oauth_key
      - upstreams.oauth_host
+     - llm_calls.outbound_diagnostics
   4. 基础内容：
      - 基础表: llm_calls, users, api_keys, model_configs
      - RBAC 表: roles, menus, role_menus, upstreams
@@ -29,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.2"
+CURRENT_VERSION = "1.1.3"
 
 
 def get_pg_conn(config):
@@ -119,7 +120,8 @@ PG_TABLES = [
             user_id INTEGER,
             api_key_id INTEGER,
             previous_response_id TEXT,
-            full_context TEXT
+            full_context TEXT,
+            outbound_diagnostics JSON
         )
     """),
     ("users", """
@@ -247,7 +249,8 @@ SQLITE_TABLES = [
             user_id INTEGER,
             api_key_id INTEGER,
             previous_response_id TEXT,
-            full_context TEXT
+            full_context TEXT,
+            outbound_diagnostics TEXT
         )
     """),
     ("users", """
@@ -652,6 +655,16 @@ def run_v112_sqlite(conn):
     _sqlite_add_column(conn, "upstreams", "oauth_host", "TEXT DEFAULT 'https://auth.kimi.com'")
 
 
+def run_v113_pg(conn):
+    """v1.1.2 -> v1.1.3 升级 (PostgreSQL): Codex 出站诊断信息"""
+    _pg_add_column(conn, "llm_calls", "outbound_diagnostics", "JSON")
+
+
+def run_v113_sqlite(conn):
+    """v1.1.2 -> v1.1.3 升级 (SQLite): Codex 出站诊断信息"""
+    _sqlite_add_column(conn, "llm_calls", "outbound_diagnostics", "TEXT")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -682,7 +695,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -718,6 +731,13 @@ def main():
             run_v112_pg(conn)
         else:
             run_v112_sqlite(conn)
+    # v1.1.2 -> v1.1.3
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", CURRENT_VERSION):
+        print(f"\n[v1.1.3] 检查/补齐 Codex 出站诊断字段...")
+        if is_pg:
+            run_v113_pg(conn)
+        else:
+            run_v113_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

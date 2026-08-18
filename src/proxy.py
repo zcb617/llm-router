@@ -29,7 +29,11 @@ from src.codex_cli_auth import (
     resolve_codex_base_url,
     resolve_codex_outbound_url,
 )
-from src.codex_outbound_client import CodexOutboundError, send_via_codex_outbound
+from src.codex_outbound_client import (
+    CodexOutboundError,
+    build_outbound_diagnostics,
+    send_via_codex_outbound,
+)
 from src.responses_cache_tokens import responses_cache_tokens_parser
 from src.stream_relay import (
     FAILURE_RECORDED_HEADER,
@@ -1045,9 +1049,18 @@ class LLMRouterAddon:
                 account_id=snap.account_id or "",
                 prompt_cache_key=prompt_cache_key,
             )
+            captured_req.call_id = str(uuid.uuid4())
+            incoming_client_metadata = (
+                request_payload.get("client_metadata")
+                if isinstance(request_payload, dict)
+                and isinstance(request_payload.get("client_metadata"), dict)
+                else None
+            )
             client_metadata = self._codex_cli_auth.build_client_metadata(
                 session_id=session_id,
                 thread_id=thread_id,
+                incoming_client_metadata=incoming_client_metadata,
+                fallback_turn_id=captured_req.call_id,
             )
             legacy_chat = is_chat_completions_path(path)
             outbound_source = (
@@ -1055,7 +1068,6 @@ class LLMRouterAddon:
                 if legacy_chat
                 else "codex_cli_oauth:responses"
             )
-            captured_req.call_id = str(uuid.uuid4())
             prepared = prepare_codex_responses_body(
                 captured_req.body,
                 forward_model=forward_model,
@@ -1094,6 +1106,25 @@ class LLMRouterAddon:
                 timeout_ms=600_000,
                 request_id=captured_req.call_id,
                 source=outbound_source,
+            )
+            flow.metadata["codex_outbound_diagnostics"] = build_outbound_diagnostics(
+                method="POST",
+                url=full_url,
+                headers=req_headers,
+                body=req_data,
+                request_id=captured_req.call_id,
+                source=outbound_source,
+                status=status,
+                response_headers=resp_headers,
+                response_body=resp_body,
+                first_body_at_ms=first_body_at_ms,
+                context={
+                    "model": forward_model,
+                    "protocol": "chat_completions" if legacy_chat else "responses",
+                    "prompt_cache_key": prompt_cache_key,
+                    "session_id": session_id,
+                    "thread_id": thread_id,
+                },
             )
             # include_usage decision B: ensure response carries usage (Responses completed/body.usage).
             resp_body, usage_warnings = ensure_usage_in_upstream_response(
@@ -2703,6 +2734,19 @@ class LLMRouterAddon:
         if original_request_body:
             captured_req.body = original_request_body
 
+        outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
+        if isinstance(outbound_diagnostics, dict):
+            outbound_diagnostics = dict(outbound_diagnostics)
+            outbound_diagnostics["duration_ms"] = captured_resp.duration_ms
+            outbound_diagnostics["first_token_ms"] = first_token_ms
+            outbound_diagnostics["recorded_usage"] = {
+                "tokens_input": tokens_input,
+                "tokens_output": tokens_output,
+                "cached_hit_tokens": cached_hit_tokens,
+                "cache_miss_tokens": cache_miss_tokens,
+                "token_source": token_source,
+            }
+
         self._enqueue_call_save({
             "call_id": captured_req.call_id,
             "timestamp": captured_req.timestamp,
@@ -2729,6 +2773,7 @@ class LLMRouterAddon:
             "api_key_id": api_key_id,
             "previous_response_id": previous_response_id,
             "full_context": full_context,
+            "outbound_diagnostics": outbound_diagnostics,
         })
 
     def error(self, flow: http.HTTPFlow):
@@ -2840,6 +2885,19 @@ class LLMRouterAddon:
                 f"miss={cache_miss_tokens}, speed={tokens_per_second}"
             )
 
+            outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
+            if isinstance(outbound_diagnostics, dict):
+                outbound_diagnostics = dict(outbound_diagnostics)
+                outbound_diagnostics["duration_ms"] = duration_ms
+                outbound_diagnostics["first_token_ms"] = first_token_ms
+                outbound_diagnostics["recorded_usage"] = {
+                    "tokens_input": tokens_input,
+                    "tokens_output": tokens_output,
+                    "cached_hit_tokens": cached_hit_tokens,
+                    "cache_miss_tokens": cache_miss_tokens,
+                    "token_source": token_source,
+                }
+
             self._enqueue_call_save({
                 "call_id": captured_req.call_id,
                 "timestamp": captured_req.timestamp,
@@ -2866,6 +2924,7 @@ class LLMRouterAddon:
                 "api_key_id": flow.metadata.get("api_key_id"),
                 "previous_response_id": flow.metadata.get("previous_response_id"),
                 "full_context": None,
+                "outbound_diagnostics": outbound_diagnostics,
             })
 
         if not is_multi:

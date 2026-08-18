@@ -87,6 +87,56 @@ def test_prompt_cache_affinity_reuses_only_same_account_and_key():
     assert affinity.last_used_at > 0
 
 
+def test_build_client_metadata_fills_outer_turn_fields(monkeypatch):
+    mgr = CodexCliAuthManager()
+    monkeypatch.setattr(mgr, "get_or_create_installation_id", lambda: "installation-1")
+    nested_metadata = json.dumps(
+        {
+            "thread_id": "nested-thread",
+            "turn_id": "nested-turn",
+            "window_id": "nested-window",
+        }
+    )
+
+    metadata = mgr.build_client_metadata(
+        session_id="session-1",
+        thread_id="thread-1",
+        incoming_client_metadata={
+            "x-codex-turn-metadata": nested_metadata,
+            "custom": "preserved",
+        },
+        fallback_turn_id="request-1",
+    )
+
+    assert metadata == {
+        "x-codex-turn-metadata": nested_metadata,
+        "custom": "preserved",
+        "session_id": "session-1",
+        "thread_id": "thread-1",
+        "x-codex-installation-id": "installation-1",
+        "x-codex-window-id": "session-1",
+        "turn_id": "nested-turn",
+    }
+
+
+def test_build_client_metadata_uses_request_id_when_nested_turn_id_is_missing(monkeypatch):
+    mgr = CodexCliAuthManager()
+    monkeypatch.setattr(mgr, "get_or_create_installation_id", lambda: "installation-1")
+
+    metadata = mgr.build_client_metadata(
+        session_id="session-1",
+        thread_id="thread-1",
+        incoming_client_metadata={
+            "x-codex-turn-metadata": json.dumps({"thread_id": "nested-thread"}),
+        },
+        fallback_turn_id="request-1",
+    )
+
+    assert metadata["turn_id"] == "request-1"
+    assert metadata["thread_id"] == "thread-1"
+    assert metadata["x-codex-window-id"] == "session-1"
+
+
 def test_resolve_snapshot_and_refresh_threshold(monkeypatch, tmp_path: Path):
     codex_home = tmp_path / "codex"
     codex_home.mkdir()
