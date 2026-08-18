@@ -422,6 +422,21 @@
         </div>
         <div id="usage_statsEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无用量数据</div>
       </div>
+
+      <!-- ==================== 订阅额度面板 ==================== -->
+      <div id="subscription_quotasPanel" class="hidden flex-col flex-1 min-h-0 overflow-auto">
+        <div class="flex items-center justify-between mb-5">
+          <div>
+            <h2 class="text-xl font-semibold">订阅额度</h2>
+            <p class="text-sm text-zinc-500 mt-1">查看本机 OAuth 账号的订阅窗口和剩余额度</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <span id="subscriptionQuotasUpdatedAt" class="text-xs text-zinc-500"></span>
+            <button id="refreshAllSubscriptionQuotas" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">全部刷新</button>
+          </div>
+        </div>
+        <div id="subscriptionQuotaCards" class="grid grid-cols-1 xl:grid-cols-2 gap-5"></div>
+      </div>
     </main>
   </div>
 
@@ -896,7 +911,7 @@ function switchPage(page) {
     }
   });
   // 显示/隐藏面板
-  ['logsPanel', 'keysPanel', 'upstreamsPanel', 'modelsPanel', 'usersPanel', 'rolesPanel', 'usage_statsPanel'].forEach(id => {
+  ['logsPanel', 'keysPanel', 'upstreamsPanel', 'modelsPanel', 'usersPanel', 'rolesPanel', 'usage_statsPanel', 'subscription_quotasPanel'].forEach(id => {
     const panel = document.getElementById(id);
     if (panel) {
       if (id === page + 'Panel') {
@@ -915,7 +930,7 @@ function switchPage(page) {
   if (page === 'users') loadUsers();
   if (page === 'roles') loadRoles();
   if (page === 'usage_stats') loadUsageStats();
-  if (page === 'usage_stats') loadUsageStats();
+  if (page === 'subscription_quotas') loadSubscriptionQuotas();
 }
 
 // ============ 调用日志（复用 index.html 逻辑） ============
@@ -2727,6 +2742,142 @@ document.getElementById('roleResetBtn').addEventListener('click', () => {
   renderRoles();
 });
 document.getElementById('roleSearchName').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderRoles(); });
+
+// ============ 订阅额度 ============
+function formatQuotaDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days) return `${days}天${hours ? hours + '小时' : ''}`;
+  if (hours) return `${hours}小时${minutes ? minutes + '分钟' : ''}`;
+  return `${minutes}分钟`;
+}
+
+function formatQuotaReset(windowInfo) {
+  if (windowInfo.reset_after_seconds != null) {
+    return `${formatQuotaDuration(windowInfo.reset_after_seconds)}后重置`;
+  }
+  if (windowInfo.reset_at == null) return '重置时间未知';
+  const numeric = Number(windowInfo.reset_at);
+  const date = Number.isFinite(numeric)
+    ? new Date(numeric * 1000)
+    : new Date(windowInfo.reset_at);
+  if (Number.isNaN(date.getTime())) return '重置时间未知';
+  const seconds = Math.floor((date.getTime() - Date.now()) / 1000);
+  return seconds > 0 ? `${formatQuotaDuration(seconds)}后重置` : '即将重置';
+}
+
+function quotaColorClass(remaining) {
+  if (remaining <= 10) return 'bg-red-500';
+  if (remaining <= 30) return 'bg-amber-500';
+  return 'bg-emerald-500';
+}
+
+function renderQuotaWindow(windowInfo) {
+  const remaining = windowInfo.remaining_percent == null
+    ? null
+    : Math.max(0, Math.min(100, Number(windowInfo.remaining_percent)));
+  const detail = windowInfo.remaining != null && windowInfo.limit != null
+    ? ` · ${Number(windowInfo.remaining).toLocaleString()} / ${Number(windowInfo.limit).toLocaleString()}`
+    : '';
+  if (remaining == null || Number.isNaN(remaining)) {
+    return `<div class="rounded-lg bg-zinc-50 dark:bg-zinc-800/60 p-4">
+      <div class="flex justify-between text-sm"><span class="font-medium">${escapeHtml(windowInfo.name || '订阅额度')}</span><span class="text-zinc-500">暂无数据</span></div>
+    </div>`;
+  }
+  return `<div class="rounded-lg bg-zinc-50 dark:bg-zinc-800/60 p-4">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-sm font-medium">${escapeHtml(windowInfo.name || '订阅额度')}</span>
+      <span class="text-sm font-semibold">剩余 ${remaining.toFixed(remaining % 1 ? 1 : 0)}%${detail}</span>
+    </div>
+    <div class="h-2.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
+      <div class="h-full rounded-full ${quotaColorClass(remaining)}" style="width:${remaining}%"></div>
+    </div>
+    <div class="text-xs text-zinc-500 mt-2">${escapeHtml(formatQuotaReset(windowInfo))}</div>
+  </div>`;
+}
+
+function renderSubscriptionQuotaCard(subscription) {
+  const available = subscription.status === 'available';
+  const statusText = available ? '正常' : subscription.status === 'error' ? '查询失败' : '未登录';
+  const statusClass = available
+    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300';
+  const token = subscription.token || {};
+  const tokenText = token.available
+    ? `Token 有效${token.seconds_to_expiry != null ? '，剩余 ' + formatQuotaDuration(token.seconds_to_expiry) : ''}`
+    : 'Token 不可用';
+  const byKey = new Map((subscription.windows || []).map(item => [item.key, item]));
+  const windows = [
+    byKey.get('5h') || {key: '5h', name: '5小时额度'},
+    byKey.get('7d') || {key: '7d', name: '7天额度'}
+  ];
+  return `<article class="rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-5 shadow-sm">
+    <div class="flex items-start justify-between gap-3 mb-4">
+      <div>
+        <h3 class="font-semibold text-lg">${escapeHtml(subscription.name || subscription.id)}</h3>
+        <div class="text-xs text-zinc-500 mt-1">${escapeHtml(tokenText)}</div>
+      </div>
+      <span class="px-2.5 py-1 rounded-full text-xs font-medium ${statusClass}">${statusText}</span>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm mb-4">
+      <div class="text-zinc-500">账号：<span class="text-zinc-800 dark:text-zinc-200 font-mono text-xs">${escapeHtml(subscription.account_id || token.account_id || '-')}</span></div>
+      <div class="text-zinc-500">套餐：<span class="text-zinc-800 dark:text-zinc-200">${escapeHtml(subscription.plan_type || '-')}</span></div>
+    </div>
+    ${subscription.error ? `<div class="mb-4 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-300 text-sm">${escapeHtml(subscription.error)}</div>` : ''}
+    <div class="space-y-3">${windows.map(renderQuotaWindow).join('')}</div>
+    <div class="flex items-center justify-between mt-5 pt-4 border-t border-zinc-200 dark:border-zinc-800">
+      <span class="text-xs text-zinc-500">${subscription.fetched_at ? '更新于 ' + new Date(subscription.fetched_at * 1000).toLocaleTimeString() : '尚未取得额度'}</span>
+      <button class="refresh-subscription-quota px-3 py-1.5 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" data-id="${escapeHtml(subscription.id)}">刷新</button>
+    </div>
+  </article>`;
+}
+
+function bindSubscriptionQuotaRefreshButtons() {
+  document.querySelectorAll('.refresh-subscription-quota').forEach(button => {
+    button.onclick = async () => {
+      await runLockedAction('subscription-' + button.dataset.id, button, async () => {
+        const res = await fetch(`/api/subscription-quotas/${encodeURIComponent(button.dataset.id)}/refresh`, {
+          method: 'POST', headers: getAuthHeaders()
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '刷新订阅额度失败');
+        const cards = Array.from(document.getElementById('subscriptionQuotaCards').children);
+        const index = cards.findIndex(card => card.dataset.subscriptionId === button.dataset.id);
+        if (index >= 0) {
+          const wrapper = document.createElement('div');
+          wrapper.dataset.subscriptionId = data.subscription.id;
+          wrapper.innerHTML = renderSubscriptionQuotaCard(data.subscription);
+          cards[index].replaceWith(wrapper);
+          bindSubscriptionQuotaRefreshButtons();
+        }
+      });
+    };
+  });
+}
+
+function renderSubscriptionQuotas(subscriptions) {
+  const container = document.getElementById('subscriptionQuotaCards');
+  container.innerHTML = (subscriptions || []).map(subscription =>
+    `<div data-subscription-id="${escapeHtml(subscription.id)}">${renderSubscriptionQuotaCard(subscription)}</div>`
+  ).join('');
+  bindSubscriptionQuotaRefreshButtons();
+}
+
+async function loadSubscriptionQuotas() {
+  const button = document.getElementById('refreshAllSubscriptionQuotas');
+  await runLockedAction('refreshAllSubscriptionQuotas', button, async () => {
+    const res = await fetch('/api/subscription-quotas', {headers: getAuthHeaders()});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加载订阅额度失败');
+    renderSubscriptionQuotas(data.subscriptions);
+    document.getElementById('subscriptionQuotasUpdatedAt').textContent =
+      `最后刷新：${new Date((data.fetched_at || Date.now() / 1000) * 1000).toLocaleTimeString()}`;
+  });
+}
+
+document.getElementById('refreshAllSubscriptionQuotas').addEventListener('click', loadSubscriptionQuotas);
 
 // ============ 用量统计 ============
 async function loadUsageStats() {

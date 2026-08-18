@@ -27,6 +27,7 @@ CODEX_ORIGINATOR = "codex_cli_rs"
 # Default when ~/.codex/config.toml has no openai_base_url (Codex ChatGPT OAuth).
 # Source: model-provider-info CHATGPT_CODEX_BASE_URL + AuthMode::Chatgpt branch.
 CODEX_CLI_OAUTH_BASE_URL = "https://chatgpt.com/backend-api/codex"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 # Refresh when access token JWT expires within this many seconds.
@@ -144,6 +145,20 @@ def _jwt_exp_unix(jwt: str) -> Optional[float]:
     try:
         return float(exp) if exp is not None else None
     except (TypeError, ValueError):
+        return None
+
+
+def _codex_int(value) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _codex_float(value) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -489,6 +504,61 @@ class CodexCliAuthManager:
             "seconds_to_expiry": seconds,
             "has_refresh_token": bool(snap.refresh_token),
             "auth_mode": snap.auth_mode,
+        }
+
+    def fetch_usage(self) -> dict:
+        """主动读取 Codex 订阅额度，并统一为控制台卡片结构。"""
+        snap = self.resolve_snapshot(refresh_if_needed=True)
+        if not snap or not snap.access_token:
+            raise RuntimeError("本机 Codex CLI OAuth token 不可用")
+
+        headers = {"Authorization": f"Bearer {snap.access_token}"}
+        if snap.account_id:
+            headers["ChatGPT-Account-ID"] = snap.account_id
+        if snap.is_fedramp_account:
+            headers["X-OpenAI-Fedramp"] = "true"
+        response = httpx.get(CODEX_USAGE_URL, headers=headers, timeout=20.0)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Codex 额度接口返回格式无效")
+
+        rate_limit = payload.get("rate_limit") if isinstance(payload.get("rate_limit"), dict) else payload
+        windows = []
+        for key in ("primary_window", "secondary_window"):
+            item = rate_limit.get(key)
+            if not isinstance(item, dict):
+                continue
+            window_seconds = _codex_int(item.get("limit_window_seconds"))
+            used_percent = _codex_float(item.get("used_percent"))
+            remaining_percent = item.get("remaining_percent")
+            remaining_percent = _codex_float(remaining_percent)
+            if remaining_percent is None and used_percent is not None:
+                remaining_percent = max(0.0, min(100.0, 100.0 - used_percent))
+            window_key = "5h" if window_seconds == 18000 else "7d" if window_seconds == 604800 else key
+            windows.append({
+                "key": window_key,
+                "name": "5小时额度" if window_key == "5h" else "7天额度" if window_key == "7d" else key,
+                "window_seconds": window_seconds,
+                "used": _codex_int(item.get("used")),
+                "limit": _codex_int(item.get("limit")),
+                "remaining": _codex_int(item.get("remaining")),
+                "used_percent": used_percent,
+                "remaining_percent": remaining_percent,
+                "reset_at": _codex_int(item.get("reset_at")),
+                "reset_after_seconds": _codex_int(item.get("reset_after_seconds")),
+            })
+
+        return {
+            "id": "codex-cli-oauth",
+            "provider": "codex",
+            "name": "Codex CLI OAuth",
+            "status": "available",
+            "account_id": snap.account_id or None,
+            "plan_type": payload.get("plan_type"),
+            "windows": windows,
+            "fetched_at": int(time.time()),
+            "source": "usage_api",
         }
 
     def build_full_headers(

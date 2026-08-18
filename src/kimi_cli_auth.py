@@ -109,6 +109,60 @@ def _refresh_threshold(expires_in: float) -> float:
     return 300.0
 
 
+def _as_int(value) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _window_seconds(window: dict, item: dict, detail: dict) -> Optional[int]:
+    duration = _as_int(window.get("duration") or item.get("duration") or detail.get("duration"))
+    unit = str(
+        window.get("timeUnit") or item.get("timeUnit") or detail.get("timeUnit") or ""
+    ).upper()
+    if duration is None:
+        return None
+    multipliers = {"SECOND": 1, "MINUTE": 60, "HOUR": 3600, "DAY": 86400}
+    return duration * multipliers.get(unit, 1)
+
+
+def _normalize_usage_window(data: Optional[dict], window_seconds: Optional[int], index: int) -> Optional[dict]:
+    if not isinstance(data, dict):
+        return None
+    limit = _as_int(data.get("limit"))
+    used = _as_int(data.get("used"))
+    remaining = _as_int(data.get("remaining"))
+    if used is None and limit is not None and remaining is not None:
+        used = limit - remaining
+    if remaining is None and limit is not None and used is not None:
+        remaining = limit - used
+    used_percent = data.get("used_percent") or data.get("usedPercent")
+    try:
+        used_percent = float(used_percent) if used_percent is not None else None
+    except (TypeError, ValueError):
+        used_percent = None
+    if used_percent is None and limit and used is not None:
+        used_percent = used * 100.0 / limit
+    remaining_percent = None if used_percent is None else max(0.0, min(100.0, 100.0 - used_percent))
+    reset_at = data.get("reset_at") or data.get("resetAt") or data.get("resets_at")
+    reset_after = _as_int(data.get("reset_after_seconds") or data.get("resetAfterSeconds"))
+    key = "5h" if window_seconds == 18000 else "7d" if window_seconds == 604800 else f"window-{index}"
+    name = "5小时额度" if key == "5h" else "7天额度" if key == "7d" else str(data.get("name") or data.get("title") or "订阅额度")
+    return {
+        "key": key,
+        "name": name,
+        "window_seconds": window_seconds,
+        "used": used,
+        "limit": limit,
+        "remaining": remaining,
+        "used_percent": used_percent,
+        "remaining_percent": remaining_percent,
+        "reset_at": reset_at,
+        "reset_after_seconds": reset_after,
+    }
+
+
 def _ensure_private_file(path: Path) -> None:
     try:
         os.chmod(path, 0o600)
@@ -407,6 +461,59 @@ class KimiCliAuthManager:
                 "has_refresh_token": bool(token.refresh_token),
                 "refresh_attempted": should_refresh,
             }
+
+    def fetch_usage(
+        self,
+        oauth_key: str = KIMI_DEFAULT_OAUTH_KEY,
+        oauth_host: str = KIMI_DEFAULT_OAUTH_HOST,
+    ) -> dict:
+        """读取 Kimi Code 订阅额度，不暴露本机 OAuth 凭据。"""
+        access_token = self.resolve_access_token(
+            auth_mode="kimi_cli_oauth",
+            api_key="",
+            oauth_key=oauth_key,
+            oauth_host=oauth_host,
+        )
+        if not access_token:
+            raise RuntimeError("本机 Kimi OAuth token 不可用")
+
+        url = KIMI_CLI_OAUTH_BASE_URL.rstrip("/") + "/usages"
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Kimi 额度接口返回格式无效")
+
+        windows = []
+        for index, item in enumerate(payload.get("limits") or []):
+            if not isinstance(item, dict):
+                continue
+            detail = item.get("detail") if isinstance(item.get("detail"), dict) else item
+            window = item.get("window") if isinstance(item.get("window"), dict) else {}
+            duration = _window_seconds(window, item, detail)
+            normalized = _normalize_usage_window(detail, duration, index)
+            if normalized:
+                windows.append(normalized)
+
+        summary = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
+        normalized_summary = _normalize_usage_window(summary, 604800, -1) if summary else None
+        if normalized_summary and not any(item.get("key") == "7d" for item in windows):
+            windows.append(normalized_summary)
+        return {
+            "id": "kimi-cli-oauth",
+            "provider": "kimi",
+            "name": "Kimi OAuth",
+            "status": "available",
+            "plan_type": payload.get("plan_type") or payload.get("plan"),
+            "summary": normalized_summary,
+            "windows": windows,
+            "fetched_at": int(time.time()),
+            "source": "usage_api",
+        }
 
     def build_full_headers(
         self,

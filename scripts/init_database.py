@@ -30,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.3"
+CURRENT_VERSION = "1.1.4"
 
 
 def get_pg_conn(config):
@@ -353,19 +353,20 @@ SQLITE_TABLES = [
 SEED_DATA = {
     "menus": [
         {"code": "usage_stats", "name": "用量统计", "icon": "📊", "sort_order": 0},
-        {"code": "logs", "name": "调用日志", "icon": "📋", "sort_order": 1},
-        {"code": "keys", "name": "密钥管理", "icon": "🔑", "sort_order": 2},
-        {"code": "upstreams", "name": "上游管理", "icon": "🔗", "sort_order": 3},
-        {"code": "models", "name": "模型配置", "icon": "⚙️", "sort_order": 4},
-        {"code": "users", "name": "用户管理", "icon": "", "sort_order": 5},
-        {"code": "roles", "name": "角色管理", "icon": "🛡️", "sort_order": 6},
+        {"code": "subscription_quotas", "name": "订阅额度", "icon": "💳", "sort_order": 1},
+        {"code": "logs", "name": "调用日志", "icon": "📋", "sort_order": 2},
+        {"code": "keys", "name": "密钥管理", "icon": "🔑", "sort_order": 3},
+        {"code": "upstreams", "name": "上游管理", "icon": "🔗", "sort_order": 4},
+        {"code": "models", "name": "模型配置", "icon": "⚙️", "sort_order": 5},
+        {"code": "users", "name": "用户管理", "icon": "", "sort_order": 6},
+        {"code": "roles", "name": "角色管理", "icon": "🛡️", "sort_order": 7},
     ],
     "roles": [
         {"name": "admin", "description": "管理员，拥有所有菜单权限"},
         {"name": "viewer", "description": "普通用户，仅查看日志和密钥"},
     ],
     "role_menus": {
-        "admin": ["usage_stats", "logs", "keys", "upstreams", "models", "users", "roles"],
+        "admin": ["usage_stats", "subscription_quotas", "logs", "keys", "upstreams", "models", "users", "roles"],
         "viewer": ["usage_stats", "logs", "keys"],
     },
 }
@@ -665,6 +666,49 @@ def run_v113_sqlite(conn):
     _sqlite_add_column(conn, "llm_calls", "outbound_diagnostics", "TEXT")
 
 
+def run_v114_pg(conn):
+    """v1.1.3 -> v1.1.4：添加订阅额度菜单并授权管理员。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM menus WHERE code = %s", ("subscription_quotas",))
+        if cur.fetchone() is None:
+            cur.execute("UPDATE menus SET sort_order = sort_order + 1 WHERE sort_order >= %s", (1,))
+        cur.execute(
+            "INSERT INTO menus (code, name, icon, sort_order) VALUES (%s, %s, %s, %s) ON CONFLICT (code) DO NOTHING",
+            ("subscription_quotas", "订阅额度", "💳", 1),
+        )
+        cur.execute(
+            "INSERT INTO role_menus (role_id, menu_id) "
+            "SELECT r.id, m.id FROM roles r, menus m "
+            "WHERE r.name = %s AND m.code = %s ON CONFLICT DO NOTHING",
+            ("admin", "subscription_quotas"),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v114_sqlite(conn):
+    """v1.1.3 -> v1.1.4：添加订阅额度菜单并授权管理员。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM menus WHERE code = ?", ("subscription_quotas",))
+        if cur.fetchone() is None:
+            cur.execute("UPDATE menus SET sort_order = sort_order + 1 WHERE sort_order >= ?", (1,))
+        cur.execute(
+            "INSERT OR IGNORE INTO menus (code, name, icon, sort_order) VALUES (?, ?, ?, ?)",
+            ("subscription_quotas", "订阅额度", "💳", 1),
+        )
+        cur.execute(
+            "INSERT OR IGNORE INTO role_menus (role_id, menu_id) "
+            "SELECT r.id, m.id FROM roles r, menus m WHERE r.name = ? AND m.code = ?",
+            ("admin", "subscription_quotas"),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -695,7 +739,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -738,6 +782,13 @@ def main():
             run_v113_pg(conn)
         else:
             run_v113_sqlite(conn)
+
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", CURRENT_VERSION):
+        print("\n[v1.1.4] 检查/补齐订阅额度菜单和权限...")
+        if is_pg:
+            run_v114_pg(conn)
+        else:
+            run_v114_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

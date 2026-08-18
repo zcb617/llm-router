@@ -2234,7 +2234,7 @@ class LLMRouterAddon:
         try:
             # === 控制台 API 路由（优先处理） ===
             from src.console_api import handle_console_api
-            if path.startswith("/api/auth") or path.startswith("/api/keys") or path.startswith("/api/upstreams") or path.startswith("/api/models") or path.startswith("/api/users") or path.startswith("/api/roles") or path.startswith("/api/usage_stats") or path.startswith("/api/health"):
+            if path.startswith("/api/auth") or path.startswith("/api/keys") or path.startswith("/api/upstreams") or path.startswith("/api/models") or path.startswith("/api/users") or path.startswith("/api/roles") or path.startswith("/api/usage_stats") or path.startswith("/api/subscription-quotas") or path.startswith("/api/health"):
                 handled = handle_console_api(flow, self.storage, path, self.config, self)
                 if handled:
                     return

@@ -5,6 +5,7 @@
 import json
 import re
 import secrets
+import time
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from typing import Optional
@@ -221,6 +222,53 @@ def _require_auth(flow) -> Optional[dict]:
         _json_response(flow, 401, {"error": "Unauthorized: invalid or expired token"})
         return None
     return payload
+
+
+def _load_subscription_quota(subscription_id: str) -> dict:
+    """读取单个本机 OAuth 订阅，失败时返回可独立渲染的卡片数据。"""
+    if subscription_id == "kimi-cli-oauth":
+        from src.kimi_cli_auth import KimiCliAuthManager
+
+        manager = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
+        token = manager.inspect_local_token(
+            KIMI_DEFAULT_OAUTH_KEY,
+            KIMI_DEFAULT_OAUTH_HOST,
+            refresh_if_needed=True,
+        )
+        name = "Kimi OAuth"
+        loader = lambda: manager.fetch_usage(KIMI_DEFAULT_OAUTH_KEY, KIMI_DEFAULT_OAUTH_HOST)
+    elif subscription_id == "codex-cli-oauth":
+        from src.codex_cli_auth import CodexCliAuthManager
+
+        manager = CodexCliAuthManager()
+        token = manager.inspect_local_token(refresh_if_needed=True)
+        name = "Codex CLI OAuth"
+        loader = manager.fetch_usage
+    else:
+        raise ValueError("未知订阅类型")
+
+    if not token.get("available"):
+        return {
+            "id": subscription_id,
+            "name": name,
+            "status": "unavailable",
+            "token": token,
+            "windows": [],
+            "error": "本机 OAuth token 不可用",
+        }
+    try:
+        result = loader()
+        result["token"] = token
+        return result
+    except Exception as exc:
+        return {
+            "id": subscription_id,
+            "name": name,
+            "status": "error",
+            "token": token,
+            "windows": [],
+            "error": str(exc),
+        }
 
 
 def handle_console_api(flow, storage, path: str, config=None, addon=None):
@@ -1202,6 +1250,31 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
         stats = storage.get_user_usage_stats(payload["user_id"])
         _json_response(flow, 200, stats)
+        return True
+
+    # ========== 订阅额度 API ==========
+    if path == "/api/subscription-quotas" and flow.request.method == "GET":
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+        subscriptions = [
+            _load_subscription_quota("kimi-cli-oauth"),
+            _load_subscription_quota("codex-cli-oauth"),
+        ]
+        _json_response(flow, 200, {"subscriptions": subscriptions, "fetched_at": int(time.time())})
+        return True
+
+    if path.startswith("/api/subscription-quotas/") and path.endswith("/refresh") and flow.request.method == "POST":
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+        subscription_id = path.removeprefix("/api/subscription-quotas/").removesuffix("/refresh")
+        try:
+            subscription = _load_subscription_quota(subscription_id)
+        except ValueError as exc:
+            _json_response(flow, 404, {"error": str(exc)})
+            return True
+        _json_response(flow, 200, {"subscription": subscription})
         return True
 
 
