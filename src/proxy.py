@@ -2472,6 +2472,11 @@ class LLMRouterAddon:
                     converted_list = converter.process_event(event["data"])
                     for converted in converted_list:
                         output_lines.append(f"data: {converted}")
+                if not chunk:
+                    process_eof = getattr(converter, "process_eof", None)
+                    if process_eof is not None:
+                        for converted in process_eof():
+                            output_lines.append(f"data: {converted}")
                 if output_lines:
                     result = ("\n\n".join(output_lines) + "\n\n").encode("utf-8")
                     logger.debug(f"[ProtocolConvert] Sending {len(output_lines)} events ({len(result)} bytes)")

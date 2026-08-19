@@ -7,3 +7,42 @@ args = [
     "postgres://ai_user:ai_user@192.168.1.51:5432/llm-router",
 ]
 command = "npx"
+
+
+[mcp_servers.honcho_local]
+url = "http://192.168.1.11:8787"
+http_headers = { "Authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0IjoiMjAyNi0wOC0wNVQwNzowNzoxMloiLCJhZCI6dHJ1ZX0.mz9d4lkv0Xglqs8nNFpWRmXVVqUqaVwWn3-fuT4CltU", "X-Honcho-User-Name" = "zhangchenbin", "X-Honcho-Workspace-ID" = "llm_router" }
+
+[mcp_servers.honcho_local.tools.search]
+approval_mode = "approve"
+
+[mcp_servers.honcho_local.tools.list_conclusions]
+approval_mode = "approve"
+
+[mcp_servers.honcho_local.tools.create_conclusions]
+approval_mode = "approve"
+
+[mcp_servers.honcho_local.tools.chat]
+approval_mode = "approve"
+
+[mcp_servers.honcho_local.tools.get_representation]
+approval_mode = "approve"
+
+
+[hooks.state]
+
+[hooks.state."./.codex/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:c3b95aefebe74785da97c4d7cc10e9f94b426f4d934fe08d8f13bf482d75c954"
+
+[hooks.state."./.codex/hooks.json:pre_compact:0:0"]
+trusted_hash = "sha256:7dfb090249b8dcee763b6e0bb5d2b7654237a5742963e03c306a832bdd1974ca"
+
+[hooks.state."./.codex/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:efd37f75c26d8db06cf9dcd184899e16976a6a492a8073679d04e7cef813fbe3"
+
+[hooks.state."./.codex/hooks.json:user_prompt_submit:0:0"]
+trusted_hash = "sha256:2aa7a4f0c7f6964827339955f4417d25390bec21b28e7fb7ea2662f6e7462909"
+
+[hooks.state."./.codex/hooks.json:stop:0:0"]
+trusted_hash = "sha256:e1ecb6640b63684cb3a3bb473ec14562cc70273a9e6f77444b075413500655b5"
+

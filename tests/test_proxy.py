@@ -721,6 +721,38 @@ def test_responseheaders_streams_and_captures_chunks():
     assert flow.metadata["first_token_time"] is not None
 
 
+def test_responseheaders_kimi3_completes_terminal_stream_on_eof():
+    class DummyResponse:
+        def __init__(self):
+            self.status_code = 200
+            self.stream = False
+
+    class DummyFlow:
+        def __init__(self):
+            self.metadata = {
+                "request_body_for_stream": '{"stream": true}',
+                "needs_protocol_conversion": True,
+                "protocol_converter": "kimi3",
+                "call_id": "call-k3-eof",
+                "overridden_model": "k3-256k",
+            }
+            self.response = DummyResponse()
+
+    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    flow = DummyFlow()
+    addon.responseheaders(flow)
+    terminal_chunk = (
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}\n\n'
+    ).encode()
+
+    terminal_result = flow.response.stream(terminal_chunk)
+    eof_result = flow.response.stream(b"")
+
+    assert b"response.completed" not in terminal_result
+    assert b"response.completed" in eof_result
+
+
 def test_route_multi_upstream_streaming_registers_relay_candidates():
     addon = _make_addon_for_route_tests()
     flow = _make_flow()

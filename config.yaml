@@ -4,10 +4,10 @@ proxy:
   auto_retry_max_attempts: 2 # 仅针对 api_error(server internal) 的自动重试次数
 
 database:
-  path: "./data/llm_calls.db"
-#  postgresql:
-#    host: "192.168.1.51"
-#    port: 5432
-#    user: "zhangcb"
-#    password: "tmdysj"
-#    dbname: "llm-router"
+  #  path: "./data/llm_calls.db"
+  postgresql:
+    host: "192.168.1.11"
+    port: 5432
+    user: "zhangcb"
+    password: "tmdysj"
+    dbname: "llm-router"

@@ -1,6 +1,6 @@
 # 铁律
 1.当用户是在反馈问题的时候，永远按照：查问题->分析原因->汇报问题产生的原因->汇报解决方案->按照铁律第2点执行
-2.任何时候只有用户在提示词中明确出现：OK，可以，做，开始，同意，确认，这几个字的时候，才可以改代码
+2.任何时候只有获得用户明确的授权：OK，可以，做，开始，同意，确认，这几个字的时候，才可以改代码
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
