@@ -321,10 +321,12 @@ class LLMRouterAddon:
                 "last_sequence_number": None,
                 "tail_events": [],
                 "eof_seen": False,
+                "last_return_at": None,
             },
         )
         if returned_bytes > 0:
             diagnostics["returned_chunks"] += 1
+            diagnostics["last_return_at"] = time.time()
         diagnostics["returned_events"] += len(event_payloads)
         diagnostics["returned_bytes"] += returned_bytes
 
@@ -353,6 +355,47 @@ class LLMRouterAddon:
 
         diagnostics["tail_events"] = tail_events[-8:]
         return diagnostics
+
+    @staticmethod
+    def _stream_connection_timeline(flow: http.HTTPFlow) -> str:
+        """生成流异常时间线；所有时间均相对当前 flow 创建时间。"""
+        origin = flow.timestamp_created
+
+        def elapsed_ms(timestamp):
+            if timestamp is None:
+                return None
+            return round((timestamp - origin) * 1000, 3)
+
+        client = flow.client_conn
+        server = flow.server_conn
+        upstream = flow.metadata.get("protocol_upstream_diagnostics") or {}
+        downstream = flow.metadata.get("protocol_downstream_diagnostics") or {}
+        response = flow.response
+        error = flow.error
+
+        timeline = {
+            "error_at_ms": elapsed_ms(getattr(error, "timestamp", None)),
+            "upstream_headers_at_ms": elapsed_ms(upstream.get("headers_at")),
+            "upstream_first_chunk_at_ms": elapsed_ms(upstream.get("first_chunk_at")),
+            "upstream_last_chunk_at_ms": elapsed_ms(upstream.get("last_chunk_at")),
+            "upstream_clean_eof_at_ms": elapsed_ms(upstream.get("clean_eof_at")),
+            "downstream_last_return_at_ms": elapsed_ms(downstream.get("last_return_at")),
+            "response_end_at_ms": elapsed_ms(getattr(response, "timestamp_end", None)),
+            "client_conn_start_at_ms": elapsed_ms(getattr(client, "timestamp_start", None)),
+            "client_conn_end_at_ms": elapsed_ms(getattr(client, "timestamp_end", None)),
+            "server_conn_start_at_ms": elapsed_ms(getattr(server, "timestamp_start", None)),
+            "server_conn_end_at_ms": elapsed_ms(getattr(server, "timestamp_end", None)),
+            "upstream_chunks": upstream.get("chunks", 0),
+            "upstream_bytes": upstream.get("bytes", 0),
+            "client_peer": getattr(client, "peername", None),
+            "client_sock": getattr(client, "sockname", None),
+            "client_state": str(getattr(client, "state", None)),
+            "server_peer": getattr(server, "peername", None),
+            "server_sock": getattr(server, "sockname", None),
+            "server_state": str(getattr(server, "state", None)),
+            "server_error": getattr(server, "error", None),
+        }
+        return json.dumps(timeline, ensure_ascii=False, separators=(",", ":"), default=str)
 
     @staticmethod
     def _is_retryable_api_error(response_status: Optional[int], response_body: Optional[str]) -> bool:
@@ -2479,8 +2522,27 @@ class LLMRouterAddon:
             converter = converter_module.StreamConverter(response_id=call_id, model=model)
             flow.metadata["stream_converter"] = converter
             flow.metadata["sse_buffer"] = ""
+            flow.metadata["protocol_upstream_diagnostics"] = {
+                "headers_at": time.time(),
+                "first_chunk_at": None,
+                "last_chunk_at": None,
+                "clean_eof_at": None,
+                "chunks": 0,
+                "bytes": 0,
+            }
 
-            def converted_stream(chunk: bytes) -> bytes:
+            def converted_stream(chunk: bytes) -> bytes | list[bytes]:
+                chunk_at = time.time()
+                upstream_diagnostics = flow.metadata["protocol_upstream_diagnostics"]
+                if chunk:
+                    if upstream_diagnostics["first_chunk_at"] is None:
+                        upstream_diagnostics["first_chunk_at"] = chunk_at
+                    upstream_diagnostics["last_chunk_at"] = chunk_at
+                    upstream_diagnostics["chunks"] += 1
+                    upstream_diagnostics["bytes"] += len(chunk)
+                else:
+                    upstream_diagnostics["clean_eof_at"] = chunk_at
+
                 if chunk and flow.metadata.get("first_token_time") is None:
                     flow.metadata["first_token_time"] = time.time()
                 if chunk:
@@ -2557,7 +2619,11 @@ class LLMRouterAddon:
                             diagnostics["tail_events"],
                         )
 
-                return result
+                if result:
+                    return result
+                if chunk:
+                    return []
+                return b""
 
             flow.response.stream = converted_stream
         else:
@@ -2887,8 +2953,10 @@ class LLMRouterAddon:
                 f"[STREAM_COMPLETE] status=success, response_completed=true, {stream_context}"
             )
         else:
+            connection_timeline = self._stream_connection_timeline(flow)
             logger.warning(
-                f"[ERROR_DIAG] status=failed, error={flow.error}, {stream_context}"
+                f"[ERROR_DIAG] status=failed, error={flow.error}, {stream_context}, "
+                f"connection_timeline={connection_timeline}"
             )
 
         # 兜底保存：客户端断开但上游已正常响应时，优先使用累积的流式数据，
