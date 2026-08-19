@@ -356,22 +356,22 @@ class TestConvertRequestTools:
 
     def test_tools_responses_to_chat_format(self):
         req = {
-            "model": "kimi-k2.6",
-            "input": "Hello",
-            "tools": [
-                {
+            "model": "kimi-k3",
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "namespace", "name": "weather", "tools": [{
                     "type": "function",
                     "name": "get_weather",
                     "description": "Get weather",
                     "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
-                }
-            ],
+                }]}],
+            }],
         }
         result = convert_request(req)
         tool = result["tools"][0]
         assert tool["type"] == "function"
         assert "function" in tool
-        assert tool["function"]["name"] == "get_weather"
+        assert tool["function"]["name"].startswith("__nf1_")
         assert tool["function"]["description"] == "Get weather"
 
     def test_tool_choice_responses_to_chat_format(self):
