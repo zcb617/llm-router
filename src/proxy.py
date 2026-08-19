@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from src.openai_protocol_converter import parse_sse_buffer
+from src.protocol_converter_registry import get_protocol_converter
 from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
@@ -648,9 +648,9 @@ class LLMRouterAddon:
                         return
                     body_dict = self._inject_history_into_input(body_dict, previous_id, key_info["id"])
                 flow.metadata["resolved_input_context"] = self._normalize_context_input(body_dict.get("input", ""))
-                # 调用转换器转换请求体
-                from src.openai_protocol_converter import convert_request
-                converted_body = convert_request(body_dict)
+                # 路由层选择独立转换器；模型差异不进入转换器内部。
+                converter_module = get_protocol_converter(protocol_converter)
+                converted_body = converter_module.convert_request(body_dict)
                 converted_json = json.dumps(converted_body, ensure_ascii=False)
                 logger.debug(f"[ProtocolConvert] Request converted. Original roles: {[m.get('role') for m in body_dict.get('input', [])]}")
                 logger.debug(f"[ProtocolConvert] Converted roles: {[m.get('role') for m in converted_body.get('messages', [])]}")
@@ -2443,8 +2443,8 @@ class LLMRouterAddon:
         if flow.metadata.get("needs_protocol_conversion"):
             call_id = flow.metadata.get("call_id")
             model = flow.metadata.get("overridden_model", flow.metadata.get("original_model", "unknown"))
-            from src.openai_protocol_converter import StreamConverter
-            converter = StreamConverter(response_id=call_id, model=model)
+            converter_module = get_protocol_converter(flow.metadata.get("protocol_converter"))
+            converter = converter_module.StreamConverter(response_id=call_id, model=model)
             flow.metadata["stream_converter"] = converter
             flow.metadata["sse_buffer"] = ""
 
@@ -2458,7 +2458,7 @@ class LLMRouterAddon:
                 # 流结束时(chunk为空)，若buffer还有数据，尝试强制解析末尾事件
                 if not chunk and buffer.strip():
                     buffer += "\n\n"
-                events, remaining = parse_sse_buffer(buffer)
+                events, remaining = converter_module.parse_sse_buffer(buffer)
                 flow.metadata["sse_buffer"] = remaining
                 if chunk:
                     logger.debug(f"[ProtocolConvert] Raw chunk ({len(chunk)} bytes): {raw_text[:200]!r}")
@@ -2544,9 +2544,9 @@ class LLMRouterAddon:
 
         if needs_conversion and is_stream == "non_stream":
             try:
-                from src.openai_protocol_converter import convert_response
+                converter_module = get_protocol_converter(flow.metadata.get("protocol_converter"))
                 chat_resp = json.loads(captured_resp.body)
-                responses_resp = convert_response(chat_resp)
+                responses_resp = converter_module.convert_response(chat_resp)
                 # 替换 id 为 llm_router 的 call_id
                 responses_resp["id"] = captured_req.call_id
                 new_body = json.dumps(responses_resp, ensure_ascii=False)
