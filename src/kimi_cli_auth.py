@@ -109,7 +109,15 @@ def _window_seconds(window: dict, item: dict, detail: dict) -> Optional[int]:
     ).upper()
     if duration is None:
         return None
-    multipliers = {"SECOND": 1, "MINUTE": 60, "HOUR": 3600, "DAY": 86400}
+    if unit.startswith("TIME_UNIT_"):
+        unit = unit.removeprefix("TIME_UNIT_")
+    multipliers = {
+        "SECOND": 1,
+        "MINUTE": 60,
+        "HOUR": 3600,
+        "DAY": 86400,
+        "WEEK": 604800,
+    }
     return duration * multipliers.get(unit, 1)
 
 
@@ -131,7 +139,12 @@ def _normalize_usage_window(data: Optional[dict], window_seconds: Optional[int],
     if used_percent is None and limit and used is not None:
         used_percent = used * 100.0 / limit
     remaining_percent = None if used_percent is None else max(0.0, min(100.0, 100.0 - used_percent))
-    reset_at = data.get("reset_at") or data.get("resetAt") or data.get("resets_at")
+    reset_at = (
+        data.get("reset_at")
+        or data.get("resetAt")
+        or data.get("resetTime")
+        or data.get("resets_at")
+    )
     reset_after = _as_int(data.get("reset_after_seconds") or data.get("resetAfterSeconds"))
     key = "5h" if window_seconds == 18000 else "7d" if window_seconds == 604800 else f"window-{index}"
     name = "5小时额度" if key == "5h" else "7天额度" if key == "7d" else str(data.get("name") or data.get("title") or "订阅额度")
@@ -585,12 +598,24 @@ class KimiCliAuthManager:
         normalized_summary = _normalize_usage_window(summary, 604800, -1) if summary else None
         if normalized_summary and not any(item.get("key") == "7d" for item in windows):
             windows.append(normalized_summary)
+
+        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+        membership = (
+            user.get("membership") if isinstance(user.get("membership"), dict) else {}
+        )
+
         return {
             "id": "kimi-cli-oauth",
             "provider": "kimi",
             "name": "Kimi OAuth",
             "status": "available",
-            "plan_type": payload.get("plan_type") or payload.get("plan"),
+            "account_id": user.get("userId") or user.get("user_id"),
+            "plan_type": (
+                payload.get("plan_type")
+                or payload.get("plan")
+                or membership.get("level")
+                or payload.get("subType")
+            ),
             "summary": normalized_summary,
             "windows": windows,
             "fetched_at": int(time.time()),

@@ -359,6 +359,67 @@ def test_refresh_retries_retryable_status_then_succeeds(monkeypatch, tmp_path: P
     assert not (tmp_path / "share" / "oauth" / "kimi-code.lock").exists()
 
 
+def test_fetch_usage_normalizes_latest_kimi_payload(monkeypatch, tmp_path: Path):
+    repo_root = _prepare_kimi_clone(tmp_path)
+    manager = KimiCliAuthManager(repo_root)
+    reset_5h = "2026-08-19T13:28:24.483162Z"
+    reset_7d = "2026-08-26T08:28:24.483162Z"
+    payload = {
+        "limits": [
+            {
+                "detail": {
+                    "limit": "100",
+                    "remaining": "100",
+                    "resetTime": reset_5h,
+                },
+                "window": {
+                    "duration": 300,
+                    "timeUnit": "TIME_UNIT_MINUTE",
+                },
+            }
+        ],
+        "subType": "TYPE_PURCHASE",
+        "usage": {
+            "limit": "100",
+            "remaining": "100",
+            "resetTime": reset_7d,
+        },
+        "user": {
+            "membership": {"level": "LEVEL_INTERMEDIATE"},
+            "userId": "kimi-user-1",
+        },
+    }
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(manager, "resolve_access_token", lambda **_kwargs: "access-token")
+    monkeypatch.setattr("src.kimi_cli_auth.httpx.get", lambda *_args, **_kwargs: FakeResponse())
+
+    result = manager.fetch_usage()
+
+    assert result["account_id"] == "kimi-user-1"
+    assert result["plan_type"] == "LEVEL_INTERMEDIATE"
+    assert [window["key"] for window in result["windows"]] == ["5h", "7d"]
+    assert result["windows"][0] == {
+        "key": "5h",
+        "name": "5小时额度",
+        "window_seconds": 18000,
+        "used": 0,
+        "limit": 100,
+        "remaining": 100,
+        "used_percent": 0.0,
+        "remaining_percent": 100.0,
+        "reset_at": reset_5h,
+        "reset_after_seconds": None,
+    }
+    assert result["windows"][1]["reset_at"] == reset_7d
+
+
 def test_refresh_invalid_grant_persists_revoked_tombstone(monkeypatch, tmp_path: Path):
     repo_root = _prepare_kimi_clone(tmp_path)
     monkeypatch.setenv("KIMI_CODE_HOME", str(tmp_path / "share"))
