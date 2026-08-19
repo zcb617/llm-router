@@ -364,6 +364,7 @@ llm_router: {"id": "550e8400-...", "output": [...]}  ← id 被替换
 |------|------|
 | `null` / `""` | 不转换，直接透传（默认） |
 | `"kimi2.6"` | 使用 `openai_protocol_converter` 进行 Responses ↔ Chat Completions 转换 |
+| `"kimi2.7"` | 使用独立的 `kimi_k27_protocol_converter`，支持 K2.7 自定义工具 input 增量流式转换 |
 | `"kimi3"` | 使用独立的 `kimi_k3_protocol_converter`，按 Kimi K3 的 `[DONE]` 规则完成流式响应 |
 
 ### 6.2 路由层
@@ -378,6 +379,7 @@ Web UI 的模型配置表单中增加「协议转换器」下拉框：
 协议转换器:
   [无（直接透传）        ]  ← 默认
   [kimi2.6 (Responses → Chat Completions) ]
+  [kimi2.7 (Responses → Kimi K2.7 Chat Completions) ]
   [kimi3   (Responses → Kimi K3 Chat Completions) ]
 ```
 

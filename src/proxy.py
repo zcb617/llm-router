@@ -2791,12 +2791,18 @@ class LLMRouterAddon:
         original_model = flow.metadata.get("original_model")
         overridden_model = flow.metadata.get("overridden_model")
         is_multi = flow.metadata.get("multi_upstream_native")
-        logger.warning(
-            f"[ERROR_DIAG] error={flow.error}, "
-            f"is_multi={is_multi}, captured_req={'YES' if captured_req else 'NO'}, "
+        stream_converter = flow.metadata.get("stream_converter")
+        stream_completed = bool(getattr(stream_converter, "_completed", False))
+        diagnostic = (
+            f"error={flow.error}, is_multi={is_multi}, "
+            f"captured_req={'YES' if captured_req else 'NO'}, "
             f"resp_status={resp_status}, has_stream_chunks={has_stream_chunks}, "
             f"call_id={call_id}, original={original_model}, overridden={overridden_model}"
         )
+        if stream_completed:
+            logger.info(f"[STREAM_COMPLETE] Client closed after completion, {diagnostic}")
+        else:
+            logger.warning(f"[ERROR_DIAG] {diagnostic}")
 
         # 兜底保存：客户端断开但上游已正常响应时，优先使用累积的流式数据，
         # Codex CLI OAuth 没有流式分片时，使用 Rust 出站已写入 flow.response 的完整响应。
@@ -2915,6 +2921,17 @@ class LLMRouterAddon:
                     prefer_claude_code_usage=prefer_claude_code_usage,
                 )
 
+            converter_usage = getattr(stream_converter, "_usage", None)
+            if isinstance(converter_usage, dict):
+                tokens_input = converter_usage.get("input_tokens")
+                tokens_output = converter_usage.get("output_tokens")
+                input_details = converter_usage.get("input_tokens_details")
+                if isinstance(input_details, dict):
+                    cached_hit_tokens = input_details.get("cached_tokens")
+                if isinstance(tokens_input, int) and isinstance(cached_hit_tokens, int):
+                    cache_miss_tokens = max(tokens_input - cached_hit_tokens, 0)
+                token_source = "api"
+
             if flow.metadata.get("codex_response_protocol") == "responses":
                 tokens_per_second = (
                     responses_cache_tokens_parser.get_tokens_per_second(
@@ -2930,11 +2947,15 @@ class LLMRouterAddon:
                     else None
                 )
 
-            logger.warning(
-                f"[ERROR_SAVE] Client disconnected, saving fallback record for call_id={call_id}, "
+            save_message = (
+                f"Client disconnected, saving fallback record for call_id={call_id}, "
                 f"input={tokens_input}, output={tokens_output}, cached={cached_hit_tokens}, "
                 f"miss={cache_miss_tokens}, speed={tokens_per_second}"
             )
+            if stream_completed:
+                logger.info(f"[STREAM_SAVE] {save_message}")
+            else:
+                logger.warning(f"[ERROR_SAVE] {save_message}")
 
             outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
             if isinstance(outbound_diagnostics, dict):
@@ -2959,7 +2980,11 @@ class LLMRouterAddon:
                 "response_headers": response_headers,
                 "response_body": response_body,
                 "final_responses_body": None,
-                "call_status": self._infer_call_status(resp_status, response_body),
+                "call_status": (
+                    "success" if stream_completed else "failed"
+                ) if stream_converter is not None else self._infer_call_status(
+                    resp_status, response_body
+                ),
                 "duration_ms": duration_ms,
                 "tokens_input": tokens_input,
                 "tokens_output": tokens_output,

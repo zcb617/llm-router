@@ -7,11 +7,12 @@ converter implementation.
 
 from types import ModuleType
 
-from src import kimi_k3_protocol_converter, openai_protocol_converter
+from src import kimi_k27_protocol_converter, kimi_k3_protocol_converter, openai_protocol_converter
 
 
 _CONVERTERS: dict[str, ModuleType] = {
     "kimi2.6": openai_protocol_converter,
+    "kimi2.7": kimi_k27_protocol_converter,
     "kimi3": kimi_k3_protocol_converter,
 }
 

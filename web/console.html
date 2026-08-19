@@ -684,6 +684,7 @@
             <select id="modelProtocolConverter" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
               <option value="">无（直接透传）</option>
               <option value="kimi2.6">kimi2.6（Responses API &rarr; Chat Completions）</option>
+              <option value="kimi2.7">kimi2.7（Responses API &rarr; Kimi K2.7 Chat Completions）</option>
               <option value="kimi3">kimi3（Responses API &rarr; Kimi K3 Chat Completions）</option>
             </select>
           </div>
@@ -2089,6 +2090,7 @@ function renderRoutesList() {
       <select class="route-converter px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-32" data-idx="${idx}">
         <option value="">无转换</option>
         <option value="kimi2.6" ${r.protocol_converter === 'kimi2.6' ? 'selected' : ''}>kimi2.6</option>
+        <option value="kimi2.7" ${r.protocol_converter === 'kimi2.7' ? 'selected' : ''}>kimi2.7</option>
         <option value="kimi3" ${r.protocol_converter === 'kimi3' ? 'selected' : ''}>kimi3</option>
       </select>
       <input type="number" class="route-sort px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-16" placeholder="序号" value="${r.sort_order || idx}" data-idx="${idx}" min="0">

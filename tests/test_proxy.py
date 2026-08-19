@@ -515,7 +515,8 @@ def test_response_uses_codex_rust_first_body_time_without_fallback(
 
 
 def _run_client_disconnect_fallback(
-    *, streamed_chunks=None, buffered_response=b"", codex_cli_oauth=True
+    *, streamed_chunks=None, buffered_response=b"", codex_cli_oauth=True,
+    stream_converter=None,
 ):
     addon = _make_addon_for_route_tests()
     saved_calls = []
@@ -549,6 +550,8 @@ def _run_client_disconnect_fallback(
     )
     if streamed_chunks is not None:
         flow.metadata["streamed_response_chunks"] = streamed_chunks
+    if stream_converter is not None:
+        flow.metadata["stream_converter"] = stream_converter
 
     addon._store_pending_request(flow, captured_req)
     addon.error(flow)
@@ -607,6 +610,40 @@ def test_error_fallback_does_not_expand_buffered_response_to_other_routes():
     )
 
     assert saved_calls == []
+
+
+def test_error_fallback_marks_completed_converted_stream_success_with_api_usage():
+    converter = SimpleNamespace(
+        _completed=True,
+        _usage={
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "input_tokens_details": {"cached_tokens": 60},
+        },
+    )
+    saved_calls = _run_client_disconnect_fallback(
+        streamed_chunks=[b'data: {"choices":[]}\n\n'],
+        codex_cli_oauth=False,
+        stream_converter=converter,
+    )
+
+    assert saved_calls[0]["call_status"] == "success"
+    assert saved_calls[0]["tokens_input"] == 100
+    assert saved_calls[0]["tokens_output"] == 20
+    assert saved_calls[0]["cached_hit_tokens"] == 60
+    assert saved_calls[0]["cache_miss_tokens"] == 40
+    assert saved_calls[0]["token_source"] == "api"
+
+
+def test_error_fallback_marks_incomplete_converted_stream_failed():
+    converter = SimpleNamespace(_completed=False, _usage=None)
+    saved_calls = _run_client_disconnect_fallback(
+        streamed_chunks=[b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'],
+        codex_cli_oauth=False,
+        stream_converter=converter,
+    )
+
+    assert saved_calls[0]["call_status"] == "failed"
 
 
 def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():
