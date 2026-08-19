@@ -514,6 +514,101 @@ def test_response_uses_codex_rust_first_body_time_without_fallback(
     assert saved_calls[0]["first_token_ms"] == expected_first_token_ms
 
 
+def _run_client_disconnect_fallback(
+    *, streamed_chunks=None, buffered_response=b"", codex_cli_oauth=True
+):
+    addon = _make_addon_for_route_tests()
+    saved_calls = []
+    addon._enqueue_call_save = saved_calls.append
+
+    flow = _make_flow()
+    flow.request.content = json.dumps(
+        {"model": "gpt-5.6-luna", "input": "hello", "stream": True}
+    ).encode("utf-8")
+    flow.response = SimpleNamespace(
+        status_code=200,
+        raw_content=buffered_response,
+        headers={"Content-Type": "text/event-stream"},
+    )
+    flow.error = "Client disconnected."
+
+    captured_req = _make_captured_request(flow)
+    captured_req.call_id = "disconnect-call"
+    captured_req.original_model = "gpt-5.6-luna"
+    captured_req.overridden_model = "gpt-5.6-luna"
+    captured_req.start_time = 1.0
+    flow.metadata.update(
+        {
+            "call_id": captured_req.call_id,
+            "original_model": captured_req.original_model,
+            "overridden_model": captured_req.overridden_model,
+            "codex_cli_oauth": codex_cli_oauth,
+            "codex_response_protocol": "responses",
+            "codex_cli_oauth_first_body_at_ms": 1250,
+        }
+    )
+    if streamed_chunks is not None:
+        flow.metadata["streamed_response_chunks"] = streamed_chunks
+
+    addon._store_pending_request(flow, captured_req)
+    addon.error(flow)
+    return saved_calls
+
+
+def test_error_fallback_prefers_streamed_chunks_over_buffered_response():
+    streamed_body = (
+        b'data: {"type":"response.completed","response":{"usage":'
+        b'{"input_tokens":100,"output_tokens":20,'
+        b'"input_tokens_details":{"cached_tokens":60}}}}\n\n'
+    )
+    buffered_body = b'{"usage":{"input_tokens":999,"output_tokens":999}}'
+
+    saved_calls = _run_client_disconnect_fallback(
+        streamed_chunks=[streamed_body],
+        buffered_response=buffered_body,
+    )
+
+    assert len(saved_calls) == 1
+    assert saved_calls[0]["response_body"] == streamed_body.decode("utf-8")
+    assert saved_calls[0]["tokens_input"] == 100
+    assert saved_calls[0]["tokens_output"] == 20
+    assert saved_calls[0]["cached_hit_tokens"] == 60
+    assert saved_calls[0]["cache_miss_tokens"] == 40
+
+
+def test_error_fallback_uses_buffered_response_without_streamed_chunks():
+    buffered_body = (
+        b'{"usage":{"input_tokens":80,"output_tokens":10,'
+        b'"input_tokens_details":{"cached_tokens":30}}}'
+    )
+
+    saved_calls = _run_client_disconnect_fallback(
+        buffered_response=buffered_body,
+    )
+
+    assert len(saved_calls) == 1
+    assert saved_calls[0]["response_body"] == buffered_body.decode("utf-8")
+    assert saved_calls[0]["tokens_input"] == 80
+    assert saved_calls[0]["tokens_output"] == 10
+    assert saved_calls[0]["cached_hit_tokens"] == 30
+    assert saved_calls[0]["cache_miss_tokens"] == 50
+
+
+def test_error_fallback_skips_save_when_no_response_body_exists():
+    saved_calls = _run_client_disconnect_fallback()
+
+    assert saved_calls == []
+
+
+def test_error_fallback_does_not_expand_buffered_response_to_other_routes():
+    saved_calls = _run_client_disconnect_fallback(
+        buffered_response=b'{"usage":{"input_tokens":80,"output_tokens":10}}',
+        codex_cli_oauth=False,
+    )
+
+    assert saved_calls == []
+
+
 def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():
     addon = _make_addon_for_route_tests()
     addon._codex_bridge_url = "http://127.0.0.1:45678"

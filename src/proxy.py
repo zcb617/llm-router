@@ -2798,8 +2798,21 @@ class LLMRouterAddon:
             f"call_id={call_id}, original={original_model}, overridden={overridden_model}"
         )
 
-        # 兜底保存：客户端断开但上游已正常响应时，用累积的流式数据保存记录
-        if captured_req and resp_status is not None and 200 <= resp_status < 300 and has_stream_chunks:
+        # 兜底保存：客户端断开但上游已正常响应时，优先使用累积的流式数据，
+        # Codex CLI OAuth 没有流式分片时，使用 Rust 出站已写入 flow.response 的完整响应。
+        buffered_response = (
+            getattr(flow.response, "raw_content", None) if flow.response else None
+        )
+        has_buffered_codex_response = bool(
+            flow.metadata.get("codex_cli_oauth") and buffered_response
+        )
+        has_response_body = has_stream_chunks or has_buffered_codex_response
+        if (
+            captured_req
+            and resp_status is not None
+            and 200 <= resp_status < 300
+            and has_response_body
+        ):
             from src.tokenizer import (
                 calculate_tokens,
                 extract_cache_miss_tokens,
@@ -2808,44 +2821,74 @@ class LLMRouterAddon:
             import json
             import time
 
-            streamed_chunks = flow.metadata.get("streamed_response_chunks", [])
-            response_body = "".join(
-                c.decode("utf-8", errors="replace") if isinstance(c, bytes) else str(c)
-                for c in streamed_chunks
-            )
+            if has_stream_chunks:
+                streamed_chunks = flow.metadata.get("streamed_response_chunks", [])
+                response_body = "".join(
+                    c.decode("utf-8", errors="replace")
+                    if isinstance(c, bytes)
+                    else str(c)
+                    for c in streamed_chunks
+                )
+            else:
+                response_body = (
+                    buffered_response.decode("utf-8", errors="replace")
+                    if isinstance(buffered_response, bytes)
+                    else str(buffered_response)
+                )
             duration_ms = int((time.time() - captured_req.start_time) * 1000)
             response_headers = dict(flow.response.headers) if flow.response else {}
-            stream_type = "stream"
-            first_token_time = flow.metadata.get("first_token_time")
+            stream_type = "non_stream"
             first_token_ms = None
-            if first_token_time:
-                first_token_ms = int((first_token_time - captured_req.start_time) * 1000)
 
             model = original_model or "unknown"
             try:
                 if captured_req.body:
                     req_data = json.loads(captured_req.body)
                     model = req_data.get("model", model)
+                    if req_data.get("stream"):
+                        stream_type = "stream"
             except Exception:
                 pass
 
-        if flow.metadata.get("codex_response_protocol") == "responses":
-            tokens_input = responses_cache_tokens_parser.get_input_tokens(response_body)
-            tokens_output = responses_cache_tokens_parser.get_output_tokens(response_body)
-            token_source = (
-                "api"
-                if tokens_input is not None or tokens_output is not None
-                else None
-            )
-        else:
-            tokens_input, tokens_output, token_source = calculate_tokens(
-                model=model,
-                request_body=captured_req.body,
-                response_body=response_body,
-                prefer_claude_code_usage=bool(
-                    flow.metadata.get("claude_code_feature_request")
-                ),
-            )
+            if flow.metadata.get("codex_cli_oauth"):
+                first_body_at_ms = flow.metadata.get(
+                    "codex_cli_oauth_first_body_at_ms"
+                )
+                if stream_type == "stream" and type(first_body_at_ms) is int:
+                    first_token_ms = int(
+                        first_body_at_ms - captured_req.start_time * 1000
+                    )
+                    if first_token_ms < 0:
+                        first_token_ms = None
+            else:
+                first_token_time = flow.metadata.get("first_token_time")
+                if first_token_time and stream_type == "stream":
+                    first_token_ms = int(
+                        (first_token_time - captured_req.start_time) * 1000
+                    )
+
+            if flow.metadata.get("codex_response_protocol") == "responses":
+                tokens_input = responses_cache_tokens_parser.get_input_tokens(
+                    response_body
+                )
+                tokens_output = responses_cache_tokens_parser.get_output_tokens(
+                    response_body
+                )
+                token_source = (
+                    "api"
+                    if tokens_input is not None or tokens_output is not None
+                    else None
+                )
+            else:
+                tokens_input, tokens_output, token_source = calculate_tokens(
+                    model=model,
+                    request_body=captured_req.body,
+                    response_body=response_body,
+                    prefer_claude_code_usage=bool(
+                        flow.metadata.get("claude_code_feature_request")
+                    ),
+                )
+
             if flow.metadata.get("codex_cli_oauth"):
                 if flow.metadata.get("codex_response_protocol") == "responses":
                     cached_hit_tokens, cache_miss_tokens = (
@@ -2871,18 +2914,21 @@ class LLMRouterAddon:
                     response_body,
                     prefer_claude_code_usage=prefer_claude_code_usage,
                 )
-        if flow.metadata.get("codex_response_protocol") == "responses":
-            tokens_per_second = responses_cache_tokens_parser.get_tokens_per_second(
-                response_body,
-                duration_ms,
-                first_token_ms,
-            )
-        else:
-            tokens_per_second = (
-                round(tokens_output / (duration_ms / 1000), 2)
-                if tokens_output and tokens_output > 0 and duration_ms > 0
-                else None
-            )
+
+            if flow.metadata.get("codex_response_protocol") == "responses":
+                tokens_per_second = (
+                    responses_cache_tokens_parser.get_tokens_per_second(
+                        response_body,
+                        duration_ms,
+                        first_token_ms,
+                    )
+                )
+            else:
+                tokens_per_second = (
+                    round(tokens_output / (duration_ms / 1000), 2)
+                    if tokens_output and tokens_output > 0 and duration_ms > 0
+                    else None
+                )
 
             logger.warning(
                 f"[ERROR_SAVE] Client disconnected, saving fallback record for call_id={call_id}, "
