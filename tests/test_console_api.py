@@ -256,11 +256,11 @@ class DummyUpstreamStorage:
         return True
 
 
-def test_create_kimi_oauth_upstream_clears_api_key(monkeypatch):
+def test_create_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
     monkeypatch.delenv("KIMI_CODE_BASE_URL", raising=False)
     flow = DummyFlow("POST", {
         "name": "kimi",
-        "target_base_url": "https://should-be-ignored.example/v1",
+        "target_base_url": "https://custom-kimi.example/v1",
         "api_key": "should-be-cleared",
         "auth_mode": "kimi_cli_oauth",
         "use_claude_features": True,
@@ -274,11 +274,27 @@ def test_create_kimi_oauth_upstream_clears_api_key(monkeypatch):
     assert flow.response["status"] == 200
     assert storage.created["auth_mode"] == "kimi_cli_oauth"
     assert storage.created["api_key"] == ""
-    assert storage.created["target_base_url"] == "https://api.kimi.com/coding/v1"
+    assert storage.created["target_base_url"] == "https://custom-kimi.example/v1"
     assert storage.created["oauth_key"] == "oauth/kimi-code"
     assert storage.created["oauth_host"] == "https://auth.kimi.com"
     assert storage.created["use_claude_features"] is False
     assert storage.created["use_roo_features"] is False
+
+
+def test_create_kimi_oauth_upstream_defaults_base_url(monkeypatch):
+    monkeypatch.delenv("KIMI_CODE_BASE_URL", raising=False)
+    flow = DummyFlow("POST", {
+        "name": "kimi",
+        "target_base_url": "",
+        "auth_mode": "kimi_cli_oauth",
+    })
+    storage = DummyUpstreamStorage()
+
+    handled = handle_console_api(flow, storage, "/api/upstreams")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.created["target_base_url"] == "https://api.kimi.com/coding/v1"
 
 
 def test_create_codex_upstream_preserves_user_url_and_token():
@@ -359,11 +375,11 @@ def test_create_codex_model_rejects_forward_model_not_supported_by_server(monkey
     assert not hasattr(storage, "created_model")
 
 
-def test_update_kimi_oauth_upstream_forces_api_key_empty(monkeypatch):
+def test_update_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
     monkeypatch.delenv("KIMI_CODE_BASE_URL", raising=False)
     flow = DummyFlow("PUT", {
         "name": "kimi-updated",
-        "target_base_url": "https://should-be-ignored.example/v1",
+        "target_base_url": "https://custom-kimi.example/v1",
         "auth_mode": "kimi_cli_oauth",
         "api_key": "should-be-cleared",
         "use_claude_features": True,
@@ -378,7 +394,7 @@ def test_update_kimi_oauth_upstream_forces_api_key_empty(monkeypatch):
     assert storage.updated["upstream_id"] == 7
     assert storage.updated["auth_mode"] == "kimi_cli_oauth"
     assert storage.updated["api_key"] == ""
-    assert storage.updated["target_base_url"] == "https://api.kimi.com/coding/v1"
+    assert storage.updated["target_base_url"] == "https://custom-kimi.example/v1"
     assert storage.updated["oauth_key"] == "oauth/kimi-code"
     assert storage.updated["oauth_host"] == "https://auth.kimi.com"
     assert storage.updated["use_claude_features"] is False

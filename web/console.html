@@ -1654,7 +1654,7 @@ function renderUpstreams() {
     const statusClass = u.is_active ? 'text-green-500' : 'text-red-500';
     const statusText = u.is_active ? '启用' : '禁用';
     const authMode = u.auth_mode || 'api_key';
-    const displayBaseUrl = (authMode === 'kimi_cli_oauth' || authMode === 'codex_cli_oauth') ? '-' : (u.target_base_url || '-');
+    const displayBaseUrl = authMode === 'codex_cli_oauth' ? '-' : (u.target_base_url || '-');
     const authBadge = authMode === 'kimi_cli_oauth'
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">kimi-cli auth</span>'
       : authMode === 'codex_cli_oauth'
@@ -1694,7 +1694,7 @@ function renderUpstreams() {
 
 const KIMI_OAUTH_DEFAULT_KEY = 'oauth/kimi-code';
 const KIMI_OAUTH_DEFAULT_HOST = 'https://auth.kimi.com';
-const KIMI_OAUTH_DEFAULT_BASE_URL = 'https://api.kimi.com';
+const KIMI_OAUTH_DEFAULT_BASE_URL = 'https://api.kimi.com/coding/v1';
 const CODEX_CLI_OAUTH_DEFAULT_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 
 function bindUpstreamTableEvents() {
@@ -1708,7 +1708,7 @@ function bindUpstreamTableEvents() {
         editingUpstreamId = u.id;
         document.getElementById('upstreamEditTitle').textContent = '编辑上游';
         document.getElementById('upstreamName').value = u.name;
-        document.getElementById('upstreamBaseUrl').value = u.target_base_url;
+        document.getElementById('upstreamBaseUrl').value = u.target_base_url || '';
         document.getElementById('upstreamDescription').value = u.description || '';
         document.getElementById('upstreamIsActive').checked = u.is_active;
         document.getElementById('upstreamUseClaudeFeatures').checked = u.use_claude_features || false;
@@ -1807,8 +1807,14 @@ function syncUpstreamAuthModeFields() {
   const oauthHint = document.getElementById('upstreamOauthHint');
   if (mode === 'kimi_cli_oauth' || mode === 'codex_cli_oauth') {
     oauthWrap.classList.remove('hidden');
-    baseUrlWrap.classList.add('hidden');
-    baseUrlInput.required = false;
+    if (mode === 'kimi_cli_oauth') {
+      baseUrlWrap.classList.remove('hidden');
+      baseUrlInput.required = true;
+      if (!baseUrlInput.value.trim()) baseUrlInput.value = KIMI_OAUTH_DEFAULT_BASE_URL;
+    } else {
+      baseUrlWrap.classList.add('hidden');
+      baseUrlInput.required = false;
+    }
     apiWrap.classList.add('hidden');
     claudeFeaturesWrap.classList.add('hidden');
     rooFeaturesWrap.classList.add('hidden');
@@ -1895,8 +1901,8 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async (e
     const useClaudeFeatures = isManagedOauth ? false : document.getElementById('upstreamUseClaudeFeatures').checked;
     const useRooFeatures = isManagedOauth ? false : document.getElementById('upstreamUseRooFeatures').checked;
 
-    if (!name || (!isManagedOauth && !targetBaseUrl)) {
-      document.getElementById('upstreamEditError').textContent = isManagedOauth
+    if (!name || (!isCodexCliOauth && !targetBaseUrl)) {
+      document.getElementById('upstreamEditError').textContent = isCodexCliOauth
         ? '上游名称不能为空'
         : '名称和基础 URL 不能为空';
       document.getElementById('upstreamEditError').classList.remove('hidden');

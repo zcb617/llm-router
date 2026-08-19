@@ -238,7 +238,7 @@ class LLMRouterAddon:
 
     def _resolve_target_base_url(self, cfg: dict) -> str:
         if self._is_kimi_cli_auth(cfg):
-            return KIMI_CLI_OAUTH_BASE_URL
+            return cfg.get("target_base_url") or KIMI_CLI_OAUTH_BASE_URL
         if self._is_codex_cli_oauth(cfg):
             # Prefer ~/.codex/config.toml openai_base_url; fallback to Codex default.
             return resolve_codex_base_url()
@@ -475,7 +475,7 @@ class LLMRouterAddon:
                     routes_by_model[mk] = []
                 auth_mode = r.get("auth_mode") or "api_key"
                 if auth_mode == "kimi_cli_oauth":
-                    target_base_url = KIMI_CLI_OAUTH_BASE_URL
+                    target_base_url = r.get("target_base_url") or KIMI_CLI_OAUTH_BASE_URL
                 elif auth_mode == "codex_cli_oauth":
                     target_base_url = resolve_codex_base_url()
                 else:
@@ -513,7 +513,7 @@ class LLMRouterAddon:
                         forward_model = (cfg.get("forward_model") or "").strip()
 
                         if auth_mode == "kimi_cli_oauth":
-                            target_base_url = KIMI_CLI_OAUTH_BASE_URL
+                            target_base_url = target_base_url or KIMI_CLI_OAUTH_BASE_URL
                         elif auth_mode == "codex_cli_oauth":
                             target_base_url = resolve_codex_base_url()
                         elif not target_base_url:
@@ -1695,7 +1695,7 @@ class LLMRouterAddon:
             # Lightweight POST-less GET is not available on codex backend; skip HTTP probe.
             return []
         if self._is_kimi_cli_auth(model_info):
-            target_base_url = KIMI_CLI_OAUTH_BASE_URL
+            target_base_url = target_base_url or KIMI_CLI_OAUTH_BASE_URL
 
         model = model_info.get("forward_model") or model_info.get("model_key") or "gpt-3.5-turbo"
 
@@ -2164,7 +2164,7 @@ class LLMRouterAddon:
                 continue
 
             if self._is_kimi_cli_auth(model_info):
-                target_url = KIMI_CLI_OAUTH_BASE_URL
+                target_url = upstream.get("target_base_url") or KIMI_CLI_OAUTH_BASE_URL
             if not target_url:
                 continue
 

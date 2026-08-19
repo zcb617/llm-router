@@ -295,7 +295,7 @@ def test_apply_multi_upstream_route_uses_kimi_headers_when_route_is_kimi_oauth()
         flow,
         {
             "upstream_id": 9,
-            "target_base_url": "https://api.kimi.com/",
+            "target_base_url": "https://custom-kimi.example/coding/v1",
             "auth_mode": "kimi_cli_oauth",
             "oauth_key": "oauth/kimi-code",
             "oauth_host": "https://auth.kimi.com",
@@ -308,7 +308,7 @@ def test_apply_multi_upstream_route_uses_kimi_headers_when_route_is_kimi_oauth()
         "/v1/chat/completions",
     )
 
-    assert flow.request.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
+    assert flow.request.url == "https://custom-kimi.example/coding/v1/chat/completions?beta=true"
     assert list(flow.request.headers.keys()) == [
         "Host",
         "Accept-Encoding",
@@ -331,7 +331,7 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
     addon._apply_single_upstream_kimi_cli_route(
         flow,
         {
-            "target_base_url": "https://api.kimi.com/",
+            "target_base_url": "https://custom-kimi.example/coding/v1",
             "auth_mode": "kimi_cli_oauth",
             "oauth_key": "oauth/kimi-code",
             "oauth_host": "https://auth.kimi.com",
@@ -343,7 +343,7 @@ def test_apply_single_upstream_kimi_cli_route_sets_flow_and_pending_request():
         "/v1/chat/completions",
     )
 
-    assert flow.request.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
+    assert flow.request.url == "https://custom-kimi.example/coding/v1/chat/completions?beta=true"
     assert list(flow.request.headers.keys()) == [
         "Host",
         "Accept-Encoding",
@@ -773,6 +773,37 @@ def test_load_model_configs_keeps_single_upstream_id_for_codex():
     assert addon._model_cache["codex-main"]["upstream_id"] == 42
 
 
+def test_load_model_configs_preserves_kimi_oauth_base_url():
+    addon = _make_addon_for_route_tests()
+
+    class Storage:
+        def get_all_model_configs(self):
+            return [{
+                "id": 1,
+                "model_key": "kimi-main",
+                "upstream_id": 9,
+                "target_base_url": "https://custom-kimi.example/coding/v1",
+                "api_key": "",
+                "auth_mode": "kimi_cli_oauth",
+                "forward_model": "kimi-k2",
+                "is_active": True,
+                "is_default": False,
+                "use_multi_upstream": False,
+            }]
+
+        def get_all_model_routes(self):
+            return []
+
+    addon._external_storage = Storage()
+    addon._storage = None
+
+    addon._load_model_configs()
+
+    assert addon._model_cache["kimi-main"]["target_base_url"] == (
+        "https://custom-kimi.example/coding/v1"
+    )
+
+
 def test_codex_route_rejects_non_chat_completions_path():
     addon = _make_addon_for_route_tests()
     addon._codex_bridge_url = "http://127.0.0.1:45678"
@@ -864,7 +895,7 @@ def test_forward_single_upstream_kimi_cli_rewrites_url_and_syncs_flow():
     addon._forward_single_upstream_kimi_cli(
         flow,
         {
-            "target_base_url": "https://api.kimi.com/",
+            "target_base_url": "https://custom-kimi.example/coding/v1",
             "auth_mode": "kimi_cli_oauth",
             "oauth_key": "oauth/kimi-code",
             "oauth_host": "https://auth.kimi.com",
@@ -876,14 +907,14 @@ def test_forward_single_upstream_kimi_cli_rewrites_url_and_syncs_flow():
         "/v1/chat/completions",
     )
 
-    assert sent["url"] == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
+    assert sent["url"] == "https://custom-kimi.example/coding/v1/chat/completions?beta=true"
     assert sent["method"] == "POST"
     assert sent["headers"][0][0] == "Host"
-    assert flow.request.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
+    assert flow.request.url == "https://custom-kimi.example/coding/v1/chat/completions?beta=true"
     assert flow.request.headers["Authorization"] == "Bearer oauth-token"
     assert b'"model": "kimi-k2"' in flow.request.content
     assert flow.response["status"] == 200
-    assert captured_req.url == "https://api.kimi.com/coding/v1/chat/completions?beta=true"
+    assert captured_req.url == "https://custom-kimi.example/coding/v1/chat/completions?beta=true"
 
 
 def test_feature_detection_identifies_roo_client_headers():
@@ -1121,7 +1152,7 @@ def test_forward_multi_upstream_kimi_cli_syncs_body_and_flow_headers():
         [
             {
                 "upstream_id": 11,
-                "target_base_url": "https://api.kimi.com",
+                "target_base_url": "https://custom-kimi.example/coding/v1",
                 "auth_mode": "kimi_cli_oauth",
                 "oauth_key": "oauth/kimi-code",
                 "oauth_host": "https://auth.kimi.com",
@@ -1137,7 +1168,7 @@ def test_forward_multi_upstream_kimi_cli_syncs_body_and_flow_headers():
     )
 
     assert sent["method"] == "POST"
-    assert sent["url"] == "https://api.kimi.com/coding/v1/chat/completions"
+    assert sent["url"] == "https://custom-kimi.example/coding/v1/chat/completions"
     assert sent["headers"][0][0] == "Host"
     assert flow.request.headers["Authorization"] == "Bearer oauth-token"
     assert flow.response["status"] == 200

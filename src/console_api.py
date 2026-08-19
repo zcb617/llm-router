@@ -688,7 +688,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
         if auth_mode == "kimi_cli_oauth":
             api_key = ""
-            target_base_url = _default_kimi_oauth_base_url()
+            target_base_url = target_base_url or _default_kimi_oauth_base_url()
             use_claude_features = False
             use_roo_features = False
             oauth_key = KIMI_DEFAULT_OAUTH_KEY
@@ -752,7 +752,11 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
         if effective_auth_mode == "kimi_cli_oauth":
             api_key_value = ""
-            target_base_url = _default_kimi_oauth_base_url()
+            target_base_url = (
+                target_base_url
+                or existing.get("target_base_url")
+                or _default_kimi_oauth_base_url()
+            )
             body["use_claude_features"] = False
             body["use_roo_features"] = False
             oauth_key = KIMI_DEFAULT_OAUTH_KEY
