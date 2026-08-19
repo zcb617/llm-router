@@ -19,7 +19,7 @@ services:
       - ./data:/app/data
       - ./certs:/app/certs
       - ./log:/app/log
-      - /home/zhangcb/.kimi:/home/zhangcb/.kimi
+      - /home/zhangcb/.kimi-code:/home/zhangcb/.kimi-code
 
     # 自动重启策略：除非手动 stop，否则异常退出会自动拉起。
     restart: unless-stopped
@@ -31,6 +31,6 @@ services:
       # 路由器数据库路径（容器内路径）。
       - DB_PATH=./data/llm_calls.db
 
-      # 指定 kimi-cli OAuth 凭据目录。
+      # 指定 Kimi Code OAuth 凭据目录。
       # 程序会在该目录下找 credentials/kimi-code.json。
-      - KIMI_SHARE_DIR=/home/zhangcb/.kimi
+      - KIMI_CODE_HOME=/home/zhangcb/.kimi-code

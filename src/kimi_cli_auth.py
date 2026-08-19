@@ -1,18 +1,18 @@
-"""Kimi CLI OAuth token resolution and strict header profile builder."""
+"""Kimi Code OAuth token resolution and strict header profile builder."""
 
 from __future__ import annotations
 
 import json
 import os
 import platform
-import re
 import socket
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Optional
 
 import httpx
@@ -20,6 +20,9 @@ import httpx
 KIMI_DEFAULT_OAUTH_KEY = "oauth/kimi-code"
 KIMI_DEFAULT_OAUTH_HOST = "https://auth.kimi.com"
 KIMI_CLI_OAUTH_BASE_URL = "https://api.kimi.com/coding/v1"
+KIMI_CODE_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+KIMI_CODE_VERSION = "0.37.2"
+RETRYABLE_REFRESH_STATUSES = {429, 500, 502, 503, 504}
 
 
 def _ascii_header_value(value: str, *, fallback: str = "unknown") -> str:
@@ -71,31 +74,14 @@ def _stainless_arch() -> str:
     return machine or "unknown"
 
 
-def _read_kimi_cli_version(project_root: Path) -> str:
-    pyproject = project_root / "kimi-cli" / "pyproject.toml"
-    if not pyproject.exists():
-        return "1.42.0"
-    text = pyproject.read_text(encoding="utf-8")
-    match = re.search(r'^version\s*=\s*"([^"]+)"', text, flags=re.MULTILINE)
-    if not match:
-        return "1.42.0"
-    return match.group(1)
-
-
-def _read_openai_version(project_root: Path) -> str:
-    uv_lock = project_root / "kimi-cli" / "uv.lock"
-    if not uv_lock.exists():
-        return "2.14.0"
-    text = uv_lock.read_text(encoding="utf-8")
-    # Match the openai package section in uv.lock.
-    match = re.search(
-        r'\[\[package\]\]\s*\nname\s*=\s*"openai"\s*\nversion\s*=\s*"([^"]+)"',
-        text,
-        flags=re.MULTILINE,
-    )
-    if not match:
-        return "2.14.0"
-    return match.group(1)
+def _read_kimi_code_version(project_root: Path) -> str:
+    package_json = project_root / "kimi-code" / "apps" / "kimi-code" / "package.json"
+    try:
+        payload = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return KIMI_CODE_VERSION
+    version = payload.get("version") if isinstance(payload, dict) else None
+    return str(version).strip() if version else KIMI_CODE_VERSION
 
 
 def _credentials_name(oauth_key: str) -> str:
@@ -220,8 +206,7 @@ class KimiCliAuthManager:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
         self._lock = Lock()
-        self.kimi_cli_version = _read_kimi_cli_version(project_root)
-        self.openai_version = _read_openai_version(project_root)
+        self.kimi_code_version = _read_kimi_code_version(project_root)
 
     @staticmethod
     def is_kimi_cli_auth(config: dict) -> bool:
@@ -229,11 +214,12 @@ class KimiCliAuthManager:
 
     @staticmethod
     def _share_dir() -> Path:
-        if share_dir := os.getenv("KIMI_SHARE_DIR"):
-            path = Path(share_dir)
-        else:
-            path = Path.home() / ".kimi"
-        path.mkdir(parents=True, exist_ok=True)
+        path = Path(os.getenv("KIMI_CODE_HOME") or Path.home() / ".kimi-code")
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
         return path
 
     @classmethod
@@ -243,7 +229,11 @@ class KimiCliAuthManager:
     @classmethod
     def _credentials_dir(cls) -> Path:
         path = cls._share_dir() / "credentials"
-        path.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
         return path
 
     @classmethod
@@ -252,11 +242,66 @@ class KimiCliAuthManager:
         return cls._credentials_dir() / f"{name}.json"
 
     @classmethod
+    @contextmanager
+    def _refresh_file_lock(cls, oauth_key: str):
+        lock_dir = cls._share_dir() / "oauth"
+        lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_target = lock_dir / _credentials_name(oauth_key)
+        lock_target.touch(exist_ok=True)
+        lock_path = lock_target.with_name(f"{lock_target.name}.lock")
+        deadline = time.monotonic() + 60
+
+        while True:
+            try:
+                lock_path.mkdir(mode=0o700)
+                break
+            except FileExistsError:
+                try:
+                    stale = time.time() - lock_path.stat().st_mtime > 5
+                except FileNotFoundError:
+                    continue
+                if stale:
+                    try:
+                        lock_path.rmdir()
+                    except OSError:
+                        pass
+                    continue
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"Timed out acquiring Kimi OAuth refresh lock: {lock_path}")
+                time.sleep(0.5)
+
+        heartbeat_stop = Event()
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(2):
+                try:
+                    os.utime(lock_path, None)
+                except OSError:
+                    return
+
+        heartbeat_thread = Thread(target=heartbeat, name="kimi-oauth-lock-heartbeat", daemon=True)
+        heartbeat_thread.start()
+        try:
+            yield
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=2)
+            try:
+                lock_path.rmdir()
+            except OSError:
+                pass
+
+    @classmethod
     def _get_or_create_device_id(cls) -> str:
         path = cls._device_id_path()
         if path.exists():
-            return path.read_text(encoding="utf-8").strip()
-        device_id = uuid.uuid4().hex
+            try:
+                existing = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                existing = ""
+            if existing:
+                return existing
+        device_id = str(uuid.uuid4())
         path.write_text(device_id, encoding="utf-8")
         _ensure_private_file(path)
         return device_id
@@ -266,11 +311,12 @@ class KimiCliAuthManager:
         device_name = platform.node() or socket.gethostname()
         device_model = _device_model()
         headers = {
-            "X-Msh-Platform": "kimi_cli",
+            "User-Agent": f"kimi-code-cli/{kimi_version}",
+            "X-Msh-Platform": "kimi_code_cli",
             "X-Msh-Version": kimi_version,
             "X-Msh-Device-Name": device_name,
             "X-Msh-Device-Model": device_model,
-            "X-Msh-Os-Version": platform.version(),
+            "X-Msh-Os-Version": platform.release(),
             "X-Msh-Device-Id": cls._get_or_create_device_id(),
         }
         return {k: _ascii_header_value(v) for k, v in headers.items()}
@@ -318,33 +364,68 @@ class KimiCliAuthManager:
 
     def _refresh_token(self, oauth_key: str, oauth_host: str, refresh_token: str) -> Optional[OAuthToken]:
         url = oauth_host.rstrip("/") + "/api/oauth/token"
-        headers = self._oauth_common_headers(self.kimi_cli_version)
+        headers = self._oauth_common_headers(self.kimi_code_version)
         data = {
-            "client_id": "17e5f671-d194-4dfb-9706-5516cb48c098",
+            "client_id": KIMI_CODE_CLIENT_ID,
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
 
-        try:
-            response = httpx.post(url, data=data, headers=headers, timeout=20.0)
-        except Exception:
-            return None
+        with self._refresh_file_lock(oauth_key):
+            latest = self._load_token(oauth_key)
+            if latest is None:
+                return None
+            if latest.refresh_token != refresh_token:
+                return latest if latest.access_token else None
 
-        if response.status_code != 200:
-            return None
+            for attempt in range(3):
+                try:
+                    response = httpx.post(url, data=data, headers=headers, timeout=30.0)
+                except httpx.HTTPError:
+                    if attempt < 2:
+                        time.sleep(2**attempt)
+                        continue
+                    return None
 
-        try:
-            payload = response.json()
-        except ValueError:
-            return None
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
 
-        if not isinstance(payload, dict):
-            return None
-        if "access_token" not in payload or "refresh_token" not in payload or "expires_in" not in payload:
-            return None
-        token = OAuthToken.from_refresh_response(payload)
-        self._save_token(oauth_key, token)
-        return token
+                if response.status_code == 200:
+                    required = ("access_token", "refresh_token", "expires_in")
+                    if not all(payload.get(field) for field in required):
+                        return None
+                    try:
+                        token = OAuthToken.from_refresh_response(payload)
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        return None
+                    self._save_token(oauth_key, token)
+                    return token
+
+                error_code = payload.get("error")
+                if response.status_code in {401, 403} or error_code == "invalid_grant":
+                    self._save_token(
+                        oauth_key,
+                        OAuthToken(
+                            access_token="",
+                            refresh_token="",
+                            expires_at=0,
+                            expires_in=0,
+                            token_type=latest.token_type,
+                            scope=latest.scope,
+                        ),
+                    )
+                    return None
+
+                if response.status_code in RETRYABLE_REFRESH_STATUSES and attempt < 2:
+                    time.sleep(2**attempt)
+                    continue
+                return None
+
+        return None
 
     def resolve_access_token(
         self,
@@ -379,9 +460,6 @@ class KimiCliAuthManager:
                 refreshed = self._refresh_token(oauth_key, oauth_host, token.refresh_token)
                 if refreshed and refreshed.access_token:
                     return refreshed.access_token
-
-            if token.access_token and (seconds_to_expiry is None or seconds_to_expiry > 0):
-                return token.access_token
             return ""
 
     def inspect_local_token(
@@ -391,7 +469,7 @@ class KimiCliAuthManager:
         *,
         refresh_if_needed: bool = False,
     ) -> dict:
-        """Inspect local kimi-cli credential token file without exposing secrets."""
+        """Inspect local Kimi Code credential token file without exposing secrets."""
         oauth_key = (oauth_key or KIMI_DEFAULT_OAUTH_KEY).strip() or KIMI_DEFAULT_OAUTH_KEY
         oauth_host = (oauth_host or KIMI_DEFAULT_OAUTH_HOST).strip() or KIMI_DEFAULT_OAUTH_HOST
         path = self._credentials_path(oauth_key)
@@ -426,12 +504,16 @@ class KimiCliAuthManager:
 
             if should_refresh:
                 refreshed_token = self._refresh_token(oauth_key, oauth_host, token.refresh_token)
-                if refreshed_token and refreshed_token.access_token:
+                if refreshed_token is not None:
                     token = refreshed_token
-                    now = time.time()
-                    seconds_to_expiry = token.expires_at - now if token.expires_at and token.expires_at > 0 else None
-                    threshold = _refresh_threshold(token.expires_in)
-                    refreshed = True
+                else:
+                    latest_token = self._load_token(oauth_key)
+                    if latest_token is not None:
+                        token = latest_token
+                now = time.time()
+                seconds_to_expiry = token.expires_at - now if token.expires_at and token.expires_at > 0 else None
+                threshold = _refresh_threshold(token.expires_in)
+                refreshed = bool(refreshed_token and refreshed_token.access_token)
 
             available = bool(token.access_token)
             reason = "ok" if available else "empty_access_token"
@@ -521,7 +603,7 @@ class KimiCliAuthManager:
         host: str,
         access_token: str,
     ) -> list[tuple[str, str]]:
-        common = self._oauth_common_headers(self.kimi_cli_version)
+        common = self._oauth_common_headers(self.kimi_code_version)
 
         return [
             ("Host", host),
@@ -529,15 +611,15 @@ class KimiCliAuthManager:
             ("Connection", "keep-alive"),
             ("Accept", "application/json"),
             ("Content-Type", "application/json"),
-            ("User-Agent", f"KimiCLI/{self.kimi_cli_version}"),
-            ("X-Stainless-Lang", "python"),
-            ("X-Stainless-Package-Version", self.openai_version),
+            ("User-Agent", common["User-Agent"]),
+            ("X-Stainless-Lang", "js"),
+            ("X-Stainless-Package-Version", "6.34.0"),
             ("X-Stainless-OS", platform.system() or "Unknown"),
             ("X-Stainless-Arch", _stainless_arch()),
-            ("X-Stainless-Runtime", platform.python_implementation()),
+            ("X-Stainless-Runtime", "node"),
             (
                 "X-Stainless-Runtime-Version",
-                f"{platform.python_version_tuple()[0]}.{platform.python_version_tuple()[1]}.{platform.python_version_tuple()[2]}",
+                "v24.15.0",
             ),
             ("Authorization", f"Bearer {access_token}"),
             ("X-Msh-Platform", common["X-Msh-Platform"]),
@@ -546,7 +628,6 @@ class KimiCliAuthManager:
             ("X-Msh-Device-Model", common["X-Msh-Device-Model"]),
             ("X-Msh-Os-Version", common["X-Msh-Os-Version"]),
             ("X-Msh-Device-Id", common["X-Msh-Device-Id"]),
-            ("X-Stainless-Async", "async:asyncio"),
             ("x-stainless-retry-count", "0"),
             ("x-stainless-read-timeout", "600"),
         ]

@@ -396,7 +396,7 @@ def test_check_kimi_token_endpoint_success(monkeypatch, tmp_path: Path):
             assert refresh_if_needed is True
             return {
                 "available": True,
-                "path": "/home/test/.kimi/credentials/kimi-code.json",
+                "path": "/home/test/.kimi-code/credentials/kimi-code.json",
                 "reason": "ok",
                 "expires_at": 1234567890,
                 "seconds_to_expiry": 3600,
@@ -428,7 +428,7 @@ def test_check_kimi_token_endpoint_failure(monkeypatch):
             assert refresh_if_needed is True
             return {
                 "available": False,
-                "path": "/home/test/.kimi/credentials/kimi-code.json",
+                "path": "/home/test/.kimi-code/credentials/kimi-code.json",
                 "reason": "token_file_not_found_or_invalid",
                 "expires_at": None,
                 "seconds_to_expiry": None,

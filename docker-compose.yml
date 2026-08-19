@@ -9,10 +9,10 @@ services:
       - ./data:/app/data
       - ./certs:/app/certs
       - ./log:/app/log
-      - /home/zhangcb/.kimi:/home/zhangcb/.kimi
+      - /home/zhangcb/.kimi-code:/home/zhangcb/.kimi-code
       - /home/zhangcb/.codex:/root/.codex
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
       - DB_PATH=./data/llm_calls.db
-      - KIMI_SHARE_DIR=/home/zhangcb/.kimi
+      - KIMI_CODE_HOME=/home/zhangcb/.kimi-code
