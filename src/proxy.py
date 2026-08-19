@@ -305,6 +305,56 @@ class LLMRouterAddon:
         return "success"
 
     @staticmethod
+    def _record_protocol_downstream_return(
+        flow: http.HTTPFlow,
+        event_payloads: list[str],
+        returned_bytes: int,
+    ) -> dict:
+        """记录转换回调交还给 mitmproxy 的事件；不代表客户端已经收到。"""
+        diagnostics = flow.metadata.setdefault(
+            "protocol_downstream_diagnostics",
+            {
+                "returned_chunks": 0,
+                "returned_events": 0,
+                "returned_bytes": 0,
+                "response_completed_returned": False,
+                "last_sequence_number": None,
+                "tail_events": [],
+                "eof_seen": False,
+            },
+        )
+        if returned_bytes > 0:
+            diagnostics["returned_chunks"] += 1
+        diagnostics["returned_events"] += len(event_payloads)
+        diagnostics["returned_bytes"] += returned_bytes
+
+        tail_events = list(diagnostics.get("tail_events") or [])
+        for payload in event_payloads:
+            try:
+                event = json.loads(payload)
+            except (TypeError, ValueError):
+                event = {}
+
+            event_type = event.get("type") or "invalid_json"
+            sequence_number = event.get("sequence_number")
+            if isinstance(sequence_number, int):
+                diagnostics["last_sequence_number"] = sequence_number
+            if event_type == "response.completed":
+                diagnostics["response_completed_returned"] = True
+
+            tail_events.append(
+                {
+                    "type": event_type,
+                    "sequence_number": sequence_number,
+                    "item_id": event.get("item_id"),
+                    "output_index": event.get("output_index"),
+                }
+            )
+
+        diagnostics["tail_events"] = tail_events[-8:]
+        return diagnostics
+
+    @staticmethod
     def _is_retryable_api_error(response_status: Optional[int], response_body: Optional[str]) -> bool:
         """仅识别可自动重试的 server-internal api_error 场景。"""
         if response_status is None or not (200 <= response_status < 300):
@@ -1578,16 +1628,9 @@ class LLMRouterAddon:
         return base + endpoint_path
 
     @staticmethod
-    def _prefers_anthropic_health_check(target_base_url: str, model_info: dict) -> bool:
-        """根据模型路由配置判断健康检查应优先使用 Anthropic Messages 形态。"""
-        target = (target_base_url or "").lower()
-        model = (model_info.get("forward_model") or model_info.get("model_key") or "").lower()
-        return (
-            bool(model_info.get("use_claude_features") or model_info.get("use_roo_features"))
-            or "/anthropic" in target
-            or "/coding" in target
-            or model.startswith("claude")
-        )
+    def _uses_anthropic_health_check(model_info: dict) -> bool:
+        """Claude Code 特征上游只使用 Anthropic Messages 进行健康检查。"""
+        return bool(model_info.get("use_claude_features"))
 
     def _build_health_check_requests(self, target_base_url: str, model_info: dict) -> list[tuple[str, str, dict]]:
         """基于模型配置和匹配上游构造健康检查候选请求。"""
@@ -1613,41 +1656,30 @@ class LLMRouterAddon:
 
         model = model_info.get("forward_model") or model_info.get("model_key") or "gpt-3.5-turbo"
 
-        openai_body = json.dumps({
+        check_body = json.dumps({
             "model": model,
             "messages": [{"role": "user", "content": "hello"}],
             "max_tokens": 5
         })
-        anthropic_body = json.dumps({
-            "model": model,
-            "messages": [{"role": "user", "content": "hello"}],
-            "max_tokens": 5
-        })
-        openai_url = self._join_api_path(target_base_url, "/v1/chat/completions")
-        anthropic_url = self._join_api_path(target_base_url, "/v1/messages")
+        use_anthropic = self._uses_anthropic_health_check(model_info)
+        endpoint_path = "/v1/messages" if use_anthropic else "/v1/chat/completions"
+        check_url = self._join_api_path(target_base_url, endpoint_path)
 
         if self._is_kimi_cli_auth(model_info):
             try:
-                openai_headers = dict(self._build_kimi_cli_headers(openai_url, model_info))
-                anthropic_headers = dict(self._build_kimi_cli_headers(anthropic_url, model_info))
+                check_headers = dict(self._build_kimi_cli_headers(check_url, model_info))
             except Exception as e:
                 logger.warning(f"Health check skipped for kimi_cli_oauth upstream {target_base_url}: {e}")
                 return []
-            anthropic_headers.setdefault("anthropic-version", "2023-06-01")
         else:
             api_key = model_info.get("api_key", "")
-            openai_headers = self._build_upstream_headers({}, api_key)
-            openai_headers["Content-Type"] = "application/json"
-            anthropic_headers = dict(openai_headers)
-            anthropic_headers.setdefault("anthropic-version", "2023-06-01")
+            check_headers = self._build_upstream_headers({}, api_key)
+            check_headers["Content-Type"] = "application/json"
 
-        candidates = [
-            (openai_url, openai_body, openai_headers),
-            (anthropic_url, anthropic_body, anthropic_headers),
-        ]
-        if self._prefers_anthropic_health_check(target_base_url, model_info):
-            candidates.reverse()
-        return candidates
+        if use_anthropic:
+            check_headers.setdefault("anthropic-version", "2023-06-01")
+
+        return [(check_url, check_body, check_headers)]
 
     def _get_claude_headers(self, flow):
         """获取 Claude Code 特征 headers（不修改 flow）"""
@@ -2477,11 +2509,55 @@ class LLMRouterAddon:
                     if process_eof is not None:
                         for converted in process_eof():
                             output_lines.append(f"data: {converted}")
+
+                result = b""
+                diagnostics = flow.metadata.get("protocol_downstream_diagnostics")
                 if output_lines:
                     result = ("\n\n".join(output_lines) + "\n\n").encode("utf-8")
+                    event_payloads = [line[6:] for line in output_lines if line.startswith("data: ")]
+                    diagnostics = self._record_protocol_downstream_return(
+                        flow,
+                        event_payloads,
+                        len(result),
+                    )
                     logger.debug(f"[ProtocolConvert] Sending {len(output_lines)} events ({len(result)} bytes)")
-                    return result
-                return b""
+
+                    if diagnostics["response_completed_returned"] and not flow.metadata.get(
+                        "protocol_completed_return_logged"
+                    ):
+                        flow.metadata["protocol_completed_return_logged"] = True
+                        logger.info(
+                            "[PROTOCOL_STREAM_RETURN] call_id=%s, response_completed=true, "
+                            "returned_chunks=%s, returned_events=%s, returned_bytes=%s, "
+                            "last_sequence=%s, tail=%s",
+                            call_id,
+                            diagnostics["returned_chunks"],
+                            diagnostics["returned_events"],
+                            diagnostics["returned_bytes"],
+                            diagnostics["last_sequence_number"],
+                            diagnostics["tail_events"],
+                        )
+
+                if not chunk:
+                    if diagnostics is None:
+                        diagnostics = self._record_protocol_downstream_return(flow, [], 0)
+                    diagnostics["eof_seen"] = True
+                    if not flow.metadata.get("protocol_eof_logged"):
+                        flow.metadata["protocol_eof_logged"] = True
+                        logger.info(
+                            "[PROTOCOL_STREAM_EOF] call_id=%s, response_completed_returned=%s, "
+                            "returned_chunks=%s, returned_events=%s, returned_bytes=%s, "
+                            "last_sequence=%s, tail=%s",
+                            call_id,
+                            diagnostics["response_completed_returned"],
+                            diagnostics["returned_chunks"],
+                            diagnostics["returned_events"],
+                            diagnostics["returned_bytes"],
+                            diagnostics["last_sequence_number"],
+                            diagnostics["tail_events"],
+                        )
+
+                return result
 
             flow.response.stream = converted_stream
         else:
@@ -2793,16 +2869,27 @@ class LLMRouterAddon:
         is_multi = flow.metadata.get("multi_upstream_native")
         stream_converter = flow.metadata.get("stream_converter")
         stream_completed = bool(getattr(stream_converter, "_completed", False))
-        diagnostic = (
-            f"error={flow.error}, is_multi={is_multi}, "
-            f"captured_req={'YES' if captured_req else 'NO'}, "
+        downstream = flow.metadata.get("protocol_downstream_diagnostics") or {}
+        stream_context = (
+            f"is_multi={is_multi}, captured_req={'YES' if captured_req else 'NO'}, "
             f"resp_status={resp_status}, has_stream_chunks={has_stream_chunks}, "
-            f"call_id={call_id}, original={original_model}, overridden={overridden_model}"
+            f"call_id={call_id}, original={original_model}, overridden={overridden_model}, "
+            f"returned_completed={bool(downstream.get('response_completed_returned'))}, "
+            f"eof_seen={bool(downstream.get('eof_seen'))}, "
+            f"returned_chunks={downstream.get('returned_chunks', 0)}, "
+            f"returned_events={downstream.get('returned_events', 0)}, "
+            f"returned_bytes={downstream.get('returned_bytes', 0)}, "
+            f"last_sequence={downstream.get('last_sequence_number')}, "
+            f"tail={downstream.get('tail_events', [])}"
         )
         if stream_completed:
-            logger.info(f"[STREAM_COMPLETE] Client closed after completion, {diagnostic}")
+            logger.info(
+                f"[STREAM_COMPLETE] status=success, response_completed=true, {stream_context}"
+            )
         else:
-            logger.warning(f"[ERROR_DIAG] {diagnostic}")
+            logger.warning(
+                f"[ERROR_DIAG] status=failed, error={flow.error}, {stream_context}"
+            )
 
         # 兜底保存：客户端断开但上游已正常响应时，优先使用累积的流式数据，
         # Codex CLI OAuth 没有流式分片时，使用 Rust 出站已写入 flow.response 的完整响应。
@@ -2947,15 +3034,17 @@ class LLMRouterAddon:
                     else None
                 )
 
-            save_message = (
-                f"Client disconnected, saving fallback record for call_id={call_id}, "
-                f"input={tokens_input}, output={tokens_output}, cached={cached_hit_tokens}, "
-                f"miss={cache_miss_tokens}, speed={tokens_per_second}"
+            metrics_message = (
+                f"call_id={call_id}, input={tokens_input}, output={tokens_output}, "
+                f"cached={cached_hit_tokens}, miss={cache_miss_tokens}, "
+                f"speed={tokens_per_second}"
             )
             if stream_completed:
-                logger.info(f"[STREAM_SAVE] {save_message}")
+                logger.info(f"[STREAM_SAVE] status=success, {metrics_message}")
             else:
-                logger.warning(f"[ERROR_SAVE] {save_message}")
+                logger.warning(
+                    f"[ERROR_SAVE] status=failed, error={flow.error}, {metrics_message}"
+                )
 
             outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
             if isinstance(outbound_diagnostics, dict):

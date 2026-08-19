@@ -4,6 +4,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import pytest
 import sys
 import threading
@@ -612,7 +613,7 @@ def test_error_fallback_does_not_expand_buffered_response_to_other_routes():
     assert saved_calls == []
 
 
-def test_error_fallback_marks_completed_converted_stream_success_with_api_usage():
+def test_error_fallback_marks_completed_converted_stream_success_with_api_usage(caplog):
     converter = SimpleNamespace(
         _completed=True,
         _usage={
@@ -621,11 +622,12 @@ def test_error_fallback_marks_completed_converted_stream_success_with_api_usage(
             "input_tokens_details": {"cached_tokens": 60},
         },
     )
-    saved_calls = _run_client_disconnect_fallback(
-        streamed_chunks=[b'data: {"choices":[]}\n\n'],
-        codex_cli_oauth=False,
-        stream_converter=converter,
-    )
+    with caplog.at_level(logging.INFO):
+        saved_calls = _run_client_disconnect_fallback(
+            streamed_chunks=[b'data: {"choices":[]}\n\n'],
+            codex_cli_oauth=False,
+            stream_converter=converter,
+        )
 
     assert saved_calls[0]["call_status"] == "success"
     assert saved_calls[0]["tokens_input"] == 100
@@ -633,17 +635,76 @@ def test_error_fallback_marks_completed_converted_stream_success_with_api_usage(
     assert saved_calls[0]["cached_hit_tokens"] == 60
     assert saved_calls[0]["cache_miss_tokens"] == 40
     assert saved_calls[0]["token_source"] == "api"
+    assert "[STREAM_COMPLETE] status=success, response_completed=true" in caplog.text
+    assert "[STREAM_SAVE] status=success" in caplog.text
+    assert "Client disconnected" not in caplog.text
+    assert "[ERROR_DIAG]" not in caplog.text
+    assert "[ERROR_SAVE]" not in caplog.text
 
 
-def test_error_fallback_marks_incomplete_converted_stream_failed():
+def test_error_fallback_marks_incomplete_converted_stream_failed(caplog):
     converter = SimpleNamespace(_completed=False, _usage=None)
-    saved_calls = _run_client_disconnect_fallback(
-        streamed_chunks=[b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'],
-        codex_cli_oauth=False,
-        stream_converter=converter,
-    )
+    with caplog.at_level(logging.WARNING):
+        saved_calls = _run_client_disconnect_fallback(
+            streamed_chunks=[b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'],
+            codex_cli_oauth=False,
+            stream_converter=converter,
+        )
 
     assert saved_calls[0]["call_status"] == "failed"
+    assert "[ERROR_DIAG] status=failed, error=Client disconnected." in caplog.text
+    assert "[ERROR_SAVE] status=failed, error=Client disconnected." in caplog.text
+    assert "[STREAM_COMPLETE]" not in caplog.text
+    assert "[STREAM_SAVE]" not in caplog.text
+
+
+def test_record_protocol_downstream_return_tracks_completion_and_tail_events():
+    addon = _make_addon_for_route_tests()
+    flow = SimpleNamespace(metadata={})
+    event_payloads = [
+        json.dumps(
+            {
+                "type": "response.output_item.done",
+                "sequence_number": 8,
+                "item_id": "item_1",
+                "output_index": 0,
+            }
+        ),
+        json.dumps({"type": "response.completed", "sequence_number": 9}),
+    ]
+
+    diagnostics = addon._record_protocol_downstream_return(flow, event_payloads, 321)
+
+    assert diagnostics["returned_chunks"] == 1
+    assert diagnostics["returned_events"] == 2
+    assert diagnostics["returned_bytes"] == 321
+    assert diagnostics["response_completed_returned"] is True
+    assert diagnostics["last_sequence_number"] == 9
+    assert diagnostics["tail_events"] == [
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 8,
+            "item_id": "item_1",
+            "output_index": 0,
+        },
+        {
+            "type": "response.completed",
+            "sequence_number": 9,
+            "item_id": None,
+            "output_index": None,
+        },
+    ]
+
+
+def test_record_protocol_downstream_return_does_not_count_empty_eof_as_chunk():
+    addon = _make_addon_for_route_tests()
+    flow = SimpleNamespace(metadata={})
+
+    diagnostics = addon._record_protocol_downstream_return(flow, [], 0)
+
+    assert diagnostics["returned_chunks"] == 0
+    assert diagnostics["returned_events"] == 0
+    assert diagnostics["returned_bytes"] == 0
 
 
 def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():
@@ -1118,30 +1179,41 @@ def test_join_api_path_does_not_duplicate_v1():
     assert result == "https://api.example.com/v1/chat/completions"
 
 
-def test_health_check_requests_prefer_anthropic_for_anthropic_upstream():
+def test_health_check_requests_use_only_anthropic_when_claude_features_enabled():
     addon = _make_addon_for_route_tests()
 
     candidates = addon._build_health_check_requests(
         "https://api.deepseek.com/anthropic/",
-        {"model_key": "claude-opus", "forward_model": "deepseek-v4-pro", "api_key": "sk-upstream"}
+        {
+            "model_key": "claude-opus",
+            "forward_model": "deepseek-v4-pro",
+            "api_key": "sk-upstream",
+            "use_claude_features": True,
+        }
     )
 
+    assert len(candidates) == 1
     assert candidates[0][0] == "https://api.deepseek.com/anthropic/v1/messages"
     assert candidates[0][2]["Authorization"] == "Bearer sk-upstream"
     assert candidates[0][2]["anthropic-version"] == "2023-06-01"
     assert '"model": "deepseek-v4-pro"' in candidates[0][1]
 
 
-def test_health_check_requests_prefer_openai_for_v1_upstream():
+def test_health_check_requests_use_only_openai_when_claude_features_disabled():
     addon = _make_addon_for_route_tests()
 
     candidates = addon._build_health_check_requests(
-        "https://api.example.com/v1",
-        {"model_key": "gpt-4o", "api_key": "sk-upstream"}
+        "https://api.example.com/anthropic/",
+        {
+            "model_key": "claude-opus",
+            "api_key": "sk-upstream",
+            "use_claude_features": False,
+        }
     )
 
-    assert candidates[0][0] == "https://api.example.com/v1/chat/completions"
-    assert candidates[1][0] == "https://api.example.com/v1/messages"
+    assert len(candidates) == 1
+    assert candidates[0][0] == "https://api.example.com/anthropic/v1/chat/completions"
+    assert "anthropic-version" not in candidates[0][2]
 
 
 def test_health_check_requests_skip_kimi_when_header_build_fails():
