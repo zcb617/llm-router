@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -33,6 +33,7 @@ CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 # Refresh when access token JWT expires within this many seconds.
 CODEX_ACCESS_TOKEN_REFRESH_WINDOW_SECONDS = 5 * 60
 CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS = 30 * 60
+CODEX_PROMPT_CACHE_AFFINITY_SYNC_INTERVAL_SECONDS = 60
 
 
 def _codex_home() -> Path:
@@ -234,6 +235,7 @@ class _CodexPromptCacheAffinity:
     session_id: str
     thread_id: str
     last_used_at: float
+    last_persisted_at: float = 0.0
 
 
 def _stringify_codex_metadata_value(value: Any) -> str:
@@ -276,8 +278,74 @@ class CodexCliAuthManager:
         self._prompt_cache_affinity: dict[
             tuple[str, str], _CodexPromptCacheAffinity
         ] = {}
+        self._prompt_cache_affinity_sync: Optional[Callable[[dict], bool]] = None
         self.version = CODEX_CLI_VERSION
         self.originator = CODEX_ORIGINATOR
+
+    def set_prompt_cache_affinity_sync(
+        self,
+        callback: Optional[Callable[[dict], bool]],
+    ) -> None:
+        """设置亲和关系异步同步回调，不改变请求热路径。"""
+        self._prompt_cache_affinity_sync = callback
+
+    def restore_prompt_cache_affinity(self, records: list[dict]) -> int:
+        """将启动时从持久化层读取的亲和关系恢复到内存。"""
+        now = time.time()
+        restored = 0
+        with self._prompt_cache_affinity_lock:
+            for record in records or []:
+                try:
+                    account_id = str(record.get("account_id") or "")
+                    prompt_cache_key = str(record.get("prompt_cache_key") or "")
+                    session_id = str(record.get("session_id") or "")
+                    thread_id = str(record.get("thread_id") or "")
+                    last_used_at = float(record.get("last_used_at"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+
+                if not prompt_cache_key or not session_id or not thread_id:
+                    continue
+                if now - last_used_at >= CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS:
+                    continue
+
+                self._prompt_cache_affinity[(account_id, prompt_cache_key)] = (
+                    _CodexPromptCacheAffinity(
+                        session_id=session_id,
+                        thread_id=thread_id,
+                        last_used_at=last_used_at,
+                        last_persisted_at=last_used_at,
+                    )
+                )
+                restored += 1
+        return restored
+
+    def _enqueue_prompt_cache_affinity_sync(
+        self,
+        operation: str,
+        account_id: str,
+        prompt_cache_key: str,
+        affinity: _CodexPromptCacheAffinity,
+        last_used_at: float,
+    ) -> None:
+        callback = self._prompt_cache_affinity_sync
+        if callback is None:
+            return
+
+        event = {
+            "operation": operation,
+            "account_id": account_id,
+            "prompt_cache_key": prompt_cache_key,
+            "session_id": affinity.session_id,
+            "thread_id": affinity.thread_id,
+            "last_used_at": last_used_at,
+        }
+        try:
+            accepted = callback(event)
+        except Exception:
+            accepted = False
+        if accepted:
+            affinity.last_persisted_at = last_used_at
 
     def get_or_create_session_thread(
         self,
@@ -307,8 +375,30 @@ class CodexCliAuthManager:
                     last_used_at=now,
                 )
                 self._prompt_cache_affinity[key] = affinity
+                self._enqueue_prompt_cache_affinity_sync(
+                    "upsert",
+                    account_id,
+                    prompt_cache_key,
+                    affinity,
+                    now,
+                )
             else:
                 affinity.last_used_at = now
+                if (
+                    affinity.last_persisted_at <= 0
+                    or now - affinity.last_persisted_at
+                    >= CODEX_PROMPT_CACHE_AFFINITY_SYNC_INTERVAL_SECONDS
+                ):
+                    operation = (
+                        "upsert" if affinity.last_persisted_at <= 0 else "touch"
+                    )
+                    self._enqueue_prompt_cache_affinity_sync(
+                        operation,
+                        account_id,
+                        prompt_cache_key,
+                        affinity,
+                        now,
+                    )
 
             return affinity.session_id, affinity.thread_id
 

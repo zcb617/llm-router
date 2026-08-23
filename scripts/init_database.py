@@ -19,6 +19,7 @@
      - upstreams.oauth_key
      - upstreams.oauth_host
      - llm_calls.outbound_diagnostics
+     - codex_prompt_cache_affinity
   4. 基础内容：
      - 基础表: llm_calls, users, api_keys, model_configs
      - RBAC 表: roles, menus, role_menus, upstreams
@@ -30,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.4"
+CURRENT_VERSION = "1.1.5"
 
 
 def get_pg_conn(config):
@@ -122,6 +123,17 @@ PG_TABLES = [
             previous_response_id TEXT,
             full_context TEXT,
             outbound_diagnostics JSON
+        )
+    """),
+    ("codex_prompt_cache_affinity", """
+        CREATE TABLE IF NOT EXISTS codex_prompt_cache_affinity (
+            account_id TEXT NOT NULL DEFAULT '',
+            prompt_cache_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            last_used_at DOUBLE PRECISION NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (account_id, prompt_cache_key)
         )
     """),
     ("users", """
@@ -253,6 +265,17 @@ SQLITE_TABLES = [
             outbound_diagnostics TEXT
         )
     """),
+    ("codex_prompt_cache_affinity", """
+        CREATE TABLE IF NOT EXISTS codex_prompt_cache_affinity (
+            account_id TEXT NOT NULL DEFAULT '',
+            prompt_cache_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            last_used_at REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (account_id, prompt_cache_key)
+        )
+    """),
     ("users", """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -379,7 +402,7 @@ def run_v100_pg(config):
     cur = conn.cursor()
 
     # 1. 建表（先建 roles 等被引用的表）
-    table_order = ["roles", "menus", "upstreams", "llm_calls", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
+    table_order = ["roles", "menus", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in PG_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")
@@ -448,7 +471,7 @@ def run_v100_sqlite(config):
     cur = conn.cursor()
 
     # 1. 建表
-    table_order = ["roles", "menus", "upstreams", "llm_calls", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
+    table_order = ["roles", "menus", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in SQLITE_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")
@@ -709,6 +732,56 @@ def run_v114_sqlite(conn):
         cur.close()
 
 
+def run_v115_pg(conn):
+    """v1.1.4 -> v1.1.5：持久化 Codex prompt cache 亲和关系。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS codex_prompt_cache_affinity (
+                account_id TEXT NOT NULL DEFAULT '',
+                prompt_cache_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                last_used_at DOUBLE PRECISION NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (account_id, prompt_cache_key)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_codex_prompt_cache_affinity_last_used
+            ON codex_prompt_cache_affinity (last_used_at)
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v115_sqlite(conn):
+    """v1.1.4 -> v1.1.5：持久化 Codex prompt cache 亲和关系。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS codex_prompt_cache_affinity (
+                account_id TEXT NOT NULL DEFAULT '',
+                prompt_cache_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                last_used_at REAL NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (account_id, prompt_cache_key)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_codex_prompt_cache_affinity_last_used
+            ON codex_prompt_cache_affinity (last_used_at)
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -739,7 +812,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -789,6 +862,13 @@ def main():
             run_v114_pg(conn)
         else:
             run_v114_sqlite(conn)
+
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", CURRENT_VERSION):
+        print("\n[v1.1.5] 检查/补齐 Codex prompt cache 亲和关系表...")
+        if is_pg:
+            run_v115_pg(conn)
+        else:
+            run_v115_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

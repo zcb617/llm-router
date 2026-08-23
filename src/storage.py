@@ -23,6 +23,8 @@ class CallStorage:
         self._index_lock = threading.Lock()
         self._llm_calls_schema_ready = False
         self._llm_calls_schema_lock = threading.Lock()
+        self._prompt_cache_affinity_schema_ready = False
+        self._prompt_cache_affinity_schema_lock = threading.Lock()
 
         if self._use_postgres:
             import psycopg2.pool
@@ -187,6 +189,165 @@ class CallStorage:
             except Exception:
                 pass
             conn.close()
+
+    def _ensure_prompt_cache_affinity_table(self):
+        """确保 Codex prompt cache 亲和关系表存在。"""
+        if self._prompt_cache_affinity_schema_ready:
+            return
+
+        with self._prompt_cache_affinity_schema_lock:
+            if self._prompt_cache_affinity_schema_ready:
+                return
+
+            conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+            try:
+                if self.postgresql:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS codex_prompt_cache_affinity (
+                            account_id TEXT NOT NULL DEFAULT '',
+                            prompt_cache_key TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            thread_id TEXT NOT NULL,
+                            last_used_at DOUBLE PRECISION NOT NULL,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (account_id, prompt_cache_key)
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS
+                        idx_codex_prompt_cache_affinity_last_used
+                        ON codex_prompt_cache_affinity (last_used_at)
+                    """)
+                    conn.commit()
+                else:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS codex_prompt_cache_affinity (
+                            account_id TEXT NOT NULL DEFAULT '',
+                            prompt_cache_key TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            thread_id TEXT NOT NULL,
+                            last_used_at REAL NOT NULL,
+                            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (account_id, prompt_cache_key)
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS
+                        idx_codex_prompt_cache_affinity_last_used
+                        ON codex_prompt_cache_affinity (last_used_at)
+                    """)
+                    conn.commit()
+                self._prompt_cache_affinity_schema_ready = True
+            finally:
+                if self.postgresql:
+                    self._pg_close(conn, cur)
+                else:
+                    self._sqlite_close(conn, cur)
+
+    def load_prompt_cache_affinity(self, min_last_used_at: float) -> list[dict]:
+        """启动时读取仍在 TTL 内的 Codex prompt cache 亲和关系。"""
+        self._ensure_prompt_cache_affinity_table()
+        conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+        try:
+            if self.postgresql:
+                cur.execute("""
+                    SELECT account_id, prompt_cache_key, session_id, thread_id, last_used_at
+                    FROM codex_prompt_cache_affinity
+                    WHERE last_used_at >= %s
+                    ORDER BY last_used_at DESC
+                """, (float(min_last_used_at),))
+            else:
+                cur.execute("""
+                    SELECT account_id, prompt_cache_key, session_id, thread_id, last_used_at
+                    FROM codex_prompt_cache_affinity
+                    WHERE last_used_at >= ?
+                    ORDER BY last_used_at DESC
+                """, (float(min_last_used_at),))
+            rows = cur.fetchall()
+            return [
+                {
+                    "account_id": row[0],
+                    "prompt_cache_key": row[1],
+                    "session_id": row[2],
+                    "thread_id": row[3],
+                    "last_used_at": float(row[4]),
+                }
+                for row in rows
+            ]
+        finally:
+            if self.postgresql:
+                self._pg_close(conn, cur)
+            else:
+                self._sqlite_close(conn, cur)
+
+    def upsert_prompt_cache_affinity(
+        self,
+        account_id: str,
+        prompt_cache_key: str,
+        session_id: str,
+        thread_id: str,
+        last_used_at: float,
+    ):
+        """异步同步一条新的或已替换的 Codex prompt cache 亲和关系。"""
+        self._ensure_prompt_cache_affinity_table()
+        conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+        try:
+            if self.postgresql:
+                cur.execute("""
+                    INSERT INTO codex_prompt_cache_affinity (
+                        account_id, prompt_cache_key, session_id, thread_id, last_used_at
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (account_id, prompt_cache_key)
+                    DO UPDATE SET
+                        session_id = EXCLUDED.session_id,
+                        thread_id = EXCLUDED.thread_id,
+                        last_used_at = EXCLUDED.last_used_at
+                """, (
+                    account_id, prompt_cache_key, session_id, thread_id, float(last_used_at)
+                ))
+            else:
+                cur.execute("""
+                    INSERT INTO codex_prompt_cache_affinity (
+                        account_id, prompt_cache_key, session_id, thread_id, last_used_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (account_id, prompt_cache_key)
+                    DO UPDATE SET
+                        session_id = excluded.session_id,
+                        thread_id = excluded.thread_id,
+                        last_used_at = excluded.last_used_at
+                """, (
+                    account_id, prompt_cache_key, session_id, thread_id, float(last_used_at)
+                ))
+        finally:
+            if self.postgresql:
+                self._pg_close(conn, cur, commit=True)
+            else:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def touch_prompt_cache_affinity(
+        self,
+        account_id: str,
+        prompt_cache_key: str,
+        last_used_at: float,
+    ):
+        """异步更新内存中仍在使用的亲和关系最后使用时间。"""
+        self._ensure_prompt_cache_affinity_table()
+        conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+        try:
+            sql = (
+                "UPDATE codex_prompt_cache_affinity SET last_used_at = %s "
+                "WHERE account_id = %s AND prompt_cache_key = %s"
+                if self.postgresql
+                else
+                "UPDATE codex_prompt_cache_affinity SET last_used_at = ? "
+                "WHERE account_id = ? AND prompt_cache_key = ?"
+            )
+            cur.execute(sql, (float(last_used_at), account_id, prompt_cache_key))
+        finally:
+            if self.postgresql:
+                self._pg_close(conn, cur, commit=True)
+            else:
+                self._sqlite_close(conn, cur, commit=True)
 
     def close(self):
         """释放底层连接资源。"""

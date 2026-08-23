@@ -21,6 +21,7 @@ from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
     CodexCliAuthManager,
+    CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS,
     convert_codex_responses_to_chat,
     ensure_usage_in_upstream_response,
     host_from_url,
@@ -140,6 +141,13 @@ class LLMRouterAddon:
         self._save_queue = queue.Queue(maxsize=max(100, getattr(self.config.proxy, "call_save_queue_size", 5000)))
         self._save_worker_count = max(1, getattr(self.config.proxy, "call_save_workers", 2))
         self._save_workers_started = False
+
+        # Codex prompt cache 亲和关系异步同步队列。单 worker 保证同一 key 的
+        # upsert/touch 顺序，不影响请求热路径。
+        self._prompt_cache_affinity_sync_queue = queue.Queue(
+            maxsize=max(100, getattr(self.config.proxy, "call_save_queue_size", 5000))
+        )
+        self._prompt_cache_affinity_sync_worker_started = False
 
         # 上游连接复用客户端（多上游同步转发 + 健康检查）
         self._http_client = None
@@ -459,6 +467,82 @@ class LLMRouterAddon:
             finally:
                 self._save_queue.task_done()
 
+    def _start_prompt_cache_affinity_sync_worker(self):
+        if self._prompt_cache_affinity_sync_worker_started:
+            return
+        self._prompt_cache_affinity_sync_worker_started = True
+        threading.Thread(
+            target=self._prompt_cache_affinity_sync_worker_loop,
+            name="llm-router-prompt-cache-affinity-worker",
+            daemon=True,
+        ).start()
+        logger.info("Prompt cache affinity sync worker started")
+
+    def _enqueue_prompt_cache_affinity_sync(self, event: dict) -> bool:
+        try:
+            self._prompt_cache_affinity_sync_queue.put_nowait(event)
+            return True
+        except queue.Full:
+            logger.warning("Prompt cache affinity sync queue is full, dropping one event")
+            return False
+
+    def _prompt_cache_affinity_sync_worker_loop(self):
+        while True:
+            event = self._prompt_cache_affinity_sync_queue.get()
+            try:
+                operation = event.get("operation")
+                if operation == "upsert":
+                    self.storage.upsert_prompt_cache_affinity(
+                        account_id=event["account_id"],
+                        prompt_cache_key=event["prompt_cache_key"],
+                        session_id=event["session_id"],
+                        thread_id=event["thread_id"],
+                        last_used_at=event["last_used_at"],
+                    )
+                elif operation == "touch":
+                    self.storage.touch_prompt_cache_affinity(
+                        account_id=event["account_id"],
+                        prompt_cache_key=event["prompt_cache_key"],
+                        last_used_at=event["last_used_at"],
+                    )
+                else:
+                    logger.warning("Unknown prompt cache affinity sync operation: %r", operation)
+            except Exception as exc:
+                attempts = int(event.get("_attempts", 0))
+                if attempts < 2:
+                    retry_event = dict(event)
+                    retry_event["_attempts"] = attempts + 1
+                    try:
+                        time.sleep(min(0.25 * (2 ** attempts), 1.0))
+                        self._prompt_cache_affinity_sync_queue.put_nowait(retry_event)
+                    except queue.Full:
+                        logger.error(
+                            "Failed to retry prompt cache affinity sync: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                else:
+                    logger.error(
+                        "Failed to sync prompt cache affinity after retries: %s",
+                        exc,
+                        exc_info=True,
+                    )
+            finally:
+                self._prompt_cache_affinity_sync_queue.task_done()
+
+    def _restore_prompt_cache_affinity(self):
+        """启动时一次性恢复仍在 TTL 内的 Codex prompt cache 亲和关系。"""
+        try:
+            records = self.storage.load_prompt_cache_affinity(
+                time.time() - CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS
+            )
+            restored = self._codex_cli_auth.restore_prompt_cache_affinity(records)
+            logger.info("Restored %s prompt cache affinity records from database", restored)
+        except Exception as exc:
+            # 恢复失败不阻断代理启动；后续请求仍可按原有内存流程生成映射，
+            # 异步同步 worker 会继续尝试写入持久化层。
+            logger.warning("Failed to restore prompt cache affinity from database: %s", exc)
+
     def _load_model_configs(self):
         """从数据库加载模型配置到内存缓存"""
         try:
@@ -589,6 +673,13 @@ class LLMRouterAddon:
 
         # 从数据库加载模型配置到内存缓存
         self._load_model_configs()
+
+        # 只在启动时读取一次持久化亲和关系，之后请求仍只访问内存。
+        self._start_prompt_cache_affinity_sync_worker()
+        self._codex_cli_auth.set_prompt_cache_affinity_sync(
+            self._enqueue_prompt_cache_affinity_sync
+        )
+        self._restore_prompt_cache_affinity()
 
         # 启动异步落库 worker
         self._start_save_workers()
@@ -3226,7 +3317,11 @@ class LLMRouterAddon:
         """mitmproxy addon 退出时释放资源。"""
         # 给落库队列一个短暂排空窗口，避免最后几条记录丢失。
         deadline = time.time() + 2.0
-        while not self._save_queue.empty() and time.time() < deadline:
+        while (
+            (self._save_queue.unfinished_tasks > 0
+             or self._prompt_cache_affinity_sync_queue.unfinished_tasks > 0)
+            and time.time() < deadline
+        ):
             time.sleep(0.05)
 
         if self._http_client is not None:
