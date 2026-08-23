@@ -2448,6 +2448,7 @@ class LLMRouterAddon:
                 return
 
             if path.startswith("/api/calls") or path == "/api/stats":
+                self.storage._ensure_llm_calls_schema_extensions()
                 self.storage._ensure_hot_path_indexes()
 
             # 根据配置连接数据库（同步）
@@ -2525,7 +2526,7 @@ class LLMRouterAddon:
                 search_overridden = params.get("search_overridden", [""])[0].strip()
 
                 # 构建 WHERE 子句和参数
-                where_clauses = []
+                where_clauses = ["is_internal_relay = 0"]
                 query_args = []
                 if user_id:
                     where_clauses.append("user_id = {}".format("%s" if is_pg else "?"))
@@ -2561,7 +2562,7 @@ class LLMRouterAddon:
                     {"Content-Type": "application/json"}
                 )
             elif path == "/api/stats":
-                cur.execute("SELECT COUNT(*) FROM llm_calls")
+                cur.execute("SELECT COUNT(*) FROM llm_calls WHERE is_internal_relay = 0")
                 total = cur.fetchone()[0]
                 flow.response = http.Response.make(
                     200,
@@ -3007,6 +3008,7 @@ class LLMRouterAddon:
             "first_token_ms": first_token_ms,
             "original_model": captured_req.original_model,
             "overridden_model": captured_req.overridden_model,
+            "is_internal_relay": int(bool(flow.metadata.get("multi_upstream_stream_relay"))),
             "user_id": user_id,
             "api_key_id": api_key_id,
             "previous_response_id": previous_response_id,
@@ -3244,6 +3246,7 @@ class LLMRouterAddon:
                 "first_token_ms": first_token_ms,
                 "original_model": captured_req.original_model,
                 "overridden_model": captured_req.overridden_model,
+                "is_internal_relay": int(bool(flow.metadata.get("multi_upstream_stream_relay"))),
                 "user_id": flow.metadata.get("user_id"),
                 "api_key_id": flow.metadata.get("api_key_id"),
                 "previous_response_id": flow.metadata.get("previous_response_id"),

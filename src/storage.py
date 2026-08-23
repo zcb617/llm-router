@@ -133,6 +133,16 @@ class CallStorage:
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS previous_response_id TEXT")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS full_context TEXT")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS outbound_diagnostics JSON")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS is_internal_relay INTEGER NOT NULL DEFAULT 0")
+                    cur.execute("""
+                        UPDATE llm_calls
+                        SET is_internal_relay = 1
+                        WHERE is_internal_relay = 0
+                          AND (
+                              url LIKE 'http://127.0.0.1:%/stream'
+                              OR url LIKE 'http://localhost:%/stream'
+                          )
+                    """)
                 else:
                     cur.execute("PRAGMA table_info(llm_calls)")
                     existing_columns = {row[1] for row in cur.fetchall()}
@@ -156,6 +166,17 @@ class CallStorage:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN full_context TEXT")
                     if "outbound_diagnostics" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN outbound_diagnostics TEXT")
+                    if "is_internal_relay" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN is_internal_relay INTEGER NOT NULL DEFAULT 0")
+                    cur.execute("""
+                        UPDATE llm_calls
+                        SET is_internal_relay = 1
+                        WHERE is_internal_relay = 0
+                          AND (
+                              url LIKE 'http://127.0.0.1:%/stream'
+                              OR url LIKE 'http://localhost:%/stream'
+                          )
+                    """)
 
                 conn.commit()
                 self._llm_calls_schema_ready = True
@@ -381,6 +402,7 @@ class CallStorage:
                         call_id TEXT NOT NULL UNIQUE,
                         timestamp TEXT NOT NULL,
                         url TEXT NOT NULL,
+                        is_internal_relay INTEGER NOT NULL DEFAULT 0,
                         method TEXT,
                         request_headers JSON,
                         request_body TEXT,
@@ -417,6 +439,7 @@ class CallStorage:
                         call_id TEXT NOT NULL UNIQUE,
                         timestamp TEXT NOT NULL,
                         url TEXT NOT NULL,
+                        is_internal_relay INTEGER NOT NULL DEFAULT 0,
                         method TEXT,
                         request_headers TEXT,
                         request_body TEXT,
@@ -467,6 +490,7 @@ class CallStorage:
         cache_miss_tokens: Optional[int] = None,
         tokens_per_second: Optional[float] = None,
         outbound_diagnostics: Optional[dict] = None,
+        is_internal_relay: int = 0,
     ):
         """保存一次LLM调用记录"""
         await self.initialize()
@@ -482,8 +506,8 @@ class CallStorage:
                         response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
-                        original_model, overridden_model, outbound_diagnostics
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                        original_model, overridden_model, outbound_diagnostics, is_internal_relay
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                 """,
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
@@ -496,7 +520,8 @@ class CallStorage:
                     stream_type, first_token_ms,
                     original_model, overridden_model,
                     json.dumps(outbound_diagnostics, ensure_ascii=False)
-                    if outbound_diagnostics is not None else None
+                    if outbound_diagnostics is not None else None,
+                    is_internal_relay,
                 )
             finally:
                 await conn.close()
@@ -510,8 +535,8 @@ class CallStorage:
                         response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
-                        original_model, overridden_model, outbound_diagnostics
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        original_model, overridden_model, outbound_diagnostics, is_internal_relay
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     call_id, timestamp, url, method,
                     json.dumps(request_headers, ensure_ascii=False),
@@ -524,19 +549,22 @@ class CallStorage:
                     stream_type, first_token_ms,
                     original_model, overridden_model,
                     json.dumps(outbound_diagnostics, ensure_ascii=False)
-                    if outbound_diagnostics is not None else None
+                    if outbound_diagnostics is not None else None,
+                    is_internal_relay,
                 ))
                 await db.commit()
 
     async def get_calls(self, limit: int = 100, offset: int = 0) -> list:
         """查询调用记录"""
         await self.initialize()
+        self._ensure_llm_calls_schema_extensions()
 
         if self._use_postgres:
             conn = await self._get_pg_conn()
             try:
                 rows = await conn.fetch("""
                     SELECT * FROM llm_calls
+                    WHERE is_internal_relay = 0
                     ORDER BY timestamp DESC
                     LIMIT $1 OFFSET $2
                 """, limit, offset)
@@ -549,6 +577,7 @@ class CallStorage:
                 db.row_factory = aiosqlite.Row
                 async with db.execute("""
                     SELECT * FROM llm_calls
+                    WHERE is_internal_relay = 0
                     ORDER BY timestamp DESC
                     LIMIT ? OFFSET ?
                 """, (limit, offset)) as cursor:
@@ -558,18 +587,19 @@ class CallStorage:
     async def get_call_count(self) -> int:
         """获取总调用次数"""
         await self.initialize()
+        self._ensure_llm_calls_schema_extensions()
 
         if self._use_postgres:
             conn = await self._get_pg_conn()
             try:
-                row = await conn.fetchrow("SELECT COUNT(*) FROM llm_calls")
+                row = await conn.fetchrow("SELECT COUNT(*) FROM llm_calls WHERE is_internal_relay = 0")
                 return row["count"] if row else 0
             finally:
                 await conn.close()
         else:
             import aiosqlite
             async with aiosqlite.connect(self.db_path) as db:
-                async with db.execute("SELECT COUNT(*) FROM llm_calls") as cursor:
+                async with db.execute("SELECT COUNT(*) FROM llm_calls WHERE is_internal_relay = 0") as cursor:
                     row = await cursor.fetchone()
                     return row[0] if row else 0
 
@@ -918,6 +948,7 @@ class CallStorage:
         cache_miss_tokens: Optional[int] = None,
         tokens_per_second: Optional[float] = None,
         outbound_diagnostics: Optional[dict] = None,
+        is_internal_relay: int = 0,
     ):
         """保存调用记录（带用户和 API Key 关联）"""
         self._ensure_llm_calls_schema_extensions()
@@ -935,7 +966,8 @@ class CallStorage:
             original_model, overridden_model, user_id, api_key_id,
             previous_response_id, full_context,
             json.dumps(outbound_diagnostics, ensure_ascii=False)
-            if outbound_diagnostics is not None else None
+            if outbound_diagnostics is not None else None,
+            is_internal_relay,
         )
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -948,8 +980,8 @@ class CallStorage:
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
-                        previous_response_id, full_context, outbound_diagnostics
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -964,8 +996,8 @@ class CallStorage:
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
-                        previous_response_id, full_context, outbound_diagnostics
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)

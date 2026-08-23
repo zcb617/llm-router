@@ -19,6 +19,7 @@
      - upstreams.oauth_key
      - upstreams.oauth_host
      - llm_calls.outbound_diagnostics
+     - llm_calls.is_internal_relay
      - codex_prompt_cache_affinity
   4. 基础内容：
      - 基础表: llm_calls, users, api_keys, model_configs
@@ -31,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.5"
+CURRENT_VERSION = "1.1.6"
 
 
 def get_pg_conn(config):
@@ -100,6 +101,7 @@ PG_TABLES = [
             call_id TEXT NOT NULL UNIQUE,
             timestamp TEXT NOT NULL,
             url TEXT NOT NULL,
+            is_internal_relay INTEGER NOT NULL DEFAULT 0,
             method TEXT,
             request_headers JSON,
             request_body TEXT,
@@ -240,6 +242,7 @@ SQLITE_TABLES = [
             call_id TEXT NOT NULL UNIQUE,
             timestamp TEXT NOT NULL,
             url TEXT NOT NULL,
+            is_internal_relay INTEGER NOT NULL DEFAULT 0,
             method TEXT,
             request_headers TEXT,
             request_body TEXT,
@@ -782,6 +785,48 @@ def run_v115_sqlite(conn):
         cur.close()
 
 
+def run_v116_pg(conn):
+    """v1.1.5 -> v1.1.6：添加内部中继标志并回填历史记录。"""
+    _pg_add_column(conn, "llm_calls", "is_internal_relay", "INTEGER NOT NULL DEFAULT 0")
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE llm_calls
+            SET is_internal_relay = 1
+            WHERE is_internal_relay = 0
+              AND (
+                  url LIKE 'http://127.0.0.1:%/stream'
+                  OR url LIKE 'http://localhost:%/stream'
+              )
+            """
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v116_sqlite(conn):
+    """v1.1.5 -> v1.1.6：添加内部中继标志并回填历史记录。"""
+    _sqlite_add_column(conn, "llm_calls", "is_internal_relay", "INTEGER NOT NULL DEFAULT 0")
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE llm_calls
+            SET is_internal_relay = 1
+            WHERE is_internal_relay = 0
+              AND (
+                  url LIKE 'http://127.0.0.1:%/stream'
+                  OR url LIKE 'http://localhost:%/stream'
+              )
+            """
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -812,7 +857,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -869,6 +914,13 @@ def main():
             run_v115_pg(conn)
         else:
             run_v115_sqlite(conn)
+
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", CURRENT_VERSION):
+        print("\n[v1.1.6] 检查/补齐内部中继标志字段...")
+        if is_pg:
+            run_v116_pg(conn)
+        else:
+            run_v116_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)
