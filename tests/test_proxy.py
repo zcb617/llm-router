@@ -506,6 +506,7 @@ def test_response_uses_codex_rust_first_body_time_without_fallback(
             "codex_cli_oauth_first_body_at_ms": first_body_at_ms,
             "first_token_time": 9.0,
             "headers_time": 9.0,
+            "multi_upstream_stream_relay": True,
         }
     )
     addon._store_pending_request(flow, captured_req)
@@ -513,31 +514,37 @@ def test_response_uses_codex_rust_first_body_time_without_fallback(
     addon.response(flow)
 
     assert saved_calls[0]["first_token_ms"] == expected_first_token_ms
+    assert saved_calls[0]["is_internal_relay"] == 0
 
 
 def _run_client_disconnect_fallback(
     *, streamed_chunks=None, buffered_response=b"", codex_cli_oauth=True,
-    stream_converter=None,
+    stream_converter=None, response_present=True, model="gpt-5.6-luna",
+    multi_upstream_stream_relay=False, is_internal_relay=None,
 ):
+    """构造客户端断开场景并返回中继调用保存记录。"""
     addon = _make_addon_for_route_tests()
     saved_calls = []
     addon._enqueue_call_save = saved_calls.append
 
     flow = _make_flow()
     flow.request.content = json.dumps(
-        {"model": "gpt-5.6-luna", "input": "hello", "stream": True}
+        {"model": model, "input": "hello", "stream": True}
     ).encode("utf-8")
-    flow.response = SimpleNamespace(
-        status_code=200,
-        raw_content=buffered_response,
-        headers={"Content-Type": "text/event-stream"},
-    )
+    if response_present:
+        flow.response = SimpleNamespace(
+            status_code=200,
+            raw_content=buffered_response,
+            headers={"Content-Type": "text/event-stream"},
+        )
+    else:
+        flow.response = None
     flow.error = "Client disconnected."
 
     captured_req = _make_captured_request(flow)
     captured_req.call_id = "disconnect-call"
-    captured_req.original_model = "gpt-5.6-luna"
-    captured_req.overridden_model = "gpt-5.6-luna"
+    captured_req.original_model = model
+    captured_req.overridden_model = model
     captured_req.start_time = 1.0
     flow.metadata.update(
         {
@@ -547,8 +554,11 @@ def _run_client_disconnect_fallback(
             "codex_cli_oauth": codex_cli_oauth,
             "codex_response_protocol": "responses",
             "codex_cli_oauth_first_body_at_ms": 1250,
+            "multi_upstream_stream_relay": multi_upstream_stream_relay,
         }
     )
+    if is_internal_relay is not None:
+        flow.metadata["is_internal_relay"] = is_internal_relay
     if streamed_chunks is not None:
         flow.metadata["streamed_response_chunks"] = streamed_chunks
     if stream_converter is not None:
@@ -598,10 +608,51 @@ def test_error_fallback_uses_buffered_response_without_streamed_chunks():
     assert saved_calls[0]["cache_miss_tokens"] == 50
 
 
-def test_error_fallback_skips_save_when_no_response_body_exists():
-    saved_calls = _run_client_disconnect_fallback()
+def test_error_fallback_saves_failed_call_when_no_response_exists():
+    """验证客户端断开且没有上游响应时仍保存外部 failed 调用。"""
+    saved_calls = _run_client_disconnect_fallback(
+        response_present=False,
+        model="claude-sonnet-5",
+        multi_upstream_stream_relay=True,
+    )
 
-    assert saved_calls == []
+    assert len(saved_calls) == 1
+    saved_call = saved_calls[0]
+    assert saved_call["url"] == "http://router.test/v1/messages?beta=true"
+    assert saved_call["method"] == "POST"
+    assert saved_call["request_headers"]["Host"] == "router.test"
+    assert json.loads(saved_call["request_body"])["model"] == "claude-sonnet-5"
+    assert saved_call["response_headers"] == {}
+    assert saved_call["response_body"] == ""
+    assert saved_call["call_status"] == "failed"
+    assert saved_call["duration_ms"] >= 0
+    assert saved_call["stream_type"] == "stream"
+    assert saved_call["is_internal_relay"] == 0
+    for token_field in (
+        "tokens_input",
+        "tokens_output",
+        "cached_hit_tokens",
+        "cache_miss_tokens",
+        "tokens_per_second",
+        "token_source",
+        "first_token_ms",
+    ):
+        assert saved_call[token_field] is None
+
+
+@pytest.mark.parametrize("multi_upstream_stream_relay", [False, True])
+def test_error_fallback_uses_explicit_internal_relay_marker(
+    multi_upstream_stream_relay,
+):
+    """验证显式内部调用标记独立决定 is_internal_relay。"""
+    saved_calls = _run_client_disconnect_fallback(
+        buffered_response=b'{"id":"internal-call"}',
+        multi_upstream_stream_relay=multi_upstream_stream_relay,
+        is_internal_relay=True,
+    )
+
+    assert len(saved_calls) == 1
+    assert saved_calls[0]["is_internal_relay"] == 1
 
 
 def test_error_fallback_does_not_expand_buffered_response_to_other_routes():

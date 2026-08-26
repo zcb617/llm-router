@@ -3008,7 +3008,7 @@ class LLMRouterAddon:
             "first_token_ms": first_token_ms,
             "original_model": captured_req.original_model,
             "overridden_model": captured_req.overridden_model,
-            "is_internal_relay": int(bool(flow.metadata.get("multi_upstream_stream_relay"))),
+            "is_internal_relay": int(bool(flow.metadata.get("is_internal_relay"))),
             "user_id": user_id,
             "api_key_id": api_key_id,
             "previous_response_id": previous_response_id,
@@ -3246,7 +3246,52 @@ class LLMRouterAddon:
                 "first_token_ms": first_token_ms,
                 "original_model": captured_req.original_model,
                 "overridden_model": captured_req.overridden_model,
-                "is_internal_relay": int(bool(flow.metadata.get("multi_upstream_stream_relay"))),
+                "is_internal_relay": int(bool(flow.metadata.get("is_internal_relay"))),
+                "user_id": flow.metadata.get("user_id"),
+                "api_key_id": flow.metadata.get("api_key_id"),
+                "previous_response_id": flow.metadata.get("previous_response_id"),
+                "full_context": None,
+                "outbound_diagnostics": outbound_diagnostics,
+            })
+        elif captured_req and resp_status is None:
+            duration_ms = int((time.time() - captured_req.start_time) * 1000)
+            stream_type = "non_stream"
+            try:
+                request_data = json.loads(captured_req.body)
+                if isinstance(request_data, dict) and request_data.get("stream"):
+                    stream_type = "stream"
+            except Exception:
+                pass
+
+            outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
+            if isinstance(outbound_diagnostics, dict):
+                outbound_diagnostics = dict(outbound_diagnostics)
+                outbound_diagnostics["duration_ms"] = duration_ms
+                outbound_diagnostics["first_token_ms"] = None
+
+            self._enqueue_call_save({
+                "call_id": captured_req.call_id,
+                "timestamp": captured_req.timestamp,
+                "url": captured_req.url,
+                "method": captured_req.method,
+                "request_headers": captured_req.headers,
+                "request_body": captured_req.body or "",
+                "response_headers": {},
+                "response_body": "",
+                "final_responses_body": None,
+                "call_status": "failed",
+                "duration_ms": duration_ms,
+                "tokens_input": None,
+                "tokens_output": None,
+                "cached_hit_tokens": None,
+                "cache_miss_tokens": None,
+                "tokens_per_second": None,
+                "token_source": None,
+                "stream_type": stream_type,
+                "first_token_ms": None,
+                "original_model": captured_req.original_model,
+                "overridden_model": captured_req.overridden_model,
+                "is_internal_relay": int(bool(flow.metadata.get("is_internal_relay"))),
                 "user_id": flow.metadata.get("user_id"),
                 "api_key_id": flow.metadata.get("api_key_id"),
                 "previous_response_id": flow.metadata.get("previous_response_id"),
