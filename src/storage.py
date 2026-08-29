@@ -2540,11 +2540,98 @@ class CallStorage:
                     "month": m.get("month", {"calls": 0, "cached_hit_tokens": 0, "cache_miss_tokens": 0, "tokens_output": 0}),
                 })
 
+            # 查询当前用户全历史逐日 Token，用于用量活动统计和热力图。
+            if self.postgresql:
+                cur.execute("""
+                    SELECT
+                        SUBSTR(timestamp, 1, 10) AS usage_date,
+                        COALESCE(SUM(cached_hit_tokens), 0)
+                            + COALESCE(SUM(cache_miss_tokens), 0)
+                            + COALESCE(SUM(tokens_output), 0) AS total_tokens
+                    FROM llm_calls
+                    WHERE user_id = %s
+                    GROUP BY SUBSTR(timestamp, 1, 10)
+                    ORDER BY usage_date ASC
+                """, (user_id,))
+            else:
+                cur.execute("""
+                    SELECT
+                        SUBSTR(timestamp, 1, 10) AS usage_date,
+                        COALESCE(SUM(cached_hit_tokens), 0)
+                            + COALESCE(SUM(cache_miss_tokens), 0)
+                            + COALESCE(SUM(tokens_output), 0) AS total_tokens
+                    FROM llm_calls
+                    WHERE user_id = ?
+                    GROUP BY SUBSTR(timestamp, 1, 10)
+                    ORDER BY usage_date ASC
+                """, (user_id,))
+
+            usage_by_date = {}
+            total_tokens = 0
+            peak_daily_tokens = 0
+            for row in cur.fetchall():
+                raw_date = row[0]
+                raw_tokens = row[1] or 0
+                try:
+                    daily_tokens = int(raw_tokens)
+                except (TypeError, ValueError):
+                    daily_tokens = 0
+                total_tokens += daily_tokens
+                peak_daily_tokens = max(peak_daily_tokens, daily_tokens)
+                try:
+                    usage_date = date.fromisoformat(str(raw_date))
+                except (TypeError, ValueError):
+                    # 无法解析的日期不参与连续天数和近一年热力图映射。
+                    continue
+                usage_by_date[usage_date] = daily_tokens
+
+            current_streak_days = 0
+            streak_date = today
+            while streak_date in usage_by_date:
+                current_streak_days += 1
+                streak_date -= timedelta(days=1)
+
+            longest_streak_days = 0
+            streak_length = 0
+            previous_date = None
+            for usage_date in sorted(usage_by_date):
+                if previous_date is not None and usage_date == previous_date + timedelta(days=1):
+                    streak_length += 1
+                else:
+                    streak_length = 1
+                longest_streak_days = max(longest_streak_days, streak_length)
+                previous_date = usage_date
+
+            activity_days = []
+            first_activity_date = today - timedelta(days=364)
+            for day_offset in range(365):
+                activity_date = first_activity_date + timedelta(days=day_offset)
+                activity_days.append({
+                    # 热力图自然日日期。
+                    "date": activity_date.isoformat(),
+                    # 当前用户该自然日的 Token 消耗。
+                    "total_tokens": int(usage_by_date.get(activity_date, 0)),
+                })
+
+            usage_activity = {
+                # 当前用户全历史 Token 消耗总量。
+                "total_tokens": total_tokens,
+                # 当前用户单个自然日的最大 Token 消耗。
+                "peak_daily_tokens": peak_daily_tokens,
+                # 从服务器本地今天向前连续有调用记录的天数。
+                "current_streak_days": current_streak_days,
+                # 当前用户全部活跃自然日中的最长连续天数。
+                "longest_streak_days": longest_streak_days,
+                # 最近 365 个自然日的每日 Token 消耗。
+                "days": activity_days,
+            }
+
             return {
                 "day": day,
                 "week": week,
                 "month": month,
                 "models": models,
+                "usage_activity": usage_activity,
             }
         finally:
             if self.postgresql:

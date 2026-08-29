@@ -387,9 +387,16 @@
           </div>
         </div>
 
+        <!-- 下半区域 TAB -->
+        <div class="flex items-center gap-2 mb-4 border-b border-zinc-200 dark:border-zinc-800" role="tablist" aria-label="用量统计明细">
+          <button id="usageStatsModelTab" type="button" role="tab" aria-selected="true" class="px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400">按模型</button>
+          <button id="usageStatsUsageTab" type="button" role="tab" aria-selected="false" class="px-4 py-2 text-sm font-medium text-zinc-500 border-b-2 border-transparent hover:text-zinc-700 dark:hover:text-zinc-300">按用量</button>
+        </div>
+
         <!-- 模型明细表格 -->
-        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
-          <table id="usage_statsTable" class="text-sm w-full" style="table-layout: auto; min-width: 900px;">
+        <div id="usageStatsModelPanel" class="flex flex-col flex-1 min-h-0" role="tabpanel">
+          <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+            <table id="usage_statsTable" class="text-sm w-full" style="table-layout: auto; min-width: 900px;">
             <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
               <tr>
                 <th rowspan="3" class="px-4 py-2 text-center font-medium whitespace-nowrap border-r border-zinc-300 dark:border-zinc-700" style="min-width:160px;">模型名称</th>
@@ -417,10 +424,38 @@
                 <th class="px-4 py-2 text-center font-medium whitespace-nowrap"><span class="inline-flex items-center justify-center gap-1 text-rose-500" title="输出"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg><span>输出</span></span></th>
               </tr>
             </thead>
-            <tbody id="usage_statsTableBody"></tbody>
-          </table>
+              <tbody id="usage_statsTableBody"></tbody>
+            </table>
+          </div>
+          <div id="usage_statsEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无用量数据</div>
         </div>
-        <div id="usage_statsEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无用量数据</div>
+
+        <!-- 用量活动面板 -->
+        <div id="usageStatsUsagePanel" class="hidden flex-1 min-h-0 overflow-y-auto" role="tabpanel">
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+            <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+              <div class="text-sm text-zinc-500 mb-1">累计 Token 消耗</div>
+              <div id="usageActivityTotal" class="text-2xl font-bold">0</div>
+            </div>
+            <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+              <div class="text-sm text-zinc-500 mb-1">峰值 Token 消耗</div>
+              <div id="usageActivityPeak" class="text-2xl font-bold">0</div>
+            </div>
+            <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+              <div class="text-sm text-zinc-500 mb-1">当前连续</div>
+              <div id="usageActivityCurrentStreak" class="text-2xl font-bold">0 天</div>
+            </div>
+            <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+              <div class="text-sm text-zinc-500 mb-1">最长连续</div>
+              <div id="usageActivityLongestStreak" class="text-2xl font-bold">0 天</div>
+            </div>
+          </div>
+          <div class="rounded-lg border border-zinc-300 dark:border-zinc-700 p-4 bg-white dark:bg-zinc-900">
+            <h3 class="text-base font-semibold mb-4">Token 活动</h3>
+            <div id="usageActivityMonths" class="flex flex-wrap gap-x-4 gap-y-1 mb-2 text-xs text-zinc-500"></div>
+            <div id="usageActivityHeatmap" class="grid grid-rows-7 grid-flow-col auto-cols-max gap-1 overflow-x-auto pb-2"></div>
+          </div>
+        </div>
       </div>
 
       <!-- ==================== 订阅额度面板 ==================== -->
@@ -2969,6 +3004,9 @@ function escapeHtml(text) {
 }
 
 // ============ 用量统计 ============
+let activeUsageStatsTab = 'model';
+
+/** 加载当前登录用户的用量统计，并刷新统计卡片、模型明细和用量活动。 */
 async function loadUsageStats() {
   try {
     const res = await fetch('/api/usage_stats', { headers: getAuthHeaders() });
@@ -2984,6 +3022,105 @@ async function loadUsageStats() {
   }
 }
 
+/** 切换用量统计下半区域的模型明细或用量活动面板。 */
+function setUsageStatsTab(tab) {
+  if (tab !== 'model' && tab !== 'usage') return;
+  activeUsageStatsTab = tab;
+  const modelTab = document.getElementById('usageStatsModelTab');
+  const usageTab = document.getElementById('usageStatsUsageTab');
+  const modelPanel = document.getElementById('usageStatsModelPanel');
+  const usagePanel = document.getElementById('usageStatsUsagePanel');
+  const isModel = tab === 'model';
+
+  modelTab.classList.toggle('text-blue-600', isModel);
+  modelTab.classList.toggle('dark:text-blue-400', isModel);
+  modelTab.classList.toggle('border-blue-600', isModel);
+  modelTab.classList.toggle('dark:border-blue-400', isModel);
+  modelTab.classList.toggle('text-zinc-500', !isModel);
+  modelTab.classList.toggle('border-transparent', !isModel);
+  usageTab.classList.toggle('text-blue-600', !isModel);
+  usageTab.classList.toggle('dark:text-blue-400', !isModel);
+  usageTab.classList.toggle('border-blue-600', !isModel);
+  usageTab.classList.toggle('dark:border-blue-400', !isModel);
+  usageTab.classList.toggle('text-zinc-500', isModel);
+  usageTab.classList.toggle('border-transparent', isModel);
+  modelTab.setAttribute('aria-selected', String(isModel));
+  usageTab.setAttribute('aria-selected', String(!isModel));
+  modelPanel.classList.toggle('hidden', !isModel);
+  usagePanel.classList.toggle('hidden', isModel);
+  modelPanel.hidden = !isModel;
+  usagePanel.hidden = isModel;
+}
+
+/** 根据接口返回的逐日 Token 数据渲染用量活动统计和热力图。 */
+function renderUsageActivity(activity) {
+  const totalTokens = Number(activity.total_tokens);
+  const peakDailyTokens = Number(activity.peak_daily_tokens);
+  const currentStreakDays = Number(activity.current_streak_days);
+  const longestStreakDays = Number(activity.longest_streak_days);
+  document.getElementById('usageActivityTotal').textContent = (Number.isFinite(totalTokens) ? totalTokens : 0).toLocaleString();
+  document.getElementById('usageActivityPeak').textContent = (Number.isFinite(peakDailyTokens) ? peakDailyTokens : 0).toLocaleString();
+  document.getElementById('usageActivityCurrentStreak').textContent = `${(Number.isFinite(currentStreakDays) ? currentStreakDays : 0).toLocaleString()} 天`;
+  document.getElementById('usageActivityLongestStreak').textContent = `${(Number.isFinite(longestStreakDays) ? longestStreakDays : 0).toLocaleString()} 天`;
+
+  const months = document.getElementById('usageActivityMonths');
+  const heatmap = document.getElementById('usageActivityHeatmap');
+  months.textContent = '';
+  heatmap.textContent = '';
+  const sourceDays = Array.isArray(activity.days) ? activity.days.slice(-365) : [];
+  const days = sourceDays.map(item => {
+    const tokenValue = Number(item && item.total_tokens);
+    return {
+      date: item && typeof item.date === 'string' ? item.date : '',
+      total_tokens: Number.isFinite(tokenValue) ? Math.max(0, tokenValue) : 0
+    };
+  }).filter(item => /^\d{4}-\d{2}-\d{2}$/.test(item.date));
+  const maxDailyTokens = days.reduce((maxValue, item) => Math.max(maxValue, item.total_tokens), 0);
+
+  if (days.length === 0) {
+    const empty = document.createElement('span');
+    empty.className = 'text-sm text-zinc-500';
+    empty.textContent = '暂无用量数据';
+    heatmap.appendChild(empty);
+    return;
+  }
+
+  let previousMonth = '';
+  days.forEach(item => {
+    const monthKey = item.date.slice(0, 7);
+    if (monthKey !== previousMonth) {
+      const monthLabel = document.createElement('span');
+      monthLabel.textContent = `${item.date.slice(0, 4)}年${Number(item.date.slice(5, 7))}月`;
+      months.appendChild(monthLabel);
+      previousMonth = monthKey;
+    }
+  });
+
+  const firstDate = new Date(`${days[0].date}T00:00:00`);
+  const firstWeekday = Number.isNaN(firstDate.getTime()) ? 0 : firstDate.getDay();
+  for (let index = 0; index < firstWeekday; index += 1) {
+    const blank = document.createElement('div');
+    blank.className = 'w-3 h-3';
+    heatmap.appendChild(blank);
+  }
+  const colorClasses = [
+    'bg-emerald-100 dark:bg-emerald-950',
+    'bg-emerald-300 dark:bg-emerald-800',
+    'bg-emerald-500 dark:bg-emerald-600',
+    'bg-emerald-700 dark:bg-emerald-400'
+  ];
+  days.forEach(item => {
+    const cell = document.createElement('div');
+    const level = item.total_tokens > 0 && maxDailyTokens > 0
+      ? Math.min(4, Math.max(1, Math.ceil(item.total_tokens / maxDailyTokens * 4)))
+      : 0;
+    cell.className = `w-3 h-3 rounded-sm ${level === 0 ? 'bg-zinc-200 dark:bg-zinc-800' : colorClasses[level - 1]}`;
+    cell.title = `${item.date}：${item.total_tokens.toLocaleString()} Token`;
+    heatmap.appendChild(cell);
+  });
+}
+
+/** 更新顶部三张统计卡、模型明细表和按用量下半面板。 */
 function renderUsageStats(stats) {
   document.getElementById('statDayTotal').textContent = (stats.day?.total_tokens || 0).toLocaleString();
   document.getElementById('statDayCalls').textContent = (stats.day?.calls || 0).toLocaleString();
@@ -3000,6 +3137,7 @@ function renderUsageStats(stats) {
   document.getElementById('statMonthMiss').textContent = (stats.month?.cache_miss_tokens || 0).toLocaleString();
   document.getElementById('statMonthHit').textContent = (stats.month?.cached_hit_tokens || 0).toLocaleString();
   document.getElementById('statMonthOut').textContent = (stats.month?.tokens_output || 0).toLocaleString();
+
   const tbody = document.getElementById('usage_statsTableBody');
   const empty = document.getElementById('usage_statsEmpty');
   const table = document.getElementById('usage_statsTable');
@@ -3008,31 +3146,36 @@ function renderUsageStats(stats) {
   if (models.length === 0) {
     empty.classList.remove('hidden');
     table.classList.add('hidden');
-    return;
+  } else {
+    empty.classList.add('hidden');
+    table.classList.remove('hidden');
+    models.forEach(m => {
+      const tr = document.createElement('tr');
+      tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+      tr.innerHTML = `
+        <td class="px-4 py-2 whitespace-nowrap font-mono text-sm border-r border-zinc-200 dark:border-zinc-800">${escapeHtml(m.original_model || 'unknown')}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.day?.calls || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.day?.cache_miss_tokens || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.day?.cached_hit_tokens || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.day?.tokens_output || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.week?.calls || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.week?.cache_miss_tokens || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.week?.cached_hit_tokens || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.week?.tokens_output || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.month?.calls || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.month?.cache_miss_tokens || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${escapeHtml((m.month?.cached_hit_tokens || 0).toLocaleString())}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-center">${escapeHtml((m.month?.tokens_output || 0).toLocaleString())}</td>
+      `;
+      tbody.appendChild(tr);
+    });
   }
-  empty.classList.add('hidden');
-  table.classList.remove('hidden');
-  models.forEach(m => {
-    const tr = document.createElement('tr');
-    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
-    tr.innerHTML = `
-      <td class="px-4 py-2 whitespace-nowrap font-mono text-sm border-r border-zinc-200 dark:border-zinc-800">${escapeHtml(m.original_model || 'unknown')}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.calls || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.cache_miss_tokens || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.cached_hit_tokens || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.day?.tokens_output || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.calls || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.cache_miss_tokens || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.cached_hit_tokens || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.week?.tokens_output || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.calls || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.cache_miss_tokens || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center border-r border-zinc-200 dark:border-zinc-800">${(m.month?.cached_hit_tokens || 0).toLocaleString()}</td>
-      <td class="px-4 py-2 whitespace-nowrap text-center">${(m.month?.tokens_output || 0).toLocaleString()}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+  renderUsageActivity(stats.usage_activity || {});
+  setUsageStatsTab(activeUsageStatsTab);
 }
+
+document.getElementById('usageStatsModelTab').addEventListener('click', () => setUsageStatsTab('model'));
+document.getElementById('usageStatsUsageTab').addEventListener('click', () => setUsageStatsTab('usage'));
 
 function escapeHtml(text) {
   const div = document.createElement('div');
