@@ -22,6 +22,7 @@
      - llm_calls.is_internal_relay
      - codex_prompt_cache_affinity
      - PostgreSQL pg_trgm 扩展及模型包含搜索 GIN 索引
+     - 调用日志分页过滤与排序索引
   4. 基础内容：
      - 基础表: llm_calls, users, api_keys, model_configs
      - RBAC 表: roles, menus, role_menus, upstreams
@@ -33,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.7"
+CURRENT_VERSION = "1.1.8"
 
 
 def get_pg_conn(config):
@@ -851,6 +852,45 @@ def run_v117_sqlite(conn):
     print("[v1.1.7] SQLite 不支持 PostgreSQL pg_trgm/GIN 索引，跳过模型包含搜索索引。")
 
 
+def run_v118_pg(conn):
+    """v1.1.7 -> v1.1.8：为调用日志分页过滤与排序创建部分索引。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_calls_visible_ts_id
+            ON llm_calls (timestamp DESC, id DESC)
+            WHERE is_internal_relay = 0
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_calls_user_visible_ts_id
+            ON llm_calls (user_id, timestamp DESC, id DESC)
+            WHERE is_internal_relay = 0
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v118_sqlite(conn):
+    """v1.1.7 -> v1.1.8：为调用日志分页过滤与排序创建 SQLite 部分索引。"""
+    print("[v1.1.8] 创建调用日志分页过滤与排序索引。")
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_calls_visible_ts_id
+            ON llm_calls (timestamp DESC, id DESC)
+            WHERE is_internal_relay = 0
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_calls_user_visible_ts_id
+            ON llm_calls (user_id, timestamp DESC, id DESC)
+            WHERE is_internal_relay = 0
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -881,7 +921,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -951,6 +991,12 @@ def main():
             run_v117_pg(conn)
         else:
             run_v117_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", CURRENT_VERSION):
+        print("\n[v1.1.8] 检查/补齐调用日志分页过滤与排序索引...")
+        if is_pg:
+            run_v118_pg(conn)
+        else:
+            run_v118_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

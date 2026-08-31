@@ -1004,8 +1004,16 @@ let logsState = {
   sortKey: 'timestamp', sortDir: 'desc',
   searchOriginal: '', searchOverridden: '',
   autoRefreshMs: DEFAULT_AUTO_REFRESH_MS,
-  columns: createDefaultColumns()
+  columns: createDefaultColumns(),
+  // 调用日志分页游标，按页保存当前页首尾记录的定位信息
+  cursorPages: {}
 };
+
+// 清理调用日志游标，确保新的偏移分页查询从第一页边界重新开始
+function clearLogsCursorPages() {
+  logsState.cursorPages = {};
+}
+
 let logsResizeState = null;
 let logsSuppressSortClick = false;
 let logsQueryInFlight = false;
@@ -1248,6 +1256,7 @@ function renderHeader() {
       if (logsSuppressSortClick) return;
       if (logsState.sortKey === col.key) logsState.sortDir = logsState.sortDir === 'asc' ? 'desc' : 'asc';
       else { logsState.sortKey = col.key; logsState.sortDir = 'asc'; }
+      clearLogsCursorPages();
       loadLogsData();
     });
     attachResizeHandle(th, col);
@@ -1308,18 +1317,36 @@ function renderPagination() {
   document.getElementById('nextBtn').disabled = logsState.page >= totalPages;
 }
 
-async function loadLogsData() {
+// 按偏移或游标加载调用日志，保持当前页数据与分页边界一致
+async function loadLogsData(paginationMode = 'offset', cursorDirection = '', cursor = null) {
   if (logsQueryInFlight) return;
+  if (paginationMode === 'offset') clearLogsCursorPages();
   logsQueryInFlight = true;
   const params = new URLSearchParams({
+    pagination_mode: paginationMode,
     limit: logsState.pageSize, offset: (logsState.page - 1) * logsState.pageSize,
     sort: logsState.sortKey, dir: logsState.sortDir,
     search_original: logsState.searchOriginal, search_overridden: logsState.searchOverridden
   });
+  if (paginationMode === 'cursor') {
+    params.set('cursor_direction', cursorDirection);
+    params.set('cursor_timestamp', cursor.timestamp);
+    params.set('cursor_id', cursor.id);
+  }
   try {
     const res = await fetch('/api/calls?' + params.toString(), { headers: getAuthHeaders() });
     const data = await res.json();
     let calls = data.calls || [];
+    if (calls.length) {
+      logsState.cursorPages[logsState.page] = {
+        // 当前页按稳定 DESC 结果返回的首条记录游标
+        first: { timestamp: calls[0].timestamp, id: calls[0].id },
+        // 当前页按稳定 DESC 结果返回的末条记录游标
+        last: { timestamp: calls[calls.length - 1].timestamp, id: calls[calls.length - 1].id }
+      };
+    } else {
+      delete logsState.cursorPages[logsState.page];
+    }
     if (logsState.sortKey) {
       calls.sort((a, b) => {
         let va = a[logsState.sortKey] ?? '', vb = b[logsState.sortKey] ?? '';
@@ -1365,19 +1392,24 @@ document.getElementById('detailModal').addEventListener('click', (e) => { if (e.
 document.getElementById('searchBtn').addEventListener('click', () => {
   logsState.searchOriginal = document.getElementById('searchOriginal').value.trim();
   logsState.searchOverridden = document.getElementById('searchOverridden').value.trim();
-  logsState.page = 1; loadLogsData();
+  logsState.page = 1;
+  clearLogsCursorPages();
+  loadLogsData();
 });
 document.getElementById('resetBtn').addEventListener('click', () => {
   document.getElementById('searchOriginal').value = '';
   document.getElementById('searchOverridden').value = '';
   logsState.searchOriginal = ''; logsState.searchOverridden = '';
-  logsState.page = 1; loadLogsData();
+  logsState.page = 1;
+  clearLogsCursorPages();
+  loadLogsData();
 });
 document.getElementById('pageSize').addEventListener('change', (e) => {
   logsState.pageSize = normalizePageSize(e.target.value, logsState.pageSize);
   e.target.value = String(logsState.pageSize);
   savePageSize();
   logsState.page = 1;
+  clearLogsCursorPages();
   loadLogsData();
 });
 document.getElementById('autoRefresh').addEventListener('change', (e) => {
@@ -1386,9 +1418,39 @@ document.getElementById('autoRefresh').addEventListener('change', (e) => {
   saveAutoRefresh();
   setupAutoRefresh();
 });
-document.getElementById('prevBtn').addEventListener('click', () => { if (logsState.page > 1) { logsState.page--; loadLogsData(); } });
-document.getElementById('nextBtn').addEventListener('click', () => { const t = Math.ceil(logsState.total / logsState.pageSize); if (logsState.page < t) { logsState.page++; loadLogsData(); } });
-document.getElementById('jumpBtn').addEventListener('click', () => { const p = parseInt(document.getElementById('jumpPage').value); const t = Math.ceil(logsState.total / logsState.pageSize); if (p >= 1 && p <= t) { logsState.page = p; loadLogsData(); } });
+document.getElementById('prevBtn').addEventListener('click', () => {
+  if (logsQueryInFlight || logsState.page <= 1) return;
+  const currentPage = logsState.page;
+  const cursor = logsState.cursorPages[currentPage]?.first;
+  logsState.page--;
+  if (!cursor) {
+    logsState.page = currentPage;
+    return;
+  }
+  loadLogsData('cursor', 'prev', cursor);
+});
+document.getElementById('nextBtn').addEventListener('click', () => {
+  if (logsQueryInFlight) return;
+  const totalPages = Math.ceil(logsState.total / logsState.pageSize);
+  if (logsState.page >= totalPages) return;
+  const currentPage = logsState.page;
+  const cursor = logsState.cursorPages[currentPage]?.last;
+  logsState.page++;
+  if (!cursor) {
+    logsState.page = currentPage;
+    return;
+  }
+  loadLogsData('cursor', 'next', cursor);
+});
+document.getElementById('jumpBtn').addEventListener('click', () => {
+  const p = parseInt(document.getElementById('jumpPage').value);
+  const totalPages = Math.ceil(logsState.total / logsState.pageSize);
+  if (p >= 1 && p <= totalPages) {
+    logsState.page = p;
+    clearLogsCursorPages();
+    loadLogsData('offset');
+  }
+});
 document.getElementById('jumpPage').addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('jumpBtn').click(); });
 
 // 列设置

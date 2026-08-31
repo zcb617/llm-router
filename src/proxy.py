@@ -2519,8 +2519,56 @@ class LLMRouterAddon:
                 offset = int(params.get("offset", [0])[0])
                 search_original = params.get("search_original", [""])[0].strip()
                 search_overridden = params.get("search_overridden", [""])[0].strip()
+                pagination_mode = params.get("pagination_mode", ["offset"])[0]
+                cursor_direction = params.get("cursor_direction", [""])[0]
+                cursor_timestamp = params.get("cursor_timestamp", [""])[0]
+                cursor_id_raw = params.get("cursor_id", [""])[0]
+                cursor_id = None
+                if pagination_mode not in ("offset", "cursor"):
+                    flow.response = http.Response.make(
+                        400,
+                        json.dumps({"error": "pagination_mode must be offset or cursor"}, ensure_ascii=False).encode("utf-8"),
+                        {"Content-Type": "application/json"}
+                    )
+                    if not is_pg:
+                        cur.close()
+                        conn.close()
+                    return
+                if pagination_mode == "cursor":
+                    if cursor_direction not in ("next", "prev"):
+                        flow.response = http.Response.make(
+                            400,
+                            json.dumps({"error": "cursor_direction must be next or prev"}, ensure_ascii=False).encode("utf-8"),
+                            {"Content-Type": "application/json"}
+                        )
+                        if not is_pg:
+                            cur.close()
+                            conn.close()
+                        return
+                    if not cursor_timestamp:
+                        flow.response = http.Response.make(
+                            400,
+                            json.dumps({"error": "cursor_timestamp is required"}, ensure_ascii=False).encode("utf-8"),
+                            {"Content-Type": "application/json"}
+                        )
+                        if not is_pg:
+                            cur.close()
+                            conn.close()
+                        return
+                    try:
+                        cursor_id = int(cursor_id_raw)
+                    except (TypeError, ValueError):
+                        flow.response = http.Response.make(
+                            400,
+                            json.dumps({"error": "cursor_id must be an integer"}, ensure_ascii=False).encode("utf-8"),
+                            {"Content-Type": "application/json"}
+                        )
+                        if not is_pg:
+                            cur.close()
+                            conn.close()
+                        return
 
-                # 构建 WHERE 子句和参数
+                # 构建只承载业务基础过滤的 WHERE 子句和参数
                 where_clauses = ["is_internal_relay = 0"]
                 query_args = []
                 if user_id:
@@ -2532,19 +2580,45 @@ class LLMRouterAddon:
                 if search_overridden:
                     where_clauses.append("overridden_model LIKE {}".format("%s" if is_pg else "?"))
                     query_args.append(f"%{search_overridden}%")
-                where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+                base_where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+                count_where_sql = base_where_sql
+                count_args = tuple(query_args)
+                data_where_clauses = list(where_clauses)
+                data_args = list(query_args)
+                if pagination_mode == "cursor":
+                    placeholder = "%s" if is_pg else "?"
+                    comparator = "<" if cursor_direction == "next" else ">"
+                    data_where_clauses.append(
+                        f"(timestamp, id) {comparator} ({placeholder}, {placeholder})"
+                    )
+                    data_args.extend([cursor_timestamp, cursor_id])
+                data_where_sql = "WHERE " + " AND ".join(data_where_clauses) if data_where_clauses else ""
+                data_order_sql = (
+                    "timestamp ASC, id ASC"
+                    if pagination_mode == "cursor" and cursor_direction == "prev"
+                    else "timestamp DESC, id DESC"
+                )
+                data_offset = 0 if pagination_mode == "cursor" else offset
 
                 if is_pg:
-                    cur.execute(f"SELECT COUNT(*) FROM llm_calls {where_sql}", tuple(query_args))
+                    cur.execute(f"SELECT COUNT(*) FROM llm_calls {count_where_sql}", count_args)
                     total = cur.fetchone()[0]
-                    cur.execute(f"SELECT * FROM llm_calls {where_sql} ORDER BY timestamp DESC LIMIT %s OFFSET %s", tuple(query_args) + (limit, offset))
+                    cur.execute(
+                        f"SELECT * FROM llm_calls {data_where_sql} ORDER BY {data_order_sql} LIMIT %s OFFSET %s",
+                        tuple(data_args) + (limit, data_offset)
+                    )
                     rows = cur.fetchall()
                     calls = [dict(zip([d.name for d in cur.description], r)) for r in rows]
                 else:
-                    cur.execute(f"SELECT COUNT(*) FROM llm_calls {where_sql}", tuple(query_args))
+                    cur.execute(f"SELECT COUNT(*) FROM llm_calls {count_where_sql}", count_args)
                     total = cur.fetchone()[0]
-                    cur.execute(f"SELECT * FROM llm_calls {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?", tuple(query_args) + (limit, offset))
+                    cur.execute(
+                        f"SELECT * FROM llm_calls {data_where_sql} ORDER BY {data_order_sql} LIMIT ? OFFSET ?",
+                        tuple(data_args) + (limit, data_offset)
+                    )
                     calls = [dict(r) for r in cur.fetchall()]
+                if pagination_mode == "cursor" and cursor_direction == "prev":
+                    calls.reverse()
                 
                 flow.response = http.Response.make(
                     200,
