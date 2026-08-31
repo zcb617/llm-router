@@ -2396,6 +2396,9 @@ class LLMRouterAddon:
         flow.metadata["local_response"] = True
 
         path = flow.request.path
+        conn = None
+        cur = None
+        is_pg = False
 
         try:
             # === 控制台 API 路由（优先处理） ===
@@ -2453,15 +2456,7 @@ class LLMRouterAddon:
 
             # 根据配置连接数据库（同步）
             if self.config.database.postgresql:
-                import psycopg2
-                conn = psycopg2.connect(
-                    host=self.config.database.postgresql.host,
-                    port=self.config.database.postgresql.port,
-                    user=self.config.database.postgresql.user,
-                    password=self.config.database.postgresql.password,
-                    database=self.config.database.postgresql.dbname
-                )
-                cur = conn.cursor()
+                conn, cur = self.storage._pg_conn()
                 is_pg = True
             else:
                 import sqlite3
@@ -2582,14 +2577,18 @@ class LLMRouterAddon:
                     {"Content-Type": "application/json"}
                 )
 
-            cur.close()
-            conn.close()
+            if not is_pg:
+                cur.close()
+                conn.close()
         except Exception as e:
             flow.response = http.Response.make(
                 500,
                 json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
                 {"Content-Type": "application/json"}
             )
+        finally:
+            if is_pg and conn is not None:
+                self.storage._pg_close(conn, cur)
 
     def responseheaders(self, flow: http.HTTPFlow):
         """响应头到达时触发（用于计算首字耗时）"""
