@@ -21,6 +21,7 @@
      - llm_calls.outbound_diagnostics
      - llm_calls.is_internal_relay
      - codex_prompt_cache_affinity
+     - PostgreSQL pg_trgm 扩展及模型包含搜索 GIN 索引
   4. 基础内容：
      - 基础表: llm_calls, users, api_keys, model_configs
      - RBAC 表: roles, menus, role_menus, upstreams
@@ -32,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.6"
+CURRENT_VERSION = "1.1.7"
 
 
 def get_pg_conn(config):
@@ -827,6 +828,29 @@ def run_v116_sqlite(conn):
         cur.close()
 
 
+def run_v117_pg(conn):
+    """v1.1.6 -> v1.1.7：启用 pg_trgm 并为模型包含搜索创建 GIN 索引。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_calls_original_model_trgm
+            ON llm_calls USING GIN (original_model gin_trgm_ops)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_calls_overridden_model_trgm
+            ON llm_calls USING GIN (overridden_model gin_trgm_ops)
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v117_sqlite(conn):
+    """v1.1.6 -> v1.1.7：SQLite 不支持 PostgreSQL pg_trgm，跳过模型包含搜索索引。"""
+    print("[v1.1.7] SQLite 不支持 PostgreSQL pg_trgm/GIN 索引，跳过模型包含搜索索引。")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -857,7 +881,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -921,6 +945,12 @@ def main():
             run_v116_pg(conn)
         else:
             run_v116_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", CURRENT_VERSION):
+        print("\n[v1.1.7] 检查/补齐 PostgreSQL pg_trgm 模型包含搜索索引...")
+        if is_pg:
+            run_v117_pg(conn)
+        else:
+            run_v117_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)
