@@ -281,7 +281,7 @@ def test_apply_multi_upstream_route_injects_claude_headers_for_plain_client():
         "/v1/messages",
     )
 
-    assert flow.request.headers["User-Agent"] == "claude-cli/2.1.232 (external, cli)"
+    assert flow.request.headers["User-Agent"] == "claude-cli/2.1.270 (external, cli)"
     assert flow.request.headers["X-Stainless-Package-Version"] == "0.81.0"
     assert flow.request.headers["X-Claude-Code-Session-Id"]
 

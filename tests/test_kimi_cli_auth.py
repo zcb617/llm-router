@@ -7,7 +7,7 @@ from pathlib import Path
 from src.kimi_cli_auth import KimiCliAuthManager, OAuthToken
 
 
-def _prepare_kimi_clone(tmp_path: Path, *, kimi_version: str = "0.37.2") -> Path:
+def _prepare_kimi_clone(tmp_path: Path, *, kimi_version: str = "0.42.0") -> Path:
     root = tmp_path / "repo"
     kimi_dir = root / "kimi-code" / "apps" / "kimi-code"
     kimi_dir.mkdir(parents=True)
@@ -397,7 +397,7 @@ def test_refresh_retries_retryable_status_then_succeeds(monkeypatch, tmp_path: P
     assert token is not None and token.access_token == "new-access"
     assert len(calls) == 2
     assert calls[0][3] == 30.0
-    assert calls[0][2]["User-Agent"] == "kimi-code-cli/0.37.2"
+    assert calls[0][2]["User-Agent"] == "kimi-code-cli/0.42.0"
     assert calls[0][2]["X-Msh-Platform"] == "kimi_code_cli"
     assert (tmp_path / "share" / "oauth" / "kimi-code").is_file()
     assert not (tmp_path / "share" / "oauth" / "kimi-code.lock").exists()

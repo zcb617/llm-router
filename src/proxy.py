@@ -1823,7 +1823,7 @@ class LLMRouterAddon:
         session_id = flow.metadata.get("claude_session_id") or str(uuid.uuid4())
         flow.metadata["claude_session_id"] = session_id
         return {
-            "User-Agent": "claude-cli/2.1.232 (external, cli)",
+            "User-Agent": "claude-cli/2.1.270 (external, cli)",
             "X-Claude-Code-Session-Id": session_id,
             "X-Stainless-Arch": "x64",
             "X-Stainless-Lang": "js",
