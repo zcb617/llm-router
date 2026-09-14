@@ -18,6 +18,7 @@
      - upstreams.auth_mode
      - upstreams.oauth_key
      - upstreams.oauth_host
+     - upstreams.oauth_home
      - llm_calls.outbound_diagnostics
      - llm_calls.is_internal_relay
      - codex_prompt_cache_affinity
@@ -34,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.8"
+CURRENT_VERSION = "1.1.9"
 
 
 def get_pg_conn(config):
@@ -195,6 +196,7 @@ PG_TABLES = [
             auth_mode VARCHAR(32) DEFAULT 'api_key',
             oauth_key VARCHAR(100) DEFAULT 'oauth/kimi-code',
             oauth_host VARCHAR(200) DEFAULT 'https://auth.kimi.com',
+            oauth_home VARCHAR(500) DEFAULT '',
             is_active BOOLEAN DEFAULT true,
             description VARCHAR(200),
             use_claude_features BOOLEAN DEFAULT false,
@@ -336,6 +338,7 @@ SQLITE_TABLES = [
             auth_mode TEXT DEFAULT 'api_key',
             oauth_key TEXT DEFAULT 'oauth/kimi-code',
             oauth_host TEXT DEFAULT 'https://auth.kimi.com',
+            oauth_home TEXT DEFAULT '',
             is_active INTEGER DEFAULT 1,
             description TEXT,
             use_claude_features INTEGER DEFAULT 0,
@@ -891,6 +894,16 @@ def run_v118_sqlite(conn):
         cur.close()
 
 
+def run_v119_pg(conn):
+    """v1.1.8 -> v1.1.9 升级 (PostgreSQL): 上游 kimi-cli token 目录"""
+    _pg_add_column(conn, "upstreams", "oauth_home", "VARCHAR(500) DEFAULT ''")
+
+
+def run_v119_sqlite(conn):
+    """v1.1.8 -> v1.1.9 升级 (SQLite): 上游 kimi-cli token 目录"""
+    _sqlite_add_column(conn, "upstreams", "oauth_home", "TEXT DEFAULT ''")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -921,7 +934,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -991,12 +1004,18 @@ def main():
             run_v117_pg(conn)
         else:
             run_v117_sqlite(conn)
-    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", CURRENT_VERSION):
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", CURRENT_VERSION):
         print("\n[v1.1.8] 检查/补齐调用日志分页过滤与排序索引...")
         if is_pg:
             run_v118_pg(conn)
         else:
             run_v118_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", CURRENT_VERSION):
+        print("\n[v1.1.9] 检查/补齐上游 kimi-cli token 目录字段...")
+        if is_pg:
+            run_v119_pg(conn)
+        else:
+            run_v119_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

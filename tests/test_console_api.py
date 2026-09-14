@@ -241,6 +241,7 @@ class DummyUpstreamStorage:
             "auth_mode": "api_key",
             "oauth_key": "oauth/kimi-code",
             "oauth_host": "https://auth.kimi.com",
+            "oauth_home": "",
             "description": "",
             "is_active": True,
             "use_claude_features": False,
@@ -263,6 +264,7 @@ def test_create_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
         "target_base_url": "https://custom-kimi.example/v1",
         "api_key": "should-be-cleared",
         "auth_mode": "kimi_cli_oauth",
+        "oauth_home": "/custom/.kimi-code",
         "use_claude_features": True,
         "use_roo_features": True,
     })
@@ -277,6 +279,7 @@ def test_create_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
     assert storage.created["target_base_url"] == "https://custom-kimi.example/v1"
     assert storage.created["oauth_key"] == "oauth/kimi-code"
     assert storage.created["oauth_host"] == "https://auth.kimi.com"
+    assert storage.created["oauth_home"] == "/custom/.kimi-code"
     assert storage.created["use_claude_features"] is False
     assert storage.created["use_roo_features"] is False
 
@@ -381,6 +384,7 @@ def test_update_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
         "name": "kimi-updated",
         "target_base_url": "https://custom-kimi.example/v1",
         "auth_mode": "kimi_cli_oauth",
+        "oauth_home": "/custom/.kimi-code",
         "api_key": "should-be-cleared",
         "use_claude_features": True,
         "use_roo_features": True,
@@ -397,6 +401,7 @@ def test_update_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
     assert storage.updated["target_base_url"] == "https://custom-kimi.example/v1"
     assert storage.updated["oauth_key"] == "oauth/kimi-code"
     assert storage.updated["oauth_host"] == "https://auth.kimi.com"
+    assert storage.updated["oauth_home"] == "/custom/.kimi-code"
     assert storage.updated["use_claude_features"] is False
     assert storage.updated["use_roo_features"] is False
 
@@ -406,10 +411,11 @@ def test_check_kimi_token_endpoint_success(monkeypatch, tmp_path: Path):
         def __init__(self, _project_root):
             pass
 
-        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False):
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False, oauth_home=None):
             assert oauth_key == "oauth/kimi-code"
             assert oauth_host == "https://auth.kimi.com"
             assert refresh_if_needed is True
+            assert oauth_home in (None, "")
             return {
                 "available": True,
                 "path": "/home/test/.kimi-code/credentials/kimi-code.json",
@@ -438,7 +444,7 @@ def test_check_kimi_token_endpoint_failure(monkeypatch):
         def __init__(self, _project_root):
             pass
 
-        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False):
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False, oauth_home=None):
             assert oauth_key == "oauth/kimi-code"
             assert oauth_host == "https://auth.kimi.com"
             assert refresh_if_needed is True
@@ -462,6 +468,116 @@ def test_check_kimi_token_endpoint_failure(monkeypatch):
     assert handled is True
     assert flow.response["status"] == 400
     assert payload["reason"] == "token_file_not_found_or_invalid"
+
+
+def test_check_kimi_token_endpoint_passes_oauth_home(monkeypatch):
+    """检测本机 token 时把请求体 oauth_home 传给 inspect_local_token。"""
+    class FakeManager:
+        def __init__(self, _project_root):
+            pass
+
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False, oauth_home=None):
+            assert oauth_home == "/alt/.kimi-code"
+            return {
+                "available": True,
+                "path": "/alt/.kimi-code/credentials/kimi-code.json",
+                "reason": "ok",
+                "expires_at": 1234567890,
+                "seconds_to_expiry": 3600,
+                "has_refresh_token": True,
+                "refresh_attempted": False,
+            }
+
+    fake_module = types.SimpleNamespace(KimiCliAuthManager=FakeManager)
+    monkeypatch.setitem(sys.modules, "src.kimi_cli_auth", fake_module)
+    flow = DummyFlow("POST", {"oauth_key": "oauth/kimi-code", "oauth_home": "/alt/.kimi-code"})
+
+    handled = handle_console_api(flow, DummyUpstreamStorage(), "/api/upstreams/kimi-token/check")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+
+
+def test_get_kimi_oauth_home_returns_default(monkeypatch, tmp_path):
+    """默认 Token 目录接口返回 KIMI_CODE_HOME。"""
+    home = tmp_path / "kimi-home"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(home))
+    flow = DummyFlow("GET", {})
+    handled = handle_console_api(flow, DummyUpstreamStorage(), "/api/upstreams/kimi-oauth-home")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert payload["oauth_home"] == str(home)
+
+
+def test_subscription_quotas_lists_one_card_per_kimi_upstream(monkeypatch):
+    """订阅额度按每条 kimi_cli_oauth 上游出一张卡，不含全局 kimi-cli-oauth。"""
+    class QuotaStorage:
+        def get_all_upstreams(self):
+            return [
+                {"id": 1, "name": "kimi-a", "auth_mode": "kimi_cli_oauth", "oauth_home": "/home-a/.kimi-code"},
+                {"id": 2, "name": "kimi-b", "auth_mode": "kimi_cli_oauth", "oauth_home": "/home-b/.kimi-code"},
+                {"id": 3, "name": "api", "auth_mode": "api_key", "oauth_home": ""},
+            ]
+
+    inspect_homes = []
+    fetch_homes = []
+
+    class FakeManager:
+        def __init__(self, _project_root):
+            pass
+
+        @classmethod
+        def resolve_oauth_home(cls, oauth_home=None):
+            return Path(oauth_home)
+
+        @classmethod
+        def default_oauth_home(cls):
+            return "/default/.kimi-code"
+
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False, oauth_home=None):
+            inspect_homes.append(oauth_home)
+            return {
+                "available": True,
+                "path": f"{oauth_home}/credentials/kimi-code.json",
+                "reason": "ok",
+            }
+
+        def fetch_usage(self, oauth_key=None, oauth_host=None, oauth_home=None):
+            fetch_homes.append(oauth_home)
+            return {
+                "id": "kimi-cli-oauth",
+                "status": "available",
+                "windows": [{"key": "5h", "name": "5小时额度"}],
+            }
+
+    class FakeCodex:
+        def inspect_local_token(self, *, refresh_if_needed=False):
+            return {"available": False, "reason": "test"}
+
+        def fetch_usage(self):
+            return {"id": "codex-cli-oauth", "status": "unavailable", "windows": []}
+
+    fake_module = types.SimpleNamespace(KimiCliAuthManager=FakeManager)
+    monkeypatch.setitem(sys.modules, "src.kimi_cli_auth", fake_module)
+    monkeypatch.setattr("src.codex_cli_auth.CodexCliAuthManager", FakeCodex)
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 1})
+    flow = DummyFlow("GET", {})
+    handled = handle_console_api(flow, QuotaStorage(), "/api/subscription-quotas")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    subscriptions = payload["subscriptions"]
+    kimi_cards = [item for item in subscriptions if str(item.get("id", "")).startswith("kimi-upstream-")]
+    assert len(kimi_cards) == 2
+    assert {item["id"] for item in kimi_cards} == {"kimi-upstream-1", "kimi-upstream-2"}
+    assert {item["name"] for item in kimi_cards} == {"kimi-a", "kimi-b"}
+    assert any(item.get("id") == "codex-cli-oauth" for item in subscriptions)
+    assert all(item.get("id") != "kimi-cli-oauth" for item in subscriptions)
+    assert inspect_homes == ["/home-a/.kimi-code", "/home-b/.kimi-code"]
+    assert fetch_homes == ["/home-a/.kimi-code", "/home-b/.kimi-code"]
 
 
 class DummyKeyStorage:

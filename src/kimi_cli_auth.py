@@ -225,9 +225,26 @@ class KimiCliAuthManager:
     def is_kimi_cli_auth(config: dict) -> bool:
         return (config.get("auth_mode") or "api_key") == "kimi_cli_oauth"
 
-    @staticmethod
-    def _share_dir() -> Path:
-        path = Path(os.getenv("KIMI_CODE_HOME") or Path.home() / ".kimi-code")
+    @classmethod
+    def resolve_oauth_home(cls, oauth_home: Optional[str] = None) -> Path:
+        """解析 kimi-cli token 根目录：显式路径优先，否则 KIMI_CODE_HOME，再回退 ~/.kimi-code。"""
+        raw = (oauth_home or "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        env = (os.getenv("KIMI_CODE_HOME") or "").strip()
+        if env:
+            return Path(env).expanduser()
+        return Path.home() / ".kimi-code"
+
+    @classmethod
+    def default_oauth_home(cls) -> str:
+        """返回服务器当前默认 token 根目录字符串，供控制台表单预填。"""
+        return str(cls.resolve_oauth_home(None))
+
+    @classmethod
+    def _share_dir(cls, oauth_home: Optional[str] = None) -> Path:
+        """确保 token 根目录存在并限制权限后返回该路径。"""
+        path = cls.resolve_oauth_home(oauth_home)
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             os.chmod(path, 0o700)
@@ -236,12 +253,12 @@ class KimiCliAuthManager:
         return path
 
     @classmethod
-    def _device_id_path(cls) -> Path:
-        return cls._share_dir() / "device_id"
+    def _device_id_path(cls, oauth_home: Optional[str] = None) -> Path:
+        return cls._share_dir(oauth_home) / "device_id"
 
     @classmethod
-    def _credentials_dir(cls) -> Path:
-        path = cls._share_dir() / "credentials"
+    def _credentials_dir(cls, oauth_home: Optional[str] = None) -> Path:
+        path = cls._share_dir(oauth_home) / "credentials"
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             os.chmod(path, 0o700)
@@ -250,14 +267,14 @@ class KimiCliAuthManager:
         return path
 
     @classmethod
-    def _credentials_path(cls, oauth_key: str) -> Path:
+    def _credentials_path(cls, oauth_key: str, oauth_home: Optional[str] = None) -> Path:
         name = _credentials_name(oauth_key)
-        return cls._credentials_dir() / f"{name}.json"
+        return cls._credentials_dir(oauth_home) / f"{name}.json"
 
     @classmethod
     @contextmanager
-    def _refresh_file_lock(cls, oauth_key: str):
-        lock_dir = cls._share_dir() / "oauth"
+    def _refresh_file_lock(cls, oauth_key: str, oauth_home: Optional[str] = None):
+        lock_dir = cls._share_dir(oauth_home) / "oauth"
         lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         lock_target = lock_dir / _credentials_name(oauth_key)
         lock_target.touch(exist_ok=True)
@@ -305,8 +322,8 @@ class KimiCliAuthManager:
                 pass
 
     @classmethod
-    def _get_or_create_device_id(cls) -> str:
-        path = cls._device_id_path()
+    def _get_or_create_device_id(cls, oauth_home: Optional[str] = None) -> str:
+        path = cls._device_id_path(oauth_home)
         if path.exists():
             try:
                 existing = path.read_text(encoding="utf-8").strip()
@@ -320,7 +337,7 @@ class KimiCliAuthManager:
         return device_id
 
     @classmethod
-    def _oauth_common_headers(cls, kimi_version: str) -> dict[str, str]:
+    def _oauth_common_headers(cls, kimi_version: str, oauth_home: Optional[str] = None) -> dict[str, str]:
         device_name = platform.node() or socket.gethostname()
         device_model = _device_model()
         headers = {
@@ -330,13 +347,13 @@ class KimiCliAuthManager:
             "X-Msh-Device-Name": device_name,
             "X-Msh-Device-Model": device_model,
             "X-Msh-Os-Version": platform.release(),
-            "X-Msh-Device-Id": cls._get_or_create_device_id(),
+            "X-Msh-Device-Id": cls._get_or_create_device_id(oauth_home),
         }
         return {k: _ascii_header_value(v) for k, v in headers.items()}
 
     @classmethod
-    def _load_token(cls, oauth_key: str) -> Optional[OAuthToken]:
-        path = cls._credentials_path(oauth_key)
+    def _load_token(cls, oauth_key: str, oauth_home: Optional[str] = None) -> Optional[OAuthToken]:
+        path = cls._credentials_path(oauth_key, oauth_home)
         if not path.exists():
             return None
         try:
@@ -348,8 +365,8 @@ class KimiCliAuthManager:
         return OAuthToken.from_dict(payload)
 
     @classmethod
-    def _save_token(cls, oauth_key: str, token: OAuthToken) -> None:
-        path = cls._credentials_path(oauth_key)
+    def _save_token(cls, oauth_key: str, token: OAuthToken, oauth_home: Optional[str] = None) -> None:
+        path = cls._credentials_path(oauth_key, oauth_home)
         fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
         try:
             data = json.dumps(token.to_dict(), ensure_ascii=False).encode("utf-8")
@@ -375,17 +392,17 @@ class KimiCliAuthManager:
             except OSError:
                 pass
 
-    def _refresh_token(self, oauth_key: str, oauth_host: str, refresh_token: str) -> Optional[OAuthToken]:
+    def _refresh_token(self, oauth_key: str, oauth_host: str, refresh_token: str, oauth_home: Optional[str] = None) -> Optional[OAuthToken]:
         url = oauth_host.rstrip("/") + "/api/oauth/token"
-        headers = self._oauth_common_headers(self.kimi_code_version)
+        headers = self._oauth_common_headers(self.kimi_code_version, oauth_home)
         data = {
             "client_id": KIMI_CODE_CLIENT_ID,
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
 
-        with self._refresh_file_lock(oauth_key):
-            latest = self._load_token(oauth_key)
+        with self._refresh_file_lock(oauth_key, oauth_home):
+            latest = self._load_token(oauth_key, oauth_home)
             if latest is None:
                 return None
             if latest.refresh_token != refresh_token:
@@ -415,7 +432,7 @@ class KimiCliAuthManager:
                         token = OAuthToken.from_refresh_response(payload)
                     except (KeyError, TypeError, ValueError, OverflowError):
                         return None
-                    self._save_token(oauth_key, token)
+                    self._save_token(oauth_key, token, oauth_home)
                     return token
 
                 error_code = payload.get("error")
@@ -430,6 +447,7 @@ class KimiCliAuthManager:
                             token_type=latest.token_type,
                             scope=latest.scope,
                         ),
+                        oauth_home,
                     )
                     return None
 
@@ -447,6 +465,7 @@ class KimiCliAuthManager:
         api_key: str,
         oauth_key: str,
         oauth_host: str,
+        oauth_home: Optional[str] = None,
     ) -> str:
         if auth_mode != "kimi_cli_oauth":
             return api_key or ""
@@ -455,7 +474,7 @@ class KimiCliAuthManager:
         oauth_host = (oauth_host or KIMI_DEFAULT_OAUTH_HOST).strip() or KIMI_DEFAULT_OAUTH_HOST
 
         with self._lock:
-            token = self._load_token(oauth_key)
+            token = self._load_token(oauth_key, oauth_home)
             if token is None:
                 return ""
 
@@ -470,7 +489,7 @@ class KimiCliAuthManager:
                 return token.access_token or ""
 
             if token.refresh_token:
-                refreshed = self._refresh_token(oauth_key, oauth_host, token.refresh_token)
+                refreshed = self._refresh_token(oauth_key, oauth_host, token.refresh_token, oauth_home)
                 if refreshed and refreshed.access_token:
                     return refreshed.access_token
             return ""
@@ -481,13 +500,14 @@ class KimiCliAuthManager:
         oauth_host: str = KIMI_DEFAULT_OAUTH_HOST,
         *,
         refresh_if_needed: bool = False,
+        oauth_home: Optional[str] = None,
     ) -> dict:
         """Inspect local Kimi Code credential token file without exposing secrets."""
         oauth_key = (oauth_key or KIMI_DEFAULT_OAUTH_KEY).strip() or KIMI_DEFAULT_OAUTH_KEY
         oauth_host = (oauth_host or KIMI_DEFAULT_OAUTH_HOST).strip() or KIMI_DEFAULT_OAUTH_HOST
-        path = self._credentials_path(oauth_key)
+        path = self._credentials_path(oauth_key, oauth_home)
         with self._lock:
-            token = self._load_token(oauth_key)
+            token = self._load_token(oauth_key, oauth_home)
             now = time.time()
 
             if token is None:
@@ -516,11 +536,11 @@ class KimiCliAuthManager:
             refreshed = False
 
             if should_refresh:
-                refreshed_token = self._refresh_token(oauth_key, oauth_host, token.refresh_token)
+                refreshed_token = self._refresh_token(oauth_key, oauth_host, token.refresh_token, oauth_home)
                 if refreshed_token is not None:
                     token = refreshed_token
                 else:
-                    latest_token = self._load_token(oauth_key)
+                    latest_token = self._load_token(oauth_key, oauth_home)
                     if latest_token is not None:
                         token = latest_token
                 now = time.time()
@@ -561,6 +581,7 @@ class KimiCliAuthManager:
         self,
         oauth_key: str = KIMI_DEFAULT_OAUTH_KEY,
         oauth_host: str = KIMI_DEFAULT_OAUTH_HOST,
+        oauth_home: Optional[str] = None,
     ) -> dict:
         """读取 Kimi Code 订阅额度，不暴露本机 OAuth 凭据。"""
         access_token = self.resolve_access_token(
@@ -568,6 +589,7 @@ class KimiCliAuthManager:
             api_key="",
             oauth_key=oauth_key,
             oauth_host=oauth_host,
+            oauth_home=oauth_home,
         )
         if not access_token:
             raise RuntimeError("本机 Kimi OAuth token 不可用")

@@ -269,6 +269,7 @@ class LLMRouterAddon:
             api_key="",
             oauth_key=cfg.get("oauth_key") or "oauth/kimi-code",
             oauth_host=cfg.get("oauth_host") or "https://auth.kimi.com",
+            oauth_home=cfg.get("oauth_home") or None,
         )
         if not access_token:
             raise RuntimeError("No access token available for kimi_cli_oauth upstream")
@@ -571,6 +572,7 @@ class LLMRouterAddon:
                     "auth_mode": auth_mode,
                     "oauth_key": r.get("oauth_key") or "oauth/kimi-code",
                     "oauth_host": r.get("oauth_host") or "https://auth.kimi.com",
+                    "oauth_home": r.get("oauth_home") or "",
                     "forward_model": r.get("forward_model", ""),
                     "use_claude_features": r.get("use_claude_features", False),
                     "use_roo_features": r.get("use_roo_features", False),
@@ -610,6 +612,7 @@ class LLMRouterAddon:
                             "auth_mode": auth_mode,
                             "oauth_key": cfg.get("oauth_key") or "oauth/kimi-code",
                             "oauth_host": cfg.get("oauth_host") or "https://auth.kimi.com",
+                            "oauth_home": cfg.get("oauth_home") or "",
                             "forward_model": forward_model,
                             "use_claude_features": bool(cfg.get("use_claude_features", False)),
                             "use_roo_features": bool(cfg.get("use_roo_features", False)),

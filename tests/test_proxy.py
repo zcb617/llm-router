@@ -44,7 +44,7 @@ def _make_addon_for_route_tests():
             return (config.get("auth_mode") or "api_key") == "kimi_cli_oauth"
 
         @staticmethod
-        def resolve_access_token(*, auth_mode, api_key, oauth_key, oauth_host):
+        def resolve_access_token(*, auth_mode, api_key, oauth_key, oauth_host, oauth_home=None):
             if auth_mode == "kimi_cli_oauth":
                 return "oauth-token"
             return api_key or ""

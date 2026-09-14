@@ -22,6 +22,8 @@ from src.codex_cli_auth import resolve_codex_base_url
 _MODEL_CONFIG_PATH_RE = re.compile(r'^/api/models/(\d+)$')
 _MODEL_ROUTE_PATH_RE = re.compile(r'^/api/models/(\d+)/routes/(\d+)$')
 _CODEX_MODEL_PATH_RE = re.compile(r'^/api/upstreams/(\d+)/codex-models$')
+# 每条 kimi_cli_oauth 上游额度卡的 id 前缀，后接上游 id
+_KIMI_UPSTREAM_QUOTA_PREFIX = "kimi-upstream-"
 
 
 def _match_model_config_path(path: str):
@@ -224,51 +226,98 @@ def _require_auth(flow) -> Optional[dict]:
     return payload
 
 
-def _load_subscription_quota(subscription_id: str) -> dict:
-    """读取单个本机 OAuth 订阅，失败时返回可独立渲染的卡片数据。"""
-    if subscription_id == "kimi-cli-oauth":
-        from src.kimi_cli_auth import KimiCliAuthManager
+def _load_kimi_upstream_quota(upstream: dict) -> dict:
+    """按单条 kimi_cli_oauth 上游的 token 目录读取额度卡。"""
+    from src.kimi_cli_auth import KimiCliAuthManager
 
-        manager = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
-        token = manager.inspect_local_token(
-            KIMI_DEFAULT_OAUTH_KEY,
-            KIMI_DEFAULT_OAUTH_HOST,
-            refresh_if_needed=True,
-        )
-        name = "Kimi OAuth"
-        loader = lambda: manager.fetch_usage(KIMI_DEFAULT_OAUTH_KEY, KIMI_DEFAULT_OAUTH_HOST)
-    elif subscription_id == "codex-cli-oauth":
-        from src.codex_cli_auth import CodexCliAuthManager
-
-        manager = CodexCliAuthManager()
-        token = manager.inspect_local_token(refresh_if_needed=True)
-        name = "Codex CLI OAuth"
-        loader = manager.fetch_usage
-    else:
-        raise ValueError("未知订阅类型")
-
+    oauth_home = (upstream.get("oauth_home") or "").strip()
+    manager = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
+    token = manager.inspect_local_token(
+        KIMI_DEFAULT_OAUTH_KEY,
+        KIMI_DEFAULT_OAUTH_HOST,
+        refresh_if_needed=True,
+        oauth_home=oauth_home or None,
+    )
+    resolved_home = (
+        KimiCliAuthManager.default_oauth_home()
+        if not oauth_home
+        else str(KimiCliAuthManager.resolve_oauth_home(oauth_home))
+    )
+    card_id = f"{_KIMI_UPSTREAM_QUOTA_PREFIX}{upstream['id']}"
+    name = upstream.get("name") or "Kimi OAuth"
     if not token.get("available"):
         return {
-            "id": subscription_id,
+            "id": card_id,
             "name": name,
+            "oauth_home": resolved_home,
             "status": "unavailable",
             "token": token,
             "windows": [],
             "error": "本机 OAuth token 不可用",
         }
     try:
-        result = loader()
+        result = manager.fetch_usage(
+            KIMI_DEFAULT_OAUTH_KEY,
+            KIMI_DEFAULT_OAUTH_HOST,
+            oauth_home=oauth_home or None,
+        )
+        result["id"] = card_id
+        result["name"] = name
+        result["oauth_home"] = resolved_home
         result["token"] = token
         return result
     except Exception as exc:
         return {
-            "id": subscription_id,
+            "id": card_id,
             "name": name,
+            "oauth_home": resolved_home,
             "status": "error",
             "token": token,
             "windows": [],
             "error": str(exc),
         }
+
+
+def _load_subscription_quota(subscription_id: str, storage=None) -> dict:
+    """读取单个本机 OAuth 订阅，失败时返回可独立渲染的卡片数据。"""
+    if subscription_id == "codex-cli-oauth":
+        from src.codex_cli_auth import CodexCliAuthManager
+
+        manager = CodexCliAuthManager()
+        token = manager.inspect_local_token(refresh_if_needed=True)
+        name = "Codex CLI OAuth"
+        if not token.get("available"):
+            return {
+                "id": subscription_id,
+                "name": name,
+                "status": "unavailable",
+                "token": token,
+                "windows": [],
+                "error": "本机 OAuth token 不可用",
+            }
+        try:
+            result = manager.fetch_usage()
+            result["token"] = token
+            return result
+        except Exception as exc:
+            return {
+                "id": subscription_id,
+                "name": name,
+                "status": "error",
+                "token": token,
+                "windows": [],
+                "error": str(exc),
+            }
+    if subscription_id.startswith(_KIMI_UPSTREAM_QUOTA_PREFIX):
+        try:
+            upstream_id = int(subscription_id[len(_KIMI_UPSTREAM_QUOTA_PREFIX):])
+        except (TypeError, ValueError):
+            raise ValueError("未知订阅类型")
+        upstream = storage.get_upstream(upstream_id)
+        if not upstream or (upstream.get("auth_mode") or "api_key") != "kimi_cli_oauth":
+            raise ValueError("未知订阅类型")
+        return _load_kimi_upstream_quota(upstream)
+    raise ValueError("未知订阅类型")
 
 
 def handle_console_api(flow, storage, path: str, config=None, addon=None):
@@ -604,10 +653,14 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         oauth_host = (body.get("oauth_host") or KIMI_DEFAULT_OAUTH_HOST).strip()
         if not oauth_host:
             oauth_host = KIMI_DEFAULT_OAUTH_HOST
+        oauth_home = body.get("oauth_home")
+        oauth_home = oauth_home.strip() if isinstance(oauth_home, str) else ""
         try:
             from src.kimi_cli_auth import KimiCliAuthManager
             manager = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
-            status = manager.inspect_local_token(oauth_key, oauth_host, refresh_if_needed=True)
+            status = manager.inspect_local_token(
+                oauth_key, oauth_host, refresh_if_needed=True, oauth_home=oauth_home or None
+            )
             if status.get("available"):
                 _json_response(flow, 200, {"message": "检测成功：本机 token 可用", **status})
             else:
@@ -651,6 +704,12 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 502, {"error": f"获取 Codex App Server 模型列表失败: {exc}"})
         return True
 
+    # GET /api/upstreams/kimi-oauth-home - 返回服务器当前默认 token 目录
+    if path == "/api/upstreams/kimi-oauth-home" and flow.request.method == "GET":
+        from src.kimi_cli_auth import KimiCliAuthManager
+        _json_response(flow, 200, {"oauth_home": KimiCliAuthManager.default_oauth_home()})
+        return True
+
     # GET /api/upstreams/{id} - 获取单个上游（返回完整 api_key）
     if path.startswith("/api/upstreams/") and flow.request.method == "GET":
         try:
@@ -682,6 +741,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         auth_mode = (body.get("auth_mode") or "api_key").strip()
         oauth_key = (body.get("oauth_key") or KIMI_DEFAULT_OAUTH_KEY).strip()
         oauth_host = (body.get("oauth_host") or KIMI_DEFAULT_OAUTH_HOST).strip()
+        oauth_home = (body.get("oauth_home") or "").strip() if isinstance(body.get("oauth_home"), str) else ""
 
         if auth_mode not in ("api_key", "kimi_cli_oauth", "codex", "codex_cli_oauth"):
             _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth、codex 或 codex_cli_oauth"})
@@ -711,6 +771,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             api_key=api_key, description=description, is_active=is_active,
             use_claude_features=use_claude_features, use_roo_features=use_roo_features,
             auth_mode=auth_mode, oauth_key=oauth_key, oauth_host=oauth_host,
+            oauth_home=oauth_home,
         )
 
         if addon:
@@ -749,6 +810,10 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         target_base_url = raw_target_base_url
         if isinstance(target_base_url, str):
             target_base_url = target_base_url.strip()
+        if "oauth_home" in body:
+            oauth_home = body.get("oauth_home").strip() if isinstance(body.get("oauth_home"), str) else ""
+        else:
+            oauth_home = None
 
         if effective_auth_mode == "kimi_cli_oauth":
             api_key_value = ""
@@ -796,6 +861,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             auth_mode=auth_mode,
             oauth_key=oauth_key,
             oauth_host=oauth_host,
+            oauth_home=oauth_home,
         )
 
         if updated:
@@ -1261,10 +1327,12 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         payload = _require_auth(flow)
         if not payload:
             return True
-        subscriptions = [
-            _load_subscription_quota("kimi-cli-oauth"),
-            _load_subscription_quota("codex-cli-oauth"),
+        kimi_cards = [
+            _load_kimi_upstream_quota(u)
+            for u in storage.get_all_upstreams()
+            if (u.get("auth_mode") or "api_key") == "kimi_cli_oauth"
         ]
+        subscriptions = kimi_cards + [_load_subscription_quota("codex-cli-oauth")]
         _json_response(flow, 200, {"subscriptions": subscriptions, "fetched_at": int(time.time())})
         return True
 
@@ -1274,7 +1342,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
         subscription_id = path.removeprefix("/api/subscription-quotas/").removesuffix("/refresh")
         try:
-            subscription = _load_subscription_quota(subscription_id)
+            subscription = _load_subscription_quota(subscription_id, storage)
         except ValueError as exc:
             _json_response(flow, 404, {"error": str(exc)})
             return True

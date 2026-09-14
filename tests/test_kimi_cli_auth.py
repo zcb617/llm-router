@@ -120,7 +120,7 @@ def test_resolve_access_token_refreshes_when_near_expiry(monkeypatch, tmp_path: 
 
     manager = KimiCliAuthManager(repo_root)
 
-    def _fake_refresh(_oauth_key: str, _oauth_host: str, _refresh_token: str):
+    def _fake_refresh(_oauth_key: str, _oauth_host: str, _refresh_token: str, _oauth_home=None):
         return OAuthToken(
             access_token="new-access",
             refresh_token="new-refresh",
@@ -307,6 +307,50 @@ def test_share_dir_uses_kimi_code_home(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("KIMI_CODE_HOME", str(current_home))
 
     assert KimiCliAuthManager._share_dir() == current_home
+
+
+def test_share_dir_prefers_explicit_oauth_home(monkeypatch, tmp_path: Path):
+    """显式 oauth_home 优先于 KIMI_CODE_HOME 环境变量。"""
+    monkeypatch.setenv("KIMI_CODE_HOME", str(tmp_path / "env-home"))
+    explicit = tmp_path / "explicit-home"
+
+    assert KimiCliAuthManager._share_dir(str(explicit)) == explicit
+
+
+def test_resolve_access_token_uses_oauth_home_not_env(monkeypatch, tmp_path: Path):
+    """resolve_access_token 按显式目录读 token，不读 KIMI_CODE_HOME。"""
+    repo_root = _prepare_kimi_clone(tmp_path)
+    env_home = tmp_path / "env-home"
+    explicit = tmp_path / "explicit-home"
+    (env_home / "credentials").mkdir(parents=True)
+    (explicit / "credentials").mkdir(parents=True)
+    token_payload = {
+        "refresh_token": "refresh-token",
+        "expires_at": time.time() + 3600,
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "kimi-code",
+    }
+    (env_home / "credentials" / "kimi-code.json").write_text(
+        json.dumps({**token_payload, "access_token": "from-env"}),
+        encoding="utf-8",
+    )
+    (explicit / "credentials" / "kimi-code.json").write_text(
+        json.dumps({**token_payload, "access_token": "from-explicit"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KIMI_CODE_HOME", str(env_home))
+    manager = KimiCliAuthManager(repo_root)
+
+    token = manager.resolve_access_token(
+        auth_mode="kimi_cli_oauth",
+        api_key="fallback-api-key",
+        oauth_key="oauth/kimi-code",
+        oauth_host="https://auth.kimi.com",
+        oauth_home=str(explicit),
+    )
+
+    assert token == "from-explicit"
 
 
 def test_refresh_retries_retryable_status_then_succeeds(monkeypatch, tmp_path: Path):

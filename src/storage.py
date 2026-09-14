@@ -1238,7 +1238,7 @@ class CallStorage:
     def get_all_upstreams(self) -> list:
         """获取所有上游列表"""
         sql = (
-            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, "
+            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, "
             "is_active, description, use_claude_features, use_roo_features, "
             "health_status, consecutive_failures, created_at, updated_at "
             "FROM upstreams ORDER BY name"
@@ -1253,12 +1253,13 @@ class CallStorage:
                         "api_key": r[3], "auth_mode": r[4] or "api_key",
                         "oauth_key": r[5] or "oauth/kimi-code",
                         "oauth_host": r[6] or "https://auth.kimi.com",
-                        "is_active": r[7], "description": r[8],
-                        "use_claude_features": r[9], "use_roo_features": r[10],
-                        "health_status": r[11] or 'healthy',
-                        "consecutive_failures": r[12] or 0,
-                        "created_at": r[13].isoformat() if r[13] else None,
-                        "updated_at": r[14].isoformat() if r[14] else None,
+                        "oauth_home": r[7] or "",
+                        "is_active": r[8], "description": r[9],
+                        "use_claude_features": r[10], "use_roo_features": r[11],
+                        "health_status": r[12] or 'healthy',
+                        "consecutive_failures": r[13] or 0,
+                        "created_at": r[14].isoformat() if r[14] else None,
+                        "updated_at": r[15].isoformat() if r[15] else None,
                     }
                     for r in cur.fetchall()
                 ]
@@ -1275,12 +1276,12 @@ class CallStorage:
     def get_upstream(self, upstream_id: int) -> Optional[dict]:
         """按 ID 获取上游"""
         sql = (
-            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, "
+            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, "
             "is_active, description, use_claude_features, use_roo_features, "
             "health_status, consecutive_failures, created_at, updated_at "
             "FROM upstreams WHERE id = %s"
         ) if self.postgresql else (
-            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, "
+            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, "
             "is_active, description, use_claude_features, use_roo_features, "
             "health_status, consecutive_failures, created_at, updated_at "
             "FROM upstreams WHERE id = ?"
@@ -1296,12 +1297,13 @@ class CallStorage:
                         "api_key": row[3], "auth_mode": row[4] or "api_key",
                         "oauth_key": row[5] or "oauth/kimi-code",
                         "oauth_host": row[6] or "https://auth.kimi.com",
-                        "is_active": row[7], "description": row[8],
-                        "use_claude_features": row[9], "use_roo_features": row[10],
-                        "health_status": row[11] or 'healthy',
-                        "consecutive_failures": row[12] or 0,
-                        "created_at": row[13].isoformat() if row[13] else None,
-                        "updated_at": row[14].isoformat() if row[14] else None,
+                        "oauth_home": row[7] or "",
+                        "is_active": row[8], "description": row[9],
+                        "use_claude_features": row[10], "use_roo_features": row[11],
+                        "health_status": row[12] or 'healthy',
+                        "consecutive_failures": row[13] or 0,
+                        "created_at": row[14].isoformat() if row[14] else None,
+                        "updated_at": row[15].isoformat() if row[15] else None,
                     }
                 return None
             finally:
@@ -1317,7 +1319,7 @@ class CallStorage:
 
     def get_upstream_by_name(self, name: str) -> Optional[dict]:
         """按名称获取上游"""
-        sql = "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, is_active, description FROM upstreams WHERE name = %s" if self.postgresql else \
+        sql = "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, is_active, description FROM upstreams WHERE name = %s" if self.postgresql else \
               "SELECT * FROM upstreams WHERE name = ?"
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -1329,7 +1331,8 @@ class CallStorage:
                             "api_key": row[3], "auth_mode": row[4] or "api_key",
                             "oauth_key": row[5] or "oauth/kimi-code",
                             "oauth_host": row[6] or "https://auth.kimi.com",
-                            "is_active": row[7], "description": row[8]}
+                            "oauth_home": row[7] or "",
+                            "is_active": row[8], "description": row[9]}
                 return None
             finally:
                 self._pg_close(conn, cur)
@@ -1344,7 +1347,7 @@ class CallStorage:
 
     def get_upstream_by_url(self, target_base_url: str) -> Optional[dict]:
         """按 URL 获取上游（用于迁移场景）"""
-        sql = "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, is_active, description FROM upstreams WHERE target_base_url = %s" if self.postgresql else \
+        sql = "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, is_active, description FROM upstreams WHERE target_base_url = %s" if self.postgresql else \
               "SELECT * FROM upstreams WHERE target_base_url = ?"
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -1356,7 +1359,8 @@ class CallStorage:
                             "api_key": row[3], "auth_mode": row[4] or "api_key",
                             "oauth_key": row[5] or "oauth/kimi-code",
                             "oauth_host": row[6] or "https://auth.kimi.com",
-                            "is_active": row[7], "description": row[8]}
+                            "oauth_home": row[7] or "",
+                            "is_active": row[8], "description": row[9]}
                 return None
             finally:
                 self._pg_close(conn, cur)
@@ -1373,16 +1377,16 @@ class CallStorage:
                         description: str = "", is_active: bool = True,
                         use_claude_features: bool = False, use_roo_features: bool = False,
                         auth_mode: str = "api_key", oauth_key: str = "oauth/kimi-code",
-                        oauth_host: str = "https://auth.kimi.com") -> int:
+                        oauth_host: str = "https://auth.kimi.com", oauth_home: str = "") -> int:
         """创建上游，返回 ID"""
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
                 cur.execute(
-                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, description, is_active, use_claude_features, use_roo_features) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, description, is_active, use_claude_features, use_roo_features) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                     (
-                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host,
+                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home,
                         description, is_active, use_claude_features, use_roo_features,
                     )
                 )
@@ -1393,10 +1397,10 @@ class CallStorage:
             conn, cur = self._sqlite_conn()
             try:
                 cur.execute(
-                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, description, is_active, use_claude_features, use_roo_features) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, description, is_active, use_claude_features, use_roo_features) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host,
+                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home,
                         description, int(is_active), int(use_claude_features), int(use_roo_features),
                     )
                 )
@@ -1408,6 +1412,7 @@ class CallStorage:
                         api_key: str = None, description: str = None, is_active: bool = None,
                         use_claude_features: bool = None, use_roo_features: bool = None,
                         auth_mode: str = None, oauth_key: str = None, oauth_host: str = None,
+                        oauth_home: str = None,
                         health_status: str = None, consecutive_failures: int = None) -> bool:
         """更新上游"""
         fields, params = [], []
@@ -1441,6 +1446,9 @@ class CallStorage:
         if oauth_host is not None:
             fields.append("oauth_host = %s" if self.postgresql else "oauth_host = ?")
             params.append(oauth_host)
+        if oauth_home is not None:
+            fields.append("oauth_home = %s" if self.postgresql else "oauth_home = ?")
+            params.append(oauth_home)
         if health_status is not None:
             fields.append("health_status = %s" if self.postgresql else "health_status = ?")
             params.append(health_status)
@@ -1515,20 +1523,21 @@ class CallStorage:
                     "auth_mode": r[5] or "api_key",
                     "oauth_key": r[6] or "oauth/kimi-code",
                     "oauth_host": r[7] or "https://auth.kimi.com",
-                    "model_overrides": r[8],
-                    "forward_model": r[9],
-                    "is_active": r[10], "is_default": r[11],
-                    "use_multi_upstream": bool(r[12]) if r[12] is not None else False,
-                    "protocol_converter": r[13] or None,
-                    "created_at": r[14].isoformat() if r[14] else None,
-                    "updated_at": r[15].isoformat() if r[15] else None,
+                    "oauth_home": r[8] or "",
+                    "model_overrides": r[9],
+                    "forward_model": r[10],
+                    "is_active": r[11], "is_default": r[12],
+                    "use_multi_upstream": bool(r[13]) if r[13] is not None else False,
+                    "protocol_converter": r[14] or None,
+                    "created_at": r[15].isoformat() if r[15] else None,
+                    "updated_at": r[16].isoformat() if r[16] else None,
                 }
-                if len(r) > 16 and r[16] is not None:
-                    d["upstream_name"] = r[16]
                 if len(r) > 17 and r[17] is not None:
-                    d["use_claude_features"] = bool(r[17])
+                    d["upstream_name"] = r[17]
                 if len(r) > 18 and r[18] is not None:
-                    d["use_roo_features"] = bool(r[18])
+                    d["use_claude_features"] = bool(r[18])
+                if len(r) > 19 and r[19] is not None:
+                    d["use_roo_features"] = bool(r[19])
                 return d
             else:
                 d = dict(r)
@@ -1549,14 +1558,14 @@ class CallStorage:
 
         sql = (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
-            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, "
+            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name, u.use_claude_features, u.use_roo_features "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "ORDER BY mc.model_key"
         ) if self.postgresql else (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
-            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, "
+            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
             "u.name as upstream_name, u.use_claude_features, u.use_roo_features FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id ORDER BY mc.model_key"
@@ -2104,7 +2113,7 @@ class CallStorage:
         sql = (
             "SELECT mur.id, mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, "
             "mur.sort_order, mur.is_active, mur.created_at, mur.updated_at, "
-            "u.name as upstream_name, u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features, "
+            "u.name as upstream_name, u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features, "
             "u.health_status "
             "FROM model_upstream_routes mur "
             "JOIN upstreams u ON mur.upstream_id = u.id "
@@ -2112,7 +2121,7 @@ class CallStorage:
         ) if self.postgresql else (
             "SELECT mur.id, mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, "
             "mur.sort_order, mur.is_active, mur.created_at, mur.updated_at, "
-            "u.name as upstream_name, u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features, "
+            "u.name as upstream_name, u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features, "
             "u.health_status "
             "FROM model_upstream_routes mur "
             "JOIN upstreams u ON mur.upstream_id = u.id "
@@ -2135,9 +2144,10 @@ class CallStorage:
                         "auth_mode": r[12] or "api_key",
                         "oauth_key": r[13] or "oauth/kimi-code",
                         "oauth_host": r[14] or "https://auth.kimi.com",
-                        "use_claude_features": bool(r[15]) if r[15] is not None else False,
-                        "use_roo_features": bool(r[16]) if r[16] is not None else False,
-                        "health_status": r[17] or 'healthy',
+                        "oauth_home": r[15] or "",
+                        "use_claude_features": bool(r[16]) if r[16] is not None else False,
+                        "use_roo_features": bool(r[17]) if r[17] is not None else False,
+                        "health_status": r[18] or 'healthy',
                     }
                     for r in cur.fetchall()
                 ]
@@ -2155,7 +2165,7 @@ class CallStorage:
         """获取所有多上游路由（用于 proxy 缓存加载）"""
         sql = (
             "SELECT mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, mur.sort_order, "
-            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features, "
+            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features, "
             "u.health_status, mc.model_key "
             "FROM model_upstream_routes mur "
             "JOIN upstreams u ON mur.upstream_id = u.id "
@@ -2164,7 +2174,7 @@ class CallStorage:
             "ORDER BY mc.model_key, mur.sort_order"
         ) if self.postgresql else (
             "SELECT mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, mur.sort_order, "
-            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features, "
+            "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features, "
             "u.health_status, mc.model_key "
             "FROM model_upstream_routes mur "
             "JOIN upstreams u ON mur.upstream_id = u.id "
@@ -2185,10 +2195,11 @@ class CallStorage:
                         "auth_mode": r[7] or "api_key",
                         "oauth_key": r[8] or "oauth/kimi-code",
                         "oauth_host": r[9] or "https://auth.kimi.com",
-                        "use_claude_features": bool(r[10]) if r[10] is not None else False,
-                        "use_roo_features": bool(r[11]) if r[11] is not None else False,
-                        "health_status": r[12] or 'healthy',
-                        "model_key": r[13],
+                        "oauth_home": r[10] or "",
+                        "use_claude_features": bool(r[11]) if r[11] is not None else False,
+                        "use_roo_features": bool(r[12]) if r[12] is not None else False,
+                        "health_status": r[13] or 'healthy',
+                        "model_key": r[14],
                     }
                     for r in cur.fetchall()
                 ]
@@ -2311,14 +2322,14 @@ class CallStorage:
         """随机获取上游关联的一个模型（优先多上游路由，否则 model_configs），用于健康检查"""
         # 先从多上游路由找
         sql = (
-            "SELECT mur.forward_model, mc.model_key, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features "
+            "SELECT mur.forward_model, mc.model_key, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features "
             "FROM model_upstream_routes mur "
             "JOIN model_configs mc ON mur.model_config_id = mc.id "
             "JOIN upstreams u ON mur.upstream_id = u.id "
             "WHERE mur.upstream_id = %s AND mur.is_active = true AND mc.is_active = true "
             "ORDER BY RANDOM() LIMIT 1"
         ) if self.postgresql else (
-            "SELECT mur.forward_model, mc.model_key, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features "
+            "SELECT mur.forward_model, mc.model_key, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features "
             "FROM model_upstream_routes mur "
             "JOIN model_configs mc ON mur.model_config_id = mc.id "
             "JOIN upstreams u ON mur.upstream_id = u.id "
@@ -2338,8 +2349,9 @@ class CallStorage:
                         "auth_mode": row[3] or "api_key",
                         "oauth_key": row[4] or "oauth/kimi-code",
                         "oauth_host": row[5] or "https://auth.kimi.com",
-                        "use_claude_features": bool(row[6]) if row[6] is not None else False,
-                        "use_roo_features": bool(row[7]) if row[7] is not None else False,
+                        "oauth_home": row[6] or "",
+                        "use_claude_features": bool(row[7]) if row[7] is not None else False,
+                        "use_roo_features": bool(row[8]) if row[8] is not None else False,
                     }
             finally:
                 self._pg_close(conn, cur)
@@ -2356,21 +2368,22 @@ class CallStorage:
                         "auth_mode": row[3] or "api_key",
                         "oauth_key": row[4] or "oauth/kimi-code",
                         "oauth_host": row[5] or "https://auth.kimi.com",
-                        "use_claude_features": bool(row[6]) if row[6] is not None else False,
-                        "use_roo_features": bool(row[7]) if row[7] is not None else False,
+                        "oauth_home": row[6] or "",
+                        "use_claude_features": bool(row[7]) if row[7] is not None else False,
+                        "use_roo_features": bool(row[8]) if row[8] is not None else False,
                     }
             finally:
                 self._sqlite_close(conn, cur)
 
         # 回退：从 model_configs 单上游模式找
         sql2 = (
-            "SELECT mc.model_key, mc.forward_model, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features "
+            "SELECT mc.model_key, mc.forward_model, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features "
             "FROM model_configs mc "
             "JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.upstream_id = %s AND mc.is_active = true AND mc.use_multi_upstream = false "
             "ORDER BY RANDOM() LIMIT 1"
         ) if self.postgresql else (
-            "SELECT mc.model_key, mc.forward_model, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.use_claude_features, u.use_roo_features "
+            "SELECT mc.model_key, mc.forward_model, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, u.use_claude_features, u.use_roo_features "
             "FROM model_configs mc "
             "JOIN upstreams u ON mc.upstream_id = u.id "
             "WHERE mc.upstream_id = ? AND mc.is_active = 1 AND mc.use_multi_upstream = 0 "
@@ -2389,8 +2402,9 @@ class CallStorage:
                         "auth_mode": row[3] or "api_key",
                         "oauth_key": row[4] or "oauth/kimi-code",
                         "oauth_host": row[5] or "https://auth.kimi.com",
-                        "use_claude_features": bool(row[6]) if row[6] is not None else False,
-                        "use_roo_features": bool(row[7]) if row[7] is not None else False,
+                        "oauth_home": row[6] or "",
+                        "use_claude_features": bool(row[7]) if row[7] is not None else False,
+                        "use_roo_features": bool(row[8]) if row[8] is not None else False,
                     }
             finally:
                 self._pg_close(conn, cur)
@@ -2407,8 +2421,9 @@ class CallStorage:
                         "auth_mode": row[3] or "api_key",
                         "oauth_key": row[4] or "oauth/kimi-code",
                         "oauth_host": row[5] or "https://auth.kimi.com",
-                        "use_claude_features": bool(row[6]) if row[6] is not None else False,
-                        "use_roo_features": bool(row[7]) if row[7] is not None else False,
+                        "oauth_home": row[6] or "",
+                        "use_claude_features": bool(row[7]) if row[7] is not None else False,
+                        "use_roo_features": bool(row[8]) if row[8] is not None else False,
                     }
             finally:
                 self._sqlite_close(conn, cur)

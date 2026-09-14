@@ -635,6 +635,12 @@
           </div>
         </div>
         <div id="upstreamOauthConfig" class="hidden space-y-4">
+          <div id="upstreamOauthHomeWrap" class="space-y-1">
+            <label class="block text-sm font-medium mb-1">Token 目录</label>
+            <input id="upstreamOauthHome" type="text" placeholder="~/.kimi-code"
+              class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+            <p class="text-xs text-zinc-500">读取该目录下的 credentials/kimi-code.json</p>
+          </div>
           <div class="flex items-center gap-2">
             <button id="checkKimiTokenBtn" type="button" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition whitespace-nowrap">检测本机 token</button>
             <span id="upstreamOauthTokenStatus" class="text-xs text-zinc-500"></span>
@@ -1822,6 +1828,7 @@ function bindUpstreamTableEvents() {
           const full = await res.json();
           document.getElementById('upstreamApiKey').value = full.api_key || '';
           document.getElementById('upstreamAuthMode').value = full.auth_mode || 'api_key';
+          document.getElementById('upstreamOauthHome').value = full.oauth_home || '';
         } catch(e) {
           document.getElementById('upstreamApiKey').value = '';
         }
@@ -1861,6 +1868,7 @@ document.getElementById('createUpstreamBtn').addEventListener('click', () => {
   document.getElementById('upstreamIsActive').checked = true;
   document.getElementById('upstreamUseClaudeFeatures').checked = false;
   document.getElementById('upstreamUseRooFeatures').checked = false;
+  document.getElementById('upstreamOauthHome').value = '';
   document.getElementById('upstreamEditError').classList.add('hidden');
   setUpstreamOauthTokenStatus('');
   syncUpstreamAuthModeFields();
@@ -1892,9 +1900,24 @@ document.getElementById('upstreamEditModal').addEventListener('click', (e) => {
   }
 });
 
+function fillDefaultOauthHomeIfEmpty() {
+  // 文本框为空时向服务器拉取默认 Token 目录并填入
+  const input = document.getElementById('upstreamOauthHome');
+  if (!input || input.value.trim()) return;
+  fetch('/api/upstreams/kimi-oauth-home', { headers: getAuthHeaders() })
+    .then(res => res.ok ? res.json() : null)
+    .then(data => {
+      if (data && data.oauth_home && !input.value.trim()) {
+        input.value = data.oauth_home;
+      }
+    })
+    .catch(() => {});
+}
+
 function syncUpstreamAuthModeFields() {
   const mode = document.getElementById('upstreamAuthMode').value || 'api_key';
   const oauthWrap = document.getElementById('upstreamOauthConfig');
+  const oauthHomeWrap = document.getElementById('upstreamOauthHomeWrap');
   const baseUrlWrap = document.getElementById('upstreamBaseUrlWrap');
   const baseUrlInput = document.getElementById('upstreamBaseUrl');
   const apiWrap = document.getElementById('upstreamApiKeyWrap');
@@ -1910,9 +1933,12 @@ function syncUpstreamAuthModeFields() {
       baseUrlWrap.classList.remove('hidden');
       baseUrlInput.required = true;
       if (!baseUrlInput.value.trim()) baseUrlInput.value = KIMI_OAUTH_DEFAULT_BASE_URL;
+      if (oauthHomeWrap) oauthHomeWrap.classList.remove('hidden');
+      fillDefaultOauthHomeIfEmpty();
     } else {
       baseUrlWrap.classList.add('hidden');
       baseUrlInput.required = false;
+      if (oauthHomeWrap) oauthHomeWrap.classList.add('hidden');
     }
     apiWrap.classList.add('hidden');
     claudeFeaturesWrap.classList.add('hidden');
@@ -1927,6 +1953,7 @@ function syncUpstreamAuthModeFields() {
     }
   } else {
     oauthWrap.classList.add('hidden');
+    if (oauthHomeWrap) oauthHomeWrap.classList.add('hidden');
     baseUrlWrap.classList.remove('hidden');
     baseUrlInput.required = true;
     apiWrap.classList.remove('hidden');
@@ -1962,7 +1989,7 @@ document.getElementById('checkKimiTokenBtn').addEventListener('click', async (ev
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(authMode === 'codex_cli_oauth' ? {} : { oauth_key: KIMI_OAUTH_DEFAULT_KEY })
+        body: JSON.stringify(authMode === 'codex_cli_oauth' ? {} : { oauth_key: KIMI_OAUTH_DEFAULT_KEY, oauth_home: document.getElementById('upstreamOauthHome').value.trim() })
       });
       const data = await res.json();
       if (res.ok) {
@@ -2015,6 +2042,7 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async (e
       auth_mode: authMode,
       oauth_key: oauthKey,
       oauth_host: oauthHost,
+      oauth_home: isKimiOauth ? document.getElementById('upstreamOauthHome').value.trim() : '',
       description,
       is_active: isActive,
       use_claude_features: useClaudeFeatures,
@@ -2927,6 +2955,7 @@ function renderSubscriptionQuotaCard(subscription) {
       <div>
         <h3 class="font-semibold text-lg">${escapeHtml(subscription.name || subscription.id)}</h3>
         <div class="text-xs text-zinc-500 mt-1">${escapeHtml(tokenText)}</div>
+        ${subscription.oauth_home ? `<div class="text-xs text-zinc-500 font-mono mt-1">${escapeHtml(subscription.oauth_home)}</div>` : ''}
       </div>
       <span class="px-2.5 py-1 rounded-full text-xs font-medium ${statusClass}">${statusText}</span>
     </div>
