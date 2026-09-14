@@ -59,7 +59,7 @@ class StreamRelayServer:
     async def start(self) -> str:
         if self.base_url:
             return self.base_url
-        app = web.Application()
+        app = web.Application(client_max_size=128 * 1024 * 1024)
         app.router.add_route("*", "/stream", self._handle_stream)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
