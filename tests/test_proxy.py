@@ -72,7 +72,7 @@ def _make_addon_for_route_tests():
         def is_codex_cli_oauth(config):
             return (config.get("auth_mode") or "api_key") == "codex_cli_oauth"
 
-        def inspect_local_token(self, *, refresh_if_needed=False):
+        def inspect_local_token(self, *, refresh_if_needed=False, oauth_home=None):
             return {"available": False, "reason": "test"}
 
     addon = LLMRouterAddon.__new__(LLMRouterAddon)
@@ -372,7 +372,7 @@ def test_codex_cli_oauth_preserves_chat_and_responses_paths(monkeypatch):
 
     class DummyCodexAuth:
         @staticmethod
-        def resolve_snapshot(*, refresh_if_needed):
+        def resolve_snapshot(*, refresh_if_needed, oauth_home=None):
             return SimpleNamespace(
                 access_token="oauth-token",
                 account_id="account-1",

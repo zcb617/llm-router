@@ -36,24 +36,32 @@ CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS = 30 * 60
 CODEX_PROMPT_CACHE_AFFINITY_SYNC_INTERVAL_SECONDS = 60
 
 
-def _codex_home() -> Path:
+def resolve_oauth_home(oauth_home: Optional[str] = None) -> Path:
+    """解析 Codex token 目录：显式路径优先，其次 CODEX_HOME，最后 ~/.codex。"""
+    raw = (oauth_home or "").strip()
+    if raw:
+        return Path(raw).expanduser()
     env = (os.getenv("CODEX_HOME") or "").strip()
     if env:
         return Path(env).expanduser()
     return Path.home() / ".codex"
 
 
-def _auth_json_path() -> Path:
-    return _codex_home() / "auth.json"
+def _codex_home() -> Path:
+    return resolve_oauth_home(None)
 
 
-def _config_toml_path() -> Path:
+def _auth_json_path(oauth_home: Optional[str] = None) -> Path:
+    return resolve_oauth_home(oauth_home) / "auth.json"
+
+
+def _config_toml_path(oauth_home: Optional[str] = None) -> Path:
     # Codex loads config from $CODEX_HOME/config.toml
-    return _codex_home() / "config.toml"
+    return resolve_oauth_home(oauth_home) / "config.toml"
 
 
-def _installation_id_path() -> Path:
-    return _codex_home() / "installation_id"
+def _installation_id_path(oauth_home: Optional[str] = None) -> Path:
+    return resolve_oauth_home(oauth_home) / "installation_id"
 
 
 def _parse_top_level_toml_string(text: str, key: str) -> Optional[str]:
@@ -74,12 +82,12 @@ def _parse_top_level_toml_string(text: str, key: str) -> Optional[str]:
     return match.group(1) if match.group(1) is not None else match.group(2)
 
 
-def read_openai_base_url_from_codex_config() -> Optional[str]:
+def read_openai_base_url_from_codex_config(oauth_home: Optional[str] = None) -> Optional[str]:
     """Return openai_base_url from Codex config.toml, or None if missing/empty.
 
     Codex config key: openai_base_url (config_toml.rs / ConfigToml).
     """
-    path = _config_toml_path()
+    path = _config_toml_path(oauth_home)
     if not path.exists():
         return None
     try:
@@ -93,13 +101,13 @@ def read_openai_base_url_from_codex_config() -> Optional[str]:
     return value or None
 
 
-def resolve_codex_base_url() -> str:
+def resolve_codex_base_url(oauth_home: Optional[str] = None) -> str:
     """Base URL for Codex CLI OAuth outbound.
 
     Prefer $CODEX_HOME/config.toml openai_base_url when set and non-empty;
     otherwise use CODEX_CLI_OAUTH_BASE_URL (chatgpt.com/backend-api/codex).
     """
-    configured = read_openai_base_url_from_codex_config()
+    configured = read_openai_base_url_from_codex_config(oauth_home)
     if configured:
         return configured.rstrip("/")
     return CODEX_CLI_OAUTH_BASE_URL
@@ -406,8 +414,8 @@ class CodexCliAuthManager:
     def is_codex_cli_oauth(config: dict) -> bool:
         return (config.get("auth_mode") or "api_key") == "codex_cli_oauth"
 
-    def get_or_create_installation_id(self) -> str:
-        path = _installation_id_path()
+    def get_or_create_installation_id(self, oauth_home: Optional[str] = None) -> str:
+        path = _installation_id_path(oauth_home)
         if path.exists():
             value = path.read_text(encoding="utf-8").strip()
             if value:
@@ -418,8 +426,8 @@ class CodexCliAuthManager:
         _ensure_private_file(path)
         return value
 
-    def _load_auth_json(self) -> Optional[dict]:
-        path = _auth_json_path()
+    def _load_auth_json(self, oauth_home: Optional[str] = None) -> Optional[dict]:
+        path = _auth_json_path(oauth_home)
         if not path.exists():
             return None
         try:
@@ -428,8 +436,8 @@ class CodexCliAuthManager:
             return None
         return payload if isinstance(payload, dict) else None
 
-    def _save_auth_json(self, payload: dict) -> None:
-        path = _auth_json_path()
+    def _save_auth_json(self, payload: dict, oauth_home: Optional[str] = None) -> None:
+        path = _auth_json_path(oauth_home)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
@@ -531,9 +539,9 @@ class CodexCliAuthManager:
             return None
         return data if isinstance(data, dict) else None
 
-    def resolve_snapshot(self, *, refresh_if_needed: bool = True) -> Optional[CodexTokenSnapshot]:
+    def resolve_snapshot(self, *, refresh_if_needed: bool = True, oauth_home: Optional[str] = None) -> Optional[CodexTokenSnapshot]:
         with self._lock:
-            auth = self._load_auth_json()
+            auth = self._load_auth_json(oauth_home)
             if not auth:
                 return None
             snap = self._snapshot_from_auth(auth)
@@ -554,7 +562,7 @@ class CodexCliAuthManager:
                     # ISO-8601-ish timestamp; Codex uses chrono RFC3339.
                     auth["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime())
                     try:
-                        self._save_auth_json(auth)
+                        self._save_auth_json(auth, oauth_home)
                     except OSError:
                         pass
                     snap = self._snapshot_from_auth(auth) or snap
@@ -563,9 +571,9 @@ class CodexCliAuthManager:
                 return None
             return snap
 
-    def inspect_local_token(self, *, refresh_if_needed: bool = False) -> dict:
-        path = _auth_json_path()
-        snap = self.resolve_snapshot(refresh_if_needed=refresh_if_needed)
+    def inspect_local_token(self, *, refresh_if_needed: bool = False, oauth_home: Optional[str] = None) -> dict:
+        path = _auth_json_path(oauth_home)
+        snap = self.resolve_snapshot(refresh_if_needed=refresh_if_needed, oauth_home=oauth_home)
         if snap is None:
             return {
                 "available": False,
@@ -596,9 +604,9 @@ class CodexCliAuthManager:
             "auth_mode": snap.auth_mode,
         }
 
-    def fetch_usage(self) -> dict:
+    def fetch_usage(self, oauth_home: Optional[str] = None) -> dict:
         """主动读取 Codex 订阅额度，并统一为控制台卡片结构。"""
-        snap = self.resolve_snapshot(refresh_if_needed=True)
+        snap = self.resolve_snapshot(refresh_if_needed=True, oauth_home=oauth_home)
         if not snap or not snap.access_token:
             raise RuntimeError("本机 Codex CLI OAuth token 不可用")
 

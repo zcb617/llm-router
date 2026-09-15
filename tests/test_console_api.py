@@ -230,7 +230,34 @@ class DummyUpstreamStorage:
     def __init__(self):
         self.created = None
         self.updated = None
+        self.created_auth_file = None
         self.next_id = 99
+        self.next_auth_file_id = 2
+        self.auth_files = {
+            1: {
+                "id": 1,
+                "name": "kimi-home",
+                "path": "/custom/.kimi-code",
+                "auth_type": "kimi_cli_oauth",
+            }
+        }
+
+    def get_auth_file(self, auth_file_id):
+        return self.auth_files.get(auth_file_id)
+
+    def get_all_auth_files(self, auth_type=None):
+        items = list(self.auth_files.values())
+        if auth_type:
+            items = [item for item in items if item["auth_type"] == auth_type]
+        return items
+
+    def create_auth_file(self, name, path, auth_type):
+        auth_file_id = self.next_auth_file_id
+        self.next_auth_file_id += 1
+        item = {"id": auth_file_id, "name": name, "path": path, "auth_type": auth_type}
+        self.auth_files[auth_file_id] = item
+        self.created_auth_file = item
+        return auth_file_id
 
     def get_upstream(self, upstream_id):
         return {
@@ -242,6 +269,7 @@ class DummyUpstreamStorage:
             "oauth_key": "oauth/kimi-code",
             "oauth_host": "https://auth.kimi.com",
             "oauth_home": "",
+            "auth_file_id": None,
             "description": "",
             "is_active": True,
             "use_claude_features": False,
@@ -264,7 +292,7 @@ def test_create_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
         "target_base_url": "https://custom-kimi.example/v1",
         "api_key": "should-be-cleared",
         "auth_mode": "kimi_cli_oauth",
-        "oauth_home": "/custom/.kimi-code",
+        "auth_file_id": 1,
         "use_claude_features": True,
         "use_roo_features": True,
     })
@@ -280,6 +308,7 @@ def test_create_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
     assert storage.created["oauth_key"] == "oauth/kimi-code"
     assert storage.created["oauth_host"] == "https://auth.kimi.com"
     assert storage.created["oauth_home"] == "/custom/.kimi-code"
+    assert storage.created["auth_file_id"] == 1
     assert storage.created["use_claude_features"] is False
     assert storage.created["use_roo_features"] is False
 
@@ -290,6 +319,7 @@ def test_create_kimi_oauth_upstream_defaults_base_url(monkeypatch):
         "name": "kimi",
         "target_base_url": "",
         "auth_mode": "kimi_cli_oauth",
+        "auth_file_id": 1,
     })
     storage = DummyUpstreamStorage()
 
@@ -384,7 +414,7 @@ def test_update_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
         "name": "kimi-updated",
         "target_base_url": "https://custom-kimi.example/v1",
         "auth_mode": "kimi_cli_oauth",
-        "oauth_home": "/custom/.kimi-code",
+        "auth_file_id": 1,
         "api_key": "should-be-cleared",
         "use_claude_features": True,
         "use_roo_features": True,
@@ -402,6 +432,8 @@ def test_update_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
     assert storage.updated["oauth_key"] == "oauth/kimi-code"
     assert storage.updated["oauth_host"] == "https://auth.kimi.com"
     assert storage.updated["oauth_home"] == "/custom/.kimi-code"
+    assert storage.updated["auth_file_id"] == 1
+    assert storage.updated["update_auth_file_id"] is True
     assert storage.updated["use_claude_features"] is False
     assert storage.updated["use_roo_features"] is False
 
@@ -511,18 +543,108 @@ def test_get_kimi_oauth_home_returns_default(monkeypatch, tmp_path):
     assert payload["oauth_home"] == str(home)
 
 
-def test_subscription_quotas_lists_one_card_per_kimi_upstream(monkeypatch):
-    """订阅额度按每条 kimi_cli_oauth 上游出一张卡，不含全局 kimi-cli-oauth。"""
+def test_create_oauth_upstream_requires_auth_file_id():
+    """OAuth 上游未选认证文件时保存失败。"""
+    flow = DummyFlow("POST", {
+        "name": "kimi",
+        "auth_mode": "kimi_cli_oauth",
+    })
+    storage = DummyUpstreamStorage()
+    handled = handle_console_api(flow, storage, "/api/upstreams")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert payload["error"] == "请选择认证目录"
+    assert storage.created is None
+
+
+def test_create_oauth_upstream_rejects_mismatched_auth_file_type():
+    """Kimi 上游不能绑定 Codex 认证文件。"""
+    storage = DummyUpstreamStorage()
+    storage.auth_files[2] = {
+        "id": 2,
+        "name": "codex-home",
+        "path": "/custom/.codex",
+        "auth_type": "codex_cli_oauth",
+    }
+    flow = DummyFlow("POST", {
+        "name": "kimi",
+        "auth_mode": "kimi_cli_oauth",
+        "auth_file_id": 2,
+    })
+    handled = handle_console_api(flow, storage, "/api/upstreams")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert payload["error"] == "认证文件类型与认证方式不匹配"
+    assert storage.created is None
+
+
+def test_create_auth_file_requires_name_path_and_type(monkeypatch):
+    """创建认证文件时名称、路径、类型均必填。"""
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 1})
+    storage = DummyUpstreamStorage()
+    flow = DummyFlow("POST", {"name": "kimi-home", "path": "", "auth_type": "kimi_cli_oauth"})
+    handled = handle_console_api(flow, storage, "/api/auth-files")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert "不能为空" in payload["error"]
+    assert storage.created_auth_file is None
+
+
+def test_create_auth_file_rejects_invalid_type(monkeypatch):
+    """认证文件类型必须是 kimi_cli_oauth 或 codex_cli_oauth。"""
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 1})
+    storage = DummyUpstreamStorage()
+    flow = DummyFlow("POST", {"name": "bad", "path": "/tmp/x", "auth_type": "api_key"})
+    handled = handle_console_api(flow, storage, "/api/auth-files")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert "认证类型" in payload["error"]
+    assert storage.created_auth_file is None
+
+
+def test_create_auth_file_success(monkeypatch):
+    """认证文件三项齐全时创建成功。"""
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 1})
+    storage = DummyUpstreamStorage()
+    flow = DummyFlow("POST", {
+        "name": "codex-home",
+        "path": "/custom/.codex",
+        "auth_type": "codex_cli_oauth",
+    })
+    handled = handle_console_api(flow, storage, "/api/auth-files")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert payload["id"] == 2
+    assert storage.created_auth_file["name"] == "codex-home"
+    assert storage.created_auth_file["path"] == "/custom/.codex"
+    assert storage.created_auth_file["auth_type"] == "codex_cli_oauth"
+
+
+def test_subscription_quotas_lists_one_card_per_auth_file(monkeypatch):
+    """订阅额度按认证文件出卡，不再按上游或全局 Codex 出卡。"""
     class QuotaStorage:
-        def get_all_upstreams(self):
+        def get_all_auth_files(self, auth_type=None):
             return [
-                {"id": 1, "name": "kimi-a", "auth_mode": "kimi_cli_oauth", "oauth_home": "/home-a/.kimi-code"},
-                {"id": 2, "name": "kimi-b", "auth_mode": "kimi_cli_oauth", "oauth_home": "/home-b/.kimi-code"},
-                {"id": 3, "name": "api", "auth_mode": "api_key", "oauth_home": ""},
+                {"id": 1, "name": "kimi-a", "path": "/home-a/.kimi-code", "auth_type": "kimi_cli_oauth"},
+                {"id": 2, "name": "kimi-b", "path": "/home-b/.kimi-code", "auth_type": "kimi_cli_oauth"},
             ]
+
+        def get_all_upstreams(self):
+            raise AssertionError("额度列表不应再扫描上游")
 
     inspect_homes = []
     fetch_homes = []
+    codex_called = []
 
     class FakeManager:
         def __init__(self, _project_root):
@@ -553,10 +675,12 @@ def test_subscription_quotas_lists_one_card_per_kimi_upstream(monkeypatch):
             }
 
     class FakeCodex:
-        def inspect_local_token(self, *, refresh_if_needed=False):
+        def inspect_local_token(self, *, refresh_if_needed=False, oauth_home=None):
+            codex_called.append(("inspect", oauth_home))
             return {"available": False, "reason": "test"}
 
-        def fetch_usage(self):
+        def fetch_usage(self, oauth_home=None):
+            codex_called.append(("fetch", oauth_home))
             return {"id": "codex-cli-oauth", "status": "unavailable", "windows": []}
 
     fake_module = types.SimpleNamespace(KimiCliAuthManager=FakeManager)
@@ -570,14 +694,87 @@ def test_subscription_quotas_lists_one_card_per_kimi_upstream(monkeypatch):
     assert handled is True
     assert flow.response["status"] == 200
     subscriptions = payload["subscriptions"]
-    kimi_cards = [item for item in subscriptions if str(item.get("id", "")).startswith("kimi-upstream-")]
-    assert len(kimi_cards) == 2
-    assert {item["id"] for item in kimi_cards} == {"kimi-upstream-1", "kimi-upstream-2"}
-    assert {item["name"] for item in kimi_cards} == {"kimi-a", "kimi-b"}
-    assert any(item.get("id") == "codex-cli-oauth" for item in subscriptions)
-    assert all(item.get("id") != "kimi-cli-oauth" for item in subscriptions)
+    assert [item["id"] for item in subscriptions] == ["auth-file-1", "auth-file-2"]
+    assert {item["name"] for item in subscriptions} == {"kimi-a", "kimi-b"}
+    assert all(not str(item.get("id", "")).startswith("kimi-upstream-") for item in subscriptions)
+    assert all(item.get("id") != "codex-cli-oauth" for item in subscriptions)
     assert inspect_homes == ["/home-a/.kimi-code", "/home-b/.kimi-code"]
     assert fetch_homes == ["/home-a/.kimi-code", "/home-b/.kimi-code"]
+    assert codex_called == []
+
+
+def test_subscription_quotas_two_auth_files_same_type_fetch_twice(monkeypatch):
+    """同类型不同路径的两条认证文件各自出卡并各拉一次额度。"""
+    class QuotaStorage:
+        def get_all_auth_files(self, auth_type=None):
+            return [
+                {"id": 1, "name": "kimi-a", "path": "/home-a/.kimi-code", "auth_type": "kimi_cli_oauth"},
+                {"id": 2, "name": "kimi-b", "path": "/home-b/.kimi-code", "auth_type": "kimi_cli_oauth"},
+            ]
+
+    fetch_homes = []
+
+    class FakeManager:
+        def __init__(self, _project_root):
+            pass
+
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False, oauth_home=None):
+            return {"available": True, "path": f"{oauth_home}/credentials/kimi-code.json", "reason": "ok"}
+
+        def fetch_usage(self, oauth_key=None, oauth_host=None, oauth_home=None):
+            fetch_homes.append(oauth_home)
+            return {"id": "kimi-cli-oauth", "status": "available", "windows": []}
+
+    fake_module = types.SimpleNamespace(KimiCliAuthManager=FakeManager)
+    monkeypatch.setitem(sys.modules, "src.kimi_cli_auth", fake_module)
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 1})
+    flow = DummyFlow("GET", {})
+    handled = handle_console_api(flow, QuotaStorage(), "/api/subscription-quotas")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert [item["id"] for item in payload["subscriptions"]] == ["auth-file-1", "auth-file-2"]
+    assert fetch_homes == ["/home-a/.kimi-code", "/home-b/.kimi-code"]
+
+
+def test_refresh_subscription_quota_uses_auth_file(monkeypatch):
+    """刷新 auth-file-{id} 额度时按认证文件 ID 读取。"""
+    class QuotaStorage:
+        def __init__(self):
+            self.got = None
+
+        def get_auth_file(self, auth_file_id):
+            self.got = auth_file_id
+            return {
+                "id": 1,
+                "name": "kimi-home",
+                "path": "/home-a/.kimi-code",
+                "auth_type": "kimi_cli_oauth",
+            }
+
+    class FakeManager:
+        def __init__(self, _project_root):
+            pass
+
+        def inspect_local_token(self, oauth_key, oauth_host, refresh_if_needed=False, oauth_home=None):
+            return {"available": True, "path": f"{oauth_home}/credentials/kimi-code.json", "reason": "ok"}
+
+        def fetch_usage(self, oauth_key=None, oauth_host=None, oauth_home=None):
+            return {"id": "kimi-cli-oauth", "status": "available", "windows": []}
+
+    fake_module = types.SimpleNamespace(KimiCliAuthManager=FakeManager)
+    monkeypatch.setitem(sys.modules, "src.kimi_cli_auth", fake_module)
+    monkeypatch.setattr("src.console_api._require_auth", lambda _flow: {"user_id": 1})
+    storage = QuotaStorage()
+    flow = DummyFlow("POST", {})
+    handled = handle_console_api(flow, storage, "/api/subscription-quotas/auth-file-1/refresh")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.got == 1
+    assert payload["subscription"]["id"] == "auth-file-1"
 
 
 class DummyKeyStorage:

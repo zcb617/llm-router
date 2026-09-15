@@ -248,8 +248,8 @@ class LLMRouterAddon:
         if self._is_kimi_cli_auth(cfg):
             return cfg.get("target_base_url") or KIMI_CLI_OAUTH_BASE_URL
         if self._is_codex_cli_oauth(cfg):
-            # Prefer ~/.codex/config.toml openai_base_url; fallback to Codex default.
-            return resolve_codex_base_url()
+            # Prefer 指定 oauth_home 的 config.toml openai_base_url; fallback to Codex default.
+            return resolve_codex_base_url(oauth_home=cfg.get("oauth_home") or None)
         return cfg.get("target_base_url", "")
 
     @staticmethod
@@ -562,7 +562,7 @@ class LLMRouterAddon:
                 if auth_mode == "kimi_cli_oauth":
                     target_base_url = r.get("target_base_url") or KIMI_CLI_OAUTH_BASE_URL
                 elif auth_mode == "codex_cli_oauth":
-                    target_base_url = resolve_codex_base_url()
+                    target_base_url = resolve_codex_base_url(oauth_home=r.get("oauth_home") or None)
                 else:
                     target_base_url = r["target_base_url"]
                 routes_by_model[mk].append({
@@ -601,7 +601,7 @@ class LLMRouterAddon:
                         if auth_mode == "kimi_cli_oauth":
                             target_base_url = target_base_url or KIMI_CLI_OAUTH_BASE_URL
                         elif auth_mode == "codex_cli_oauth":
-                            target_base_url = resolve_codex_base_url()
+                            target_base_url = resolve_codex_base_url(oauth_home=cfg.get("oauth_home") or None)
                         elif not target_base_url:
                             continue
 
@@ -1214,7 +1214,7 @@ class LLMRouterAddon:
         """Codex CLI OAuth 专用通道：Rust 出站 + 严格 Codex CLI 请求头/地址。"""
         forward_model = (mapping.get("forward_model") or model_name or "").strip()
         try:
-            snap = self._codex_cli_auth.resolve_snapshot(refresh_if_needed=True)
+            snap = self._codex_cli_auth.resolve_snapshot(refresh_if_needed=True, oauth_home=mapping.get("oauth_home") or None)
             if not snap or not snap.access_token:
                 raise RuntimeError(
                     "No Codex CLI OAuth token available. Sign in with `codex login` "
@@ -1776,7 +1776,7 @@ class LLMRouterAddon:
         if self._is_codex_cli_oauth(model_info):
             # Token presence is the health signal; full models probe is expensive.
             try:
-                status = self._codex_cli_auth.inspect_local_token(refresh_if_needed=False)
+                status = self._codex_cli_auth.inspect_local_token(refresh_if_needed=False, oauth_home=model_info.get("oauth_home") or None)
             except Exception as e:
                 logger.warning(f"Health check skipped for codex_cli_oauth: {e}")
                 return []

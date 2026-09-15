@@ -22,8 +22,10 @@ from src.codex_cli_auth import resolve_codex_base_url
 _MODEL_CONFIG_PATH_RE = re.compile(r'^/api/models/(\d+)$')
 _MODEL_ROUTE_PATH_RE = re.compile(r'^/api/models/(\d+)/routes/(\d+)$')
 _CODEX_MODEL_PATH_RE = re.compile(r'^/api/upstreams/(\d+)/codex-models$')
-# 每条 kimi_cli_oauth 上游额度卡的 id 前缀，后接上游 id
-_KIMI_UPSTREAM_QUOTA_PREFIX = "kimi-upstream-"
+_AUTH_FILE_PATH_RE = re.compile(r'^/api/auth-files/(\d+)$')
+# 每条认证文件额度卡的 id 前缀，后接认证文件 id
+_AUTH_FILE_QUOTA_PREFIX = "auth-file-"
+_AUTH_FILE_TYPES = ("kimi_cli_oauth", "codex_cli_oauth")
 
 
 def _match_model_config_path(path: str):
@@ -226,98 +228,125 @@ def _require_auth(flow) -> Optional[dict]:
     return payload
 
 
-def _load_kimi_upstream_quota(upstream: dict) -> dict:
-    """按单条 kimi_cli_oauth 上游的 token 目录读取额度卡。"""
-    from src.kimi_cli_auth import KimiCliAuthManager
+def _load_auth_file_quota(auth_file: dict) -> dict:
+    """按认证文件读取一张订阅额度卡，不再按上游条数出卡。"""
+    card_id = f"{_AUTH_FILE_QUOTA_PREFIX}{auth_file['id']}"
+    name = auth_file.get("name") or "认证文件"
+    oauth_home = (auth_file.get("path") or "").strip()
+    auth_type = auth_file.get("auth_type")
+    if auth_type == "kimi_cli_oauth":
+        from src.kimi_cli_auth import KimiCliAuthManager
 
-    oauth_home = (upstream.get("oauth_home") or "").strip()
-    manager = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
-    token = manager.inspect_local_token(
-        KIMI_DEFAULT_OAUTH_KEY,
-        KIMI_DEFAULT_OAUTH_HOST,
-        refresh_if_needed=True,
-        oauth_home=oauth_home or None,
-    )
-    resolved_home = (
-        KimiCliAuthManager.default_oauth_home()
-        if not oauth_home
-        else str(KimiCliAuthManager.resolve_oauth_home(oauth_home))
-    )
-    card_id = f"{_KIMI_UPSTREAM_QUOTA_PREFIX}{upstream['id']}"
-    name = upstream.get("name") or "Kimi OAuth"
-    if not token.get("available"):
-        return {
-            "id": card_id,
-            "name": name,
-            "oauth_home": resolved_home,
-            "status": "unavailable",
-            "token": token,
-            "windows": [],
-            "error": "本机 OAuth token 不可用",
-        }
-    try:
-        result = manager.fetch_usage(
+        manager = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
+        token = manager.inspect_local_token(
             KIMI_DEFAULT_OAUTH_KEY,
             KIMI_DEFAULT_OAUTH_HOST,
+            refresh_if_needed=True,
             oauth_home=oauth_home or None,
         )
-        result["id"] = card_id
-        result["name"] = name
-        result["oauth_home"] = resolved_home
-        result["token"] = token
-        return result
-    except Exception as exc:
-        return {
-            "id": card_id,
-            "name": name,
-            "oauth_home": resolved_home,
-            "status": "error",
-            "token": token,
-            "windows": [],
-            "error": str(exc),
-        }
-
-
-def _load_subscription_quota(subscription_id: str, storage=None) -> dict:
-    """读取单个本机 OAuth 订阅，失败时返回可独立渲染的卡片数据。"""
-    if subscription_id == "codex-cli-oauth":
-        from src.codex_cli_auth import CodexCliAuthManager
-
-        manager = CodexCliAuthManager()
-        token = manager.inspect_local_token(refresh_if_needed=True)
-        name = "Codex CLI OAuth"
         if not token.get("available"):
             return {
-                "id": subscription_id,
+                "id": card_id,
                 "name": name,
+                "oauth_home": oauth_home,
                 "status": "unavailable",
                 "token": token,
                 "windows": [],
                 "error": "本机 OAuth token 不可用",
             }
         try:
-            result = manager.fetch_usage()
+            result = manager.fetch_usage(
+                KIMI_DEFAULT_OAUTH_KEY,
+                KIMI_DEFAULT_OAUTH_HOST,
+                oauth_home=oauth_home or None,
+            )
+            result["id"] = card_id
+            result["name"] = name
+            result["oauth_home"] = oauth_home
             result["token"] = token
             return result
         except Exception as exc:
             return {
-                "id": subscription_id,
+                "id": card_id,
                 "name": name,
+                "oauth_home": oauth_home,
                 "status": "error",
                 "token": token,
                 "windows": [],
                 "error": str(exc),
             }
-    if subscription_id.startswith(_KIMI_UPSTREAM_QUOTA_PREFIX):
+    if auth_type == "codex_cli_oauth":
+        from src.codex_cli_auth import CodexCliAuthManager
+
+        manager = CodexCliAuthManager()
+        token = manager.inspect_local_token(refresh_if_needed=True, oauth_home=oauth_home or None)
+        if not token.get("available"):
+            return {
+                "id": card_id,
+                "name": name,
+                "oauth_home": oauth_home,
+                "status": "unavailable",
+                "token": token,
+                "windows": [],
+                "error": "本机 OAuth token 不可用",
+            }
         try:
-            upstream_id = int(subscription_id[len(_KIMI_UPSTREAM_QUOTA_PREFIX):])
+            result = manager.fetch_usage(oauth_home=oauth_home or None)
+            result["id"] = card_id
+            result["name"] = name
+            result["oauth_home"] = oauth_home
+            result["token"] = token
+            return result
+        except Exception as exc:
+            return {
+                "id": card_id,
+                "name": name,
+                "oauth_home": oauth_home,
+                "status": "error",
+                "token": token,
+                "windows": [],
+                "error": str(exc),
+            }
+    return {
+        "id": card_id,
+        "name": name,
+        "oauth_home": oauth_home,
+        "status": "error",
+        "token": {},
+        "windows": [],
+        "error": "未知认证类型",
+    }
+
+
+def _load_subscription_quota(subscription_id: str, storage=None) -> dict:
+    """读取单个认证文件订阅，失败时返回可独立渲染的卡片数据。"""
+    if subscription_id.startswith(_AUTH_FILE_QUOTA_PREFIX):
+        try:
+            auth_file_id = int(subscription_id[len(_AUTH_FILE_QUOTA_PREFIX):])
         except (TypeError, ValueError):
             raise ValueError("未知订阅类型")
-        upstream = storage.get_upstream(upstream_id)
-        if not upstream or (upstream.get("auth_mode") or "api_key") != "kimi_cli_oauth":
+        auth_file = storage.get_auth_file(auth_file_id)
+        if not auth_file:
             raise ValueError("未知订阅类型")
-        return _load_kimi_upstream_quota(upstream)
+        return _load_auth_file_quota(auth_file)
     raise ValueError("未知订阅类型")
+
+
+def _resolve_upstream_auth_file(storage, body: dict, effective_auth_mode: str):
+    """OAuth 上游必须绑定同类型认证文件，返回 (auth_file_id, oauth_home, error)。"""
+    if effective_auth_mode not in ("kimi_cli_oauth", "codex_cli_oauth"):
+        return None, "", None
+    raw_id = body.get("auth_file_id")
+    try:
+        auth_file_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None, "", "请选择认证目录"
+    auth_file = storage.get_auth_file(auth_file_id)
+    if not auth_file:
+        return None, "", "认证文件不存在"
+    if auth_file.get("auth_type") != effective_auth_mode:
+        return None, "", "认证文件类型与认证方式不匹配"
+    return auth_file_id, auth_file.get("path") or "", None
 
 
 def handle_console_api(flow, storage, path: str, config=None, addon=None):
@@ -632,6 +661,105 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 404, {"error": "密钥不存在或无权删除"})
         return True
 
+    # ========== 认证文件 API ==========
+
+    # GET /api/auth-files - 获取全部认证文件
+    if path == "/api/auth-files" and flow.request.method == "GET":
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+        auth_files = storage.get_all_auth_files()
+        _json_response(flow, 200, {"auth_files": auth_files})
+        return True
+
+    # POST /api/auth-files - 创建认证文件
+    if path == "/api/auth-files" and flow.request.method == "POST":
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+        body = _extract_body(flow)
+        if not body:
+            _json_response(flow, 400, {"error": "请求体格式错误"})
+            return True
+        name = body.get("name", "").strip() if isinstance(body.get("name"), str) else ""
+        path_value = body.get("path", "").strip() if isinstance(body.get("path"), str) else ""
+        auth_type = body.get("auth_type", "").strip() if isinstance(body.get("auth_type"), str) else ""
+        if not name or not path_value or not auth_type:
+            _json_response(flow, 400, {"error": "名称、路径、类型不能为空"})
+            return True
+        if auth_type not in _AUTH_FILE_TYPES:
+            _json_response(flow, 400, {"error": "认证类型仅支持 kimi_cli_oauth 或 codex_cli_oauth"})
+            return True
+        auth_file_id = storage.create_auth_file(name=name, path=path_value, auth_type=auth_type)
+        _json_response(flow, 200, {"message": "认证文件创建成功", "id": auth_file_id})
+        return True
+
+    auth_file_match = _AUTH_FILE_PATH_RE.match(path)
+    if auth_file_match:
+        payload = _require_auth(flow)
+        if not payload:
+            return True
+        auth_file_id = int(auth_file_match.group(1))
+        if flow.request.method == "GET":
+            auth_file = storage.get_auth_file(auth_file_id)
+            if auth_file:
+                _json_response(flow, 200, auth_file)
+            else:
+                _json_response(flow, 404, {"error": "认证文件不存在"})
+            return True
+        if flow.request.method == "PUT":
+            body = _extract_body(flow)
+            if not body:
+                _json_response(flow, 400, {"error": "请求体格式错误"})
+                return True
+            name = None
+            path_value = None
+            auth_type = None
+            if "name" in body:
+                name = body.get("name").strip() if isinstance(body.get("name"), str) else ""
+                if not name:
+                    _json_response(flow, 400, {"error": "名称不能为空"})
+                    return True
+            if "path" in body:
+                path_value = body.get("path").strip() if isinstance(body.get("path"), str) else ""
+                if not path_value:
+                    _json_response(flow, 400, {"error": "路径不能为空"})
+                    return True
+            if "auth_type" in body:
+                auth_type = body.get("auth_type").strip() if isinstance(body.get("auth_type"), str) else ""
+                if not auth_type:
+                    _json_response(flow, 400, {"error": "类型不能为空"})
+                    return True
+                if auth_type not in _AUTH_FILE_TYPES:
+                    _json_response(flow, 400, {"error": "认证类型仅支持 kimi_cli_oauth 或 codex_cli_oauth"})
+                    return True
+            existing = storage.get_auth_file(auth_file_id)
+            if not existing:
+                _json_response(flow, 404, {"error": "认证文件不存在"})
+                return True
+            updated = storage.update_auth_file(
+                auth_file_id, name=name, path=path_value, auth_type=auth_type
+            )
+            if updated:
+                _json_response(flow, 200, {"message": "认证文件更新成功"})
+            else:
+                _json_response(flow, 404, {"error": "认证文件不存在"})
+            return True
+        if flow.request.method == "DELETE":
+            existing = storage.get_auth_file(auth_file_id)
+            if not existing:
+                _json_response(flow, 404, {"error": "认证文件不存在"})
+                return True
+            if storage.count_upstreams_for_auth_file(auth_file_id) > 0:
+                _json_response(flow, 400, {"error": "该认证文件已被上游引用，无法删除"})
+                return True
+            deleted = storage.delete_auth_file(auth_file_id)
+            if deleted:
+                _json_response(flow, 200, {"message": "认证文件删除成功"})
+            else:
+                _json_response(flow, 404, {"error": "认证文件不存在"})
+            return True
+
     # ========== 上游管理 API ==========
 
     # GET /api/upstreams - 获取所有上游
@@ -671,11 +799,14 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
 
     # POST /api/upstreams/codex-token/check - 检测服务器本机 Codex CLI OAuth token
     if path == "/api/upstreams/codex-token/check" and flow.request.method == "POST":
+        body = _extract_body(flow) or {}
+        oauth_home = body.get("oauth_home")
+        oauth_home = oauth_home.strip() if isinstance(oauth_home, str) else ""
         try:
             from src.codex_cli_auth import CodexCliAuthManager
 
             manager = CodexCliAuthManager()
-            status = manager.inspect_local_token(refresh_if_needed=True)
+            status = manager.inspect_local_token(refresh_if_needed=True, oauth_home=oauth_home or None)
             if status.get("available"):
                 _json_response(flow, 200, {"message": "检测成功：本机 Codex token 可用", **status})
             else:
@@ -741,7 +872,6 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         auth_mode = (body.get("auth_mode") or "api_key").strip()
         oauth_key = (body.get("oauth_key") or KIMI_DEFAULT_OAUTH_KEY).strip()
         oauth_host = (body.get("oauth_host") or KIMI_DEFAULT_OAUTH_HOST).strip()
-        oauth_home = (body.get("oauth_home") or "").strip() if isinstance(body.get("oauth_home"), str) else ""
 
         if auth_mode not in ("api_key", "kimi_cli_oauth", "codex", "codex_cli_oauth"):
             _json_response(flow, 400, {"error": "auth_mode 仅支持 api_key、kimi_cli_oauth、codex 或 codex_cli_oauth"})
@@ -766,12 +896,17 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "名称和基础 URL 不能为空"})
             return True
 
+        auth_file_id, oauth_home, auth_file_error = _resolve_upstream_auth_file(storage, body, auth_mode)
+        if auth_file_error:
+            _json_response(flow, 400, {"error": auth_file_error})
+            return True
+
         upstream_id = storage.create_upstream(
             name=name, target_base_url=target_base_url,
             api_key=api_key, description=description, is_active=is_active,
             use_claude_features=use_claude_features, use_roo_features=use_roo_features,
             auth_mode=auth_mode, oauth_key=oauth_key, oauth_host=oauth_host,
-            oauth_home=oauth_home,
+            oauth_home=oauth_home, auth_file_id=auth_file_id,
         )
 
         if addon:
@@ -810,10 +945,10 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         target_base_url = raw_target_base_url
         if isinstance(target_base_url, str):
             target_base_url = target_base_url.strip()
-        if "oauth_home" in body:
-            oauth_home = body.get("oauth_home").strip() if isinstance(body.get("oauth_home"), str) else ""
-        else:
-            oauth_home = None
+        auth_file_id, oauth_home, auth_file_error = _resolve_upstream_auth_file(storage, body, effective_auth_mode)
+        if auth_file_error:
+            _json_response(flow, 400, {"error": auth_file_error})
+            return True
 
         if effective_auth_mode == "kimi_cli_oauth":
             api_key_value = ""
@@ -862,6 +997,8 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             oauth_key=oauth_key,
             oauth_host=oauth_host,
             oauth_home=oauth_home,
+            auth_file_id=auth_file_id,
+            update_auth_file_id=True,
         )
 
         if updated:
@@ -1327,12 +1464,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         payload = _require_auth(flow)
         if not payload:
             return True
-        kimi_cards = [
-            _load_kimi_upstream_quota(u)
-            for u in storage.get_all_upstreams()
-            if (u.get("auth_mode") or "api_key") == "kimi_cli_oauth"
-        ]
-        subscriptions = kimi_cards + [_load_subscription_quota("codex-cli-oauth")]
+        subscriptions = [_load_auth_file_quota(item) for item in storage.get_all_auth_files()]
         _json_response(flow, 200, {"subscriptions": subscriptions, "fetched_at": int(time.time())})
         return True
 

@@ -174,6 +174,73 @@ def test_resolve_snapshot_and_refresh_threshold(monkeypatch, tmp_path: Path):
     assert status["path"].endswith("auth.json")
 
 
+def test_resolve_snapshot_uses_explicit_oauth_home(monkeypatch, tmp_path: Path):
+    """显式 oauth_home 必须读该目录的 auth.json，而不是全局 CODEX_HOME。"""
+    default_home = tmp_path / "codex-default"
+    explicit_home = tmp_path / "codex-explicit"
+    default_home.mkdir()
+    explicit_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(default_home))
+
+    default_exp = int(time.time()) + 3600
+    explicit_exp = int(time.time()) + 7200
+    default_access = _make_jwt({
+        "exp": default_exp,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct-default"},
+    })
+    explicit_access = _make_jwt({
+        "exp": explicit_exp,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct-explicit"},
+    })
+    (default_home / "auth.json").write_text(json.dumps({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": default_access,
+            "access_token": default_access,
+            "refresh_token": "refresh-default",
+            "account_id": "acct-default",
+        },
+    }), encoding="utf-8")
+    (explicit_home / "auth.json").write_text(json.dumps({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": explicit_access,
+            "access_token": explicit_access,
+            "refresh_token": "refresh-explicit",
+            "account_id": "acct-explicit",
+        },
+    }), encoding="utf-8")
+
+    mgr = CodexCliAuthManager()
+    snap = mgr.resolve_snapshot(refresh_if_needed=False, oauth_home=str(explicit_home))
+    assert snap is not None
+    assert snap.access_token == explicit_access
+    assert snap.refresh_token == "refresh-explicit"
+    status = mgr.inspect_local_token(refresh_if_needed=False, oauth_home=str(explicit_home))
+    assert str(explicit_home) in status["path"]
+    assert "codex-default" not in status["path"]
+
+
+def test_fetch_usage_and_inspect_pass_oauth_home(monkeypatch):
+    """fetch_usage 和 inspect_local_token 要把 oauth_home 传给 resolve_snapshot。"""
+    seen = []
+
+    def fake_resolve(self, *, refresh_if_needed=True, oauth_home=None):
+        seen.append(oauth_home)
+        return None
+
+    monkeypatch.setattr(CodexCliAuthManager, "resolve_snapshot", fake_resolve)
+    mgr = CodexCliAuthManager()
+    status = mgr.inspect_local_token(oauth_home="/explicit/codex")
+    assert status["available"] is False
+    assert seen[-1] == "/explicit/codex"
+    try:
+        mgr.fetch_usage(oauth_home="/explicit/usage")
+    except RuntimeError:
+        pass
+    assert "/explicit/usage" in seen
+
+
 def test_prepare_chat_to_responses_body():
     body = json.dumps({
         "model": "gpt-client",

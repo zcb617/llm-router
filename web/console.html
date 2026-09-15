@@ -201,6 +201,43 @@
         </div>
       </div>
 
+      <!-- ==================== 认证文件面板 ==================== -->
+      <div id="auth_filesPanel" class="hidden flex flex-col flex-1 min-h-0">
+        <div class="flex flex-wrap gap-3 mb-4">
+          <div class="flex-1 min-w-[200px]">
+            <input id="authFileSearchName" type="text" placeholder="搜索名称..." class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+          </div>
+          <div class="flex-1 min-w-[200px]">
+            <select id="authFileFilterType" class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none">
+              <option value="">全部类型</option>
+              <option value="kimi_cli_oauth">Kimi</option>
+              <option value="codex_cli_oauth">Codex</option>
+            </select>
+          </div>
+          <button id="authFileSearchBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">搜索</button>
+          <button id="authFileResetBtn" class="px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">重置</button>
+          <div class="flex-1"></div>
+          <button id="createAuthFileBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center gap-1">
+            <span>+</span> 新增认证文件
+          </button>
+        </div>
+        <div class="overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700 flex-1 min-h-0">
+          <table class="text-sm w-full" style="table-layout: auto;">
+            <thead class="bg-zinc-100 dark:bg-zinc-800 sticky top-0 z-10">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">名称</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">类型</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">路径</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">更新时间</th>
+                <th class="px-4 py-2 text-left font-medium whitespace-nowrap">操作</th>
+              </tr>
+            </thead>
+            <tbody id="authFilesTableBody"></tbody>
+          </table>
+        </div>
+        <div id="authFilesEmpty" class="hidden flex items-center justify-center py-12 text-zinc-500">暂无认证文件，请点击上方「+ 新增认证文件」创建</div>
+      </div>
+
       <!-- ==================== 上游管理面板 ==================== -->
       <div id="upstreamsPanel" class="hidden flex flex-col flex-1 min-h-0">
         <!-- 查询条件 -->
@@ -465,7 +502,7 @@
         <div class="flex items-center justify-between mb-5">
           <div>
             <h2 class="text-xl font-semibold">订阅额度</h2>
-            <p class="text-sm text-zinc-500 mt-1">查看本机 OAuth 账号的订阅窗口和剩余额度</p>
+            <p class="text-sm text-zinc-500 mt-1">按认证文件查看订阅窗口和剩余额度</p>
           </div>
           <div class="flex items-center gap-3">
             <span id="subscriptionQuotasUpdatedAt" class="text-xs text-zinc-500"></span>
@@ -636,10 +673,12 @@
         </div>
         <div id="upstreamOauthConfig" class="hidden space-y-4">
           <div id="upstreamOauthHomeWrap" class="space-y-1">
-            <label class="block text-sm font-medium mb-1">Token 目录</label>
-            <input id="upstreamOauthHome" type="text" placeholder="~/.kimi-code"
+            <label class="block text-sm font-medium mb-1">认证目录</label>
+            <select id="upstreamAuthFile"
               class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
-            <p class="text-xs text-zinc-500">读取该目录下的 credentials/kimi-code.json</p>
+              <option value="">请选择认证目录</option>
+            </select>
+            <p class="text-xs text-zinc-500">显示名称，使用对应路径</p>
           </div>
           <div class="flex items-center gap-2">
             <button id="checkKimiTokenBtn" type="button" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition whitespace-nowrap">检测本机 token</button>
@@ -671,6 +710,42 @@
       <div class="flex justify-end gap-2 mt-4">
         <button id="cancelUpstreamEdit" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
         <button id="submitUpstreamEdit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 认证文件编辑弹窗 ==================== -->
+  <div id="authFileEditModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 p-6 w-[520px] max-h-[90vh] overflow-y-auto shadow-2xl">
+      <h2 id="authFileEditTitle" class="text-lg font-semibold mb-4">新增认证文件</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">名称 <span class="text-red-500">*</span></label>
+          <input id="authFileName" type="text" required placeholder="如：kimi-home"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">类型 <span class="text-red-500">*</span></label>
+          <select id="authFileType"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+            <option value="kimi_cli_oauth">Kimi</option>
+            <option value="codex_cli_oauth">Codex</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">路径 <span class="text-red-500">*</span></label>
+          <input id="authFilePath" type="text" required placeholder="~/.kimi-code"
+            class="w-full px-3 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="checkAuthFileTokenBtn" type="button" class="px-3 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition whitespace-nowrap">检测本机 token</button>
+          <span id="authFileTokenStatus" class="text-xs text-zinc-500"></span>
+        </div>
+        <div id="authFileEditError" class="hidden text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg p-2"></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="cancelAuthFileEdit" class="px-4 py-2 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">取消</button>
+        <button id="submitAuthFileEdit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>
       </div>
     </div>
   </div>
@@ -956,7 +1031,7 @@ function switchPage(page) {
     }
   });
   // 显示/隐藏面板
-  ['logsPanel', 'keysPanel', 'upstreamsPanel', 'modelsPanel', 'usersPanel', 'rolesPanel', 'usage_statsPanel', 'subscription_quotasPanel'].forEach(id => {
+  ['logsPanel', 'keysPanel', 'auth_filesPanel', 'upstreamsPanel', 'modelsPanel', 'usersPanel', 'rolesPanel', 'usage_statsPanel', 'subscription_quotasPanel'].forEach(id => {
     const panel = document.getElementById(id);
     if (panel) {
       if (id === page + 'Panel') {
@@ -970,6 +1045,7 @@ function switchPage(page) {
   });
   // 按需加载数据
   if (page === 'keys') loadKeys();
+  if (page === 'auth_files') loadAuthFiles();
   if (page === 'upstreams') loadUpstreams();
   if (page === 'models') loadModels();
   if (page === 'users') loadUsers();
@@ -1725,6 +1801,203 @@ document.getElementById('submitEditKey').addEventListener('click', async (event)
   });
 });
 
+// ============ 认证文件 ============
+let allAuthFiles = [];
+let editingAuthFileId = null;
+let pendingAuthFileId = null;
+
+function authFileTypeLabel(authType) {
+  if (authType === 'kimi_cli_oauth') return 'Kimi';
+  if (authType === 'codex_cli_oauth') return 'Codex';
+  return authType || '-';
+}
+
+async function loadAuthFiles() {
+  const tbody = document.getElementById('authFilesTableBody');
+  try {
+    const res = await fetch('/api/auth-files', { headers: getAuthHeaders() });
+    const data = await res.json();
+    allAuthFiles = data.auth_files || [];
+    renderAuthFiles();
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="99" class="px-4 py-8 text-center text-zinc-500">加载失败: ' + e.message + '</td></tr>';
+  }
+}
+
+function renderAuthFiles() {
+  const tbody = document.getElementById('authFilesTableBody');
+  const empty = document.getElementById('authFilesEmpty');
+  const searchName = (document.getElementById('authFileSearchName')?.value || '').toLowerCase();
+  const filterType = document.getElementById('authFileFilterType')?.value || '';
+  let filtered = allAuthFiles;
+  if (searchName) filtered = filtered.filter(item => (item.name || '').toLowerCase().includes(searchName));
+  if (filterType) filtered = filtered.filter(item => item.auth_type === filterType);
+  tbody.innerHTML = '';
+  if (filtered.length === 0) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  filtered.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition';
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap font-medium">${item.name || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap">${authFileTypeLabel(item.auth_type)}</td>
+      <td class="px-4 py-2 whitespace-nowrap font-mono text-xs" title="${item.path || ''}">${item.path || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap text-zinc-500">${item.updated_at || '-'}</td>
+      <td class="px-4 py-2 whitespace-nowrap">
+        <button class="edit-auth-file-btn px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition mr-1" data-id="${item.id}">编辑</button>
+        <button class="delete-auth-file-btn px-2 py-1 text-xs rounded border border-red-500 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition" data-id="${item.id}">删除</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  bindAuthFileTableEvents();
+}
+
+function setAuthFileTokenStatus(message, isError = false) {
+  const node = document.getElementById('authFileTokenStatus');
+  if (!node) return;
+  node.textContent = message || '';
+  node.className = 'text-xs ' + (isError ? 'text-red-500' : 'text-green-600');
+  if (!message) node.className = 'text-xs text-zinc-500';
+}
+
+function bindAuthFileTableEvents() {
+  const tbody = document.getElementById('authFilesTableBody');
+  tbody.querySelectorAll('.edit-auth-file-btn').forEach(btn => {
+    btn.onclick = async (event) => {
+      const id = btn.dataset.id;
+      await runLockedAction(`edit-auth-file-${id}`, event.currentTarget, async () => {
+        const item = allAuthFiles.find(row => String(row.id) === String(id));
+        if (!item) return;
+        editingAuthFileId = item.id;
+        document.getElementById('authFileEditTitle').textContent = '编辑认证文件';
+        document.getElementById('authFileName').value = item.name || '';
+        document.getElementById('authFileType').value = item.auth_type || 'kimi_cli_oauth';
+        document.getElementById('authFilePath').value = item.path || '';
+        document.getElementById('authFileEditError').classList.add('hidden');
+        setAuthFileTokenStatus('');
+        document.getElementById('authFileEditModal').classList.remove('hidden');
+      });
+    };
+  });
+  tbody.querySelectorAll('.delete-auth-file-btn').forEach(btn => {
+    btn.onclick = async (event) => {
+      const id = btn.dataset.id;
+      await runLockedAction(`delete-auth-file-${id}`, event.currentTarget, async () => {
+        if (!confirm('确定删除此认证文件？')) return;
+        try {
+          const res = await fetch('/api/auth-files/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) { loadAuthFiles(); }
+          else { alert(data.error || '删除失败'); }
+        } catch(e) { alert('网络错误: ' + e.message); }
+      });
+    };
+  });
+}
+
+document.getElementById('authFileSearchBtn').addEventListener('click', renderAuthFiles);
+document.getElementById('authFileResetBtn').addEventListener('click', () => {
+  document.getElementById('authFileSearchName').value = '';
+  document.getElementById('authFileFilterType').value = '';
+  renderAuthFiles();
+});
+document.getElementById('authFileSearchName').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderAuthFiles(); });
+document.getElementById('authFileFilterType').addEventListener('change', renderAuthFiles);
+
+document.getElementById('createAuthFileBtn').addEventListener('click', () => {
+  editingAuthFileId = null;
+  document.getElementById('authFileEditTitle').textContent = '新增认证文件';
+  document.getElementById('authFileName').value = '';
+  document.getElementById('authFileType').value = 'kimi_cli_oauth';
+  document.getElementById('authFilePath').value = '';
+  document.getElementById('authFileEditError').classList.add('hidden');
+  setAuthFileTokenStatus('');
+  document.getElementById('authFileEditModal').classList.remove('hidden');
+});
+
+document.getElementById('cancelAuthFileEdit').addEventListener('click', () => {
+  document.getElementById('authFileEditModal').classList.add('hidden');
+  editingAuthFileId = null;
+});
+document.getElementById('authFileEditModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('authFileEditModal')) {
+    document.getElementById('authFileEditModal').classList.add('hidden');
+    editingAuthFileId = null;
+  }
+});
+
+document.getElementById('checkAuthFileTokenBtn').addEventListener('click', async (event) => {
+  await runLockedAction('checkAuthFileToken', event.currentTarget, async () => {
+    const authType = document.getElementById('authFileType').value;
+    const oauthHome = document.getElementById('authFilePath').value.trim();
+    if (!oauthHome) {
+      setAuthFileTokenStatus('请先填写路径', true);
+      return;
+    }
+    setAuthFileTokenStatus('检测中...');
+    try {
+      const endpoint = authType === 'codex_cli_oauth'
+        ? '/api/upstreams/codex-token/check'
+        : '/api/upstreams/kimi-token/check';
+      const body = authType === 'codex_cli_oauth'
+        ? { oauth_home: oauthHome }
+        : { oauth_key: KIMI_OAUTH_DEFAULT_KEY, oauth_home: oauthHome };
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const ttl = data.seconds_to_expiry != null ? `，剩余 ${data.seconds_to_expiry}s` : '';
+        const account = data.account_id ? `，account=${data.account_id}` : '';
+        setAuthFileTokenStatus(`可用（${data.path}${ttl}${account}）`);
+      } else {
+        const msg = data.error || '本机 token 不可用';
+        const detail = data.path ? `（${data.path}）` : '';
+        setAuthFileTokenStatus(msg + detail, true);
+      }
+    } catch (e) {
+      setAuthFileTokenStatus('检测失败: ' + e.message, true);
+    }
+  });
+});
+
+document.getElementById('submitAuthFileEdit').addEventListener('click', async (event) => {
+  await runLockedAction('submitAuthFileEdit', event.currentTarget, async () => {
+    const name = document.getElementById('authFileName').value.trim();
+    const authType = document.getElementById('authFileType').value.trim();
+    const pathValue = document.getElementById('authFilePath').value.trim();
+    const errorNode = document.getElementById('authFileEditError');
+    if (!name || !authType || !pathValue) {
+      errorNode.textContent = '名称、路径、类型不能为空';
+      errorNode.classList.remove('hidden');
+      return;
+    }
+    try {
+      const body = { name, auth_type: authType, path: pathValue };
+      const res = await fetch(editingAuthFileId ? '/api/auth-files/' + editingAuthFileId : '/api/auth-files', {
+        method: editingAuthFileId ? 'PUT' : 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('authFileEditModal').classList.add('hidden');
+        editingAuthFileId = null;
+        loadAuthFiles();
+      } else {
+        errorNode.textContent = data.error || '保存失败';
+        errorNode.classList.remove('hidden');
+      }
+    } catch(e) {
+      errorNode.textContent = '网络错误: ' + e.message;
+      errorNode.classList.remove('hidden');
+    }
+  });
+});
+
 // ============ 上游管理 ============
 let allUpstreams = [];
 let editingUpstreamId = null;
@@ -1811,6 +2084,7 @@ function bindUpstreamTableEvents() {
         const u = allUpstreams.find(c => c.id == id);
         if (!u) return;
         editingUpstreamId = u.id;
+        pendingAuthFileId = u.auth_file_id || null;
         document.getElementById('upstreamEditTitle').textContent = '编辑上游';
         document.getElementById('upstreamName').value = u.name;
         document.getElementById('upstreamBaseUrl').value = u.target_base_url || '';
@@ -1828,11 +2102,11 @@ function bindUpstreamTableEvents() {
           const full = await res.json();
           document.getElementById('upstreamApiKey').value = full.api_key || '';
           document.getElementById('upstreamAuthMode').value = full.auth_mode || 'api_key';
-          document.getElementById('upstreamOauthHome').value = full.oauth_home || '';
+          pendingAuthFileId = full.auth_file_id || null;
         } catch(e) {
           document.getElementById('upstreamApiKey').value = '';
         }
-        syncUpstreamAuthModeFields();
+        await syncUpstreamAuthModeFields();
 
         // 重置 toggle 状态
         document.getElementById('upstreamApiKey').type = 'password';
@@ -1868,7 +2142,9 @@ document.getElementById('createUpstreamBtn').addEventListener('click', () => {
   document.getElementById('upstreamIsActive').checked = true;
   document.getElementById('upstreamUseClaudeFeatures').checked = false;
   document.getElementById('upstreamUseRooFeatures').checked = false;
-  document.getElementById('upstreamOauthHome').value = '';
+  pendingAuthFileId = null;
+  const authFileSelect = document.getElementById('upstreamAuthFile');
+  if (authFileSelect) authFileSelect.value = '';
   document.getElementById('upstreamEditError').classList.add('hidden');
   setUpstreamOauthTokenStatus('');
   syncUpstreamAuthModeFields();
@@ -1900,21 +2176,35 @@ document.getElementById('upstreamEditModal').addEventListener('click', (e) => {
   }
 });
 
-function fillDefaultOauthHomeIfEmpty() {
-  // 文本框为空时向服务器拉取默认 Token 目录并填入
-  const input = document.getElementById('upstreamOauthHome');
-  if (!input || input.value.trim()) return;
-  fetch('/api/upstreams/kimi-oauth-home', { headers: getAuthHeaders() })
-    .then(res => res.ok ? res.json() : null)
-    .then(data => {
-      if (data && data.oauth_home && !input.value.trim()) {
-        input.value = data.oauth_home;
-      }
-    })
-    .catch(() => {});
+async function fillAuthFileSelect(mode) {
+  const select = document.getElementById('upstreamAuthFile');
+  if (!select) return;
+  select.innerHTML = '<option value="">请选择认证目录</option>';
+  try {
+    const res = await fetch('/api/auth-files', { headers: getAuthHeaders() });
+    const data = await res.json();
+    (data.auth_files || []).filter(item => item.auth_type === mode).forEach(item => {
+      const opt = document.createElement('option');
+      opt.value = item.id;
+      opt.textContent = item.name;
+      opt.title = item.path || '';
+      opt.dataset.path = item.path || '';
+      select.appendChild(opt);
+    });
+    if (pendingAuthFileId != null && pendingAuthFileId !== '') {
+      select.value = String(pendingAuthFileId);
+    }
+  } catch (e) {}
 }
 
-function syncUpstreamAuthModeFields() {
+function selectedAuthFilePath() {
+  const select = document.getElementById('upstreamAuthFile');
+  if (!select || !select.value) return '';
+  const option = select.options[select.selectedIndex];
+  return option ? (option.dataset.path || '') : '';
+}
+
+async function syncUpstreamAuthModeFields() {
   const mode = document.getElementById('upstreamAuthMode').value || 'api_key';
   const oauthWrap = document.getElementById('upstreamOauthConfig');
   const oauthHomeWrap = document.getElementById('upstreamOauthHomeWrap');
@@ -1929,17 +2219,16 @@ function syncUpstreamAuthModeFields() {
   const oauthHint = document.getElementById('upstreamOauthHint');
   if (mode === 'kimi_cli_oauth' || mode === 'codex_cli_oauth') {
     oauthWrap.classList.remove('hidden');
+    if (oauthHomeWrap) oauthHomeWrap.classList.remove('hidden');
     if (mode === 'kimi_cli_oauth') {
       baseUrlWrap.classList.remove('hidden');
       baseUrlInput.required = true;
       if (!baseUrlInput.value.trim()) baseUrlInput.value = KIMI_OAUTH_DEFAULT_BASE_URL;
-      if (oauthHomeWrap) oauthHomeWrap.classList.remove('hidden');
-      fillDefaultOauthHomeIfEmpty();
     } else {
       baseUrlWrap.classList.add('hidden');
       baseUrlInput.required = false;
-      if (oauthHomeWrap) oauthHomeWrap.classList.add('hidden');
     }
+    await fillAuthFileSelect(mode);
     apiWrap.classList.add('hidden');
     claudeFeaturesWrap.classList.add('hidden');
     rooFeaturesWrap.classList.add('hidden');
@@ -1981,6 +2270,12 @@ document.getElementById('checkKimiTokenBtn').addEventListener('click', async (ev
       setUpstreamOauthTokenStatus('请先选择 kimi-cli auth 或 codex-cli oauth', true);
       return;
     }
+    const authFileSelect = document.getElementById('upstreamAuthFile');
+    if (!authFileSelect || !authFileSelect.value) {
+      setUpstreamOauthTokenStatus('请先选择认证目录', true);
+      return;
+    }
+    const oauthHome = selectedAuthFilePath();
     setUpstreamOauthTokenStatus('检测中...');
     try {
       const endpoint = authMode === 'codex_cli_oauth'
@@ -1989,7 +2284,9 @@ document.getElementById('checkKimiTokenBtn').addEventListener('click', async (ev
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(authMode === 'codex_cli_oauth' ? {} : { oauth_key: KIMI_OAUTH_DEFAULT_KEY, oauth_home: document.getElementById('upstreamOauthHome').value.trim() })
+        body: JSON.stringify(authMode === 'codex_cli_oauth'
+          ? { oauth_home: oauthHome }
+          : { oauth_key: KIMI_OAUTH_DEFAULT_KEY, oauth_home: oauthHome })
       });
       const data = await res.json();
       if (res.ok) {
@@ -2042,12 +2339,20 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async (e
       auth_mode: authMode,
       oauth_key: oauthKey,
       oauth_host: oauthHost,
-      oauth_home: isKimiOauth ? document.getElementById('upstreamOauthHome').value.trim() : '',
       description,
       is_active: isActive,
       use_claude_features: useClaudeFeatures,
       use_roo_features: useRooFeatures
     };
+    if (isManagedOauth) {
+      const authFileId = Number(document.getElementById('upstreamAuthFile').value);
+      if (!authFileId) {
+        document.getElementById('upstreamEditError').textContent = '请选择认证目录';
+        document.getElementById('upstreamEditError').classList.remove('hidden');
+        return;
+      }
+      body.auth_file_id = authFileId;
+    }
 
     try {
       let res;

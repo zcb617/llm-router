@@ -1233,12 +1233,200 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur)
 
+    # ========== 认证文件 CRUD（同步） ==========
+
+    def get_all_auth_files(self, auth_type: str = None) -> list:
+        """获取认证文件列表，可选按认证类型过滤。"""
+        if self.postgresql:
+            sql = (
+                "SELECT id, name, path, auth_type, created_at, updated_at "
+                "FROM auth_files"
+            )
+            params = []
+            if auth_type:
+                sql += " WHERE auth_type = %s"
+                params.append(auth_type)
+            sql += " ORDER BY name"
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, params)
+                return [
+                    {
+                        "id": r[0],
+                        "name": r[1],
+                        "path": r[2],
+                        "auth_type": r[3],
+                        "created_at": r[4].isoformat() if r[4] else None,
+                        "updated_at": r[5].isoformat() if r[5] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            sql = "SELECT id, name, path, auth_type, created_at, updated_at FROM auth_files"
+            params = []
+            if auth_type:
+                sql += " WHERE auth_type = ?"
+                params.append(auth_type)
+            sql += " ORDER BY name"
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def get_auth_file(self, auth_file_id: int) -> Optional[dict]:
+        """按 ID 获取认证文件。"""
+        if self.postgresql:
+            sql = (
+                "SELECT id, name, path, auth_type, created_at, updated_at "
+                "FROM auth_files WHERE id = %s"
+            )
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (auth_file_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "name": row[1],
+                    "path": row[2],
+                    "auth_type": row[3],
+                    "created_at": row[4].isoformat() if row[4] else None,
+                    "updated_at": row[5].isoformat() if row[5] else None,
+                }
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            sql = (
+                "SELECT id, name, path, auth_type, created_at, updated_at "
+                "FROM auth_files WHERE id = ?"
+            )
+            conn, cur = self._sqlite_conn(row_factory=True)
+            try:
+                cur.execute(sql, (auth_file_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def create_auth_file(self, name: str, path: str, auth_type: str) -> int:
+        """创建认证文件，返回 ID。"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO auth_files (name, path, auth_type) VALUES (%s, %s, %s) RETURNING id",
+                    (name, path, auth_type),
+                )
+                return cur.fetchone()[0]
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "INSERT INTO auth_files (name, path, auth_type) VALUES (?, ?, ?)",
+                    (name, path, auth_type),
+                )
+                return cur.lastrowid
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def update_auth_file(self, auth_file_id: int, name: str = None, path: str = None,
+                         auth_type: str = None) -> bool:
+        """更新认证文件；路径变更时同步已绑定上游的 token 目录。"""
+        fields, params = [], []
+        if name is not None:
+            fields.append("name = %s" if self.postgresql else "name = ?")
+            params.append(name)
+        if path is not None:
+            fields.append("path = %s" if self.postgresql else "path = ?")
+            params.append(path)
+        if auth_type is not None:
+            fields.append("auth_type = %s" if self.postgresql else "auth_type = ?")
+            params.append(auth_type)
+        if not fields:
+            return False
+        fields.append("updated_at = CURRENT_TIMESTAMP" if self.postgresql else "updated_at = datetime('now')")
+        params.append(auth_file_id)
+        sql = f"UPDATE auth_files SET {', '.join(fields)} WHERE id = %s" if self.postgresql else \
+              f"UPDATE auth_files SET {', '.join(fields)} WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, params)
+                updated = cur.rowcount > 0
+                if updated and path is not None:
+                    cur.execute(
+                        "UPDATE upstreams SET oauth_home = %s WHERE auth_file_id = %s",
+                        (path, auth_file_id),
+                    )
+                return updated
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, params)
+                updated = cur.rowcount > 0
+                if updated and path is not None:
+                    cur.execute(
+                        "UPDATE upstreams SET oauth_home = ? WHERE auth_file_id = ?",
+                        (path, auth_file_id),
+                    )
+                return updated
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def count_upstreams_for_auth_file(self, auth_file_id: int) -> int:
+        """统计引用该认证文件的上游数量。"""
+        sql = "SELECT COUNT(*) FROM upstreams WHERE auth_file_id = %s" if self.postgresql else \
+              "SELECT COUNT(*) FROM upstreams WHERE auth_file_id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (auth_file_id,))
+                row = cur.fetchone()
+                return int(row[0] if row else 0)
+            finally:
+                self._pg_close(conn, cur)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, (auth_file_id,))
+                row = cur.fetchone()
+                return int(row[0] if row else 0)
+            finally:
+                self._sqlite_close(conn, cur)
+
+    def delete_auth_file(self, auth_file_id: int) -> bool:
+        """删除认证文件记录。"""
+        sql = "DELETE FROM auth_files WHERE id = %s" if self.postgresql else "DELETE FROM auth_files WHERE id = ?"
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(sql, (auth_file_id,))
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(sql, (auth_file_id,))
+                return cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
     # ========== 上游管理 CRUD（同步） ==========
 
     def get_all_upstreams(self) -> list:
         """获取所有上游列表"""
         sql = (
-            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, "
+            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id, "
             "is_active, description, use_claude_features, use_roo_features, "
             "health_status, consecutive_failures, created_at, updated_at "
             "FROM upstreams ORDER BY name"
@@ -1254,12 +1442,13 @@ class CallStorage:
                         "oauth_key": r[5] or "oauth/kimi-code",
                         "oauth_host": r[6] or "https://auth.kimi.com",
                         "oauth_home": r[7] or "",
-                        "is_active": r[8], "description": r[9],
-                        "use_claude_features": r[10], "use_roo_features": r[11],
-                        "health_status": r[12] or 'healthy',
-                        "consecutive_failures": r[13] or 0,
-                        "created_at": r[14].isoformat() if r[14] else None,
-                        "updated_at": r[15].isoformat() if r[15] else None,
+                        "auth_file_id": r[8],
+                        "is_active": r[9], "description": r[10],
+                        "use_claude_features": r[11], "use_roo_features": r[12],
+                        "health_status": r[13] or 'healthy',
+                        "consecutive_failures": r[14] or 0,
+                        "created_at": r[15].isoformat() if r[15] else None,
+                        "updated_at": r[16].isoformat() if r[16] else None,
                     }
                     for r in cur.fetchall()
                 ]
@@ -1276,12 +1465,12 @@ class CallStorage:
     def get_upstream(self, upstream_id: int) -> Optional[dict]:
         """按 ID 获取上游"""
         sql = (
-            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, "
+            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id, "
             "is_active, description, use_claude_features, use_roo_features, "
             "health_status, consecutive_failures, created_at, updated_at "
             "FROM upstreams WHERE id = %s"
         ) if self.postgresql else (
-            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, "
+            "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id, "
             "is_active, description, use_claude_features, use_roo_features, "
             "health_status, consecutive_failures, created_at, updated_at "
             "FROM upstreams WHERE id = ?"
@@ -1298,12 +1487,13 @@ class CallStorage:
                         "oauth_key": row[5] or "oauth/kimi-code",
                         "oauth_host": row[6] or "https://auth.kimi.com",
                         "oauth_home": row[7] or "",
-                        "is_active": row[8], "description": row[9],
-                        "use_claude_features": row[10], "use_roo_features": row[11],
-                        "health_status": row[12] or 'healthy',
-                        "consecutive_failures": row[13] or 0,
-                        "created_at": row[14].isoformat() if row[14] else None,
-                        "updated_at": row[15].isoformat() if row[15] else None,
+                        "auth_file_id": row[8],
+                        "is_active": row[9], "description": row[10],
+                        "use_claude_features": row[11], "use_roo_features": row[12],
+                        "health_status": row[13] or 'healthy',
+                        "consecutive_failures": row[14] or 0,
+                        "created_at": row[15].isoformat() if row[15] else None,
+                        "updated_at": row[16].isoformat() if row[16] else None,
                     }
                 return None
             finally:
@@ -1319,7 +1509,7 @@ class CallStorage:
 
     def get_upstream_by_name(self, name: str) -> Optional[dict]:
         """按名称获取上游"""
-        sql = "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, is_active, description FROM upstreams WHERE name = %s" if self.postgresql else \
+        sql = "SELECT id, name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id, is_active, description FROM upstreams WHERE name = %s" if self.postgresql else \
               "SELECT * FROM upstreams WHERE name = ?"
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -1332,7 +1522,8 @@ class CallStorage:
                             "oauth_key": row[5] or "oauth/kimi-code",
                             "oauth_host": row[6] or "https://auth.kimi.com",
                             "oauth_home": row[7] or "",
-                            "is_active": row[8], "description": row[9]}
+                            "auth_file_id": row[8],
+                            "is_active": row[9], "description": row[10]}
                 return None
             finally:
                 self._pg_close(conn, cur)
@@ -1377,16 +1568,17 @@ class CallStorage:
                         description: str = "", is_active: bool = True,
                         use_claude_features: bool = False, use_roo_features: bool = False,
                         auth_mode: str = "api_key", oauth_key: str = "oauth/kimi-code",
-                        oauth_host: str = "https://auth.kimi.com", oauth_home: str = "") -> int:
+                        oauth_host: str = "https://auth.kimi.com", oauth_home: str = "",
+                        auth_file_id: int = None) -> int:
         """创建上游，返回 ID"""
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
                 cur.execute(
-                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, description, is_active, use_claude_features, use_roo_features) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id, description, is_active, use_claude_features, use_roo_features) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                     (
-                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home,
+                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id,
                         description, is_active, use_claude_features, use_roo_features,
                     )
                 )
@@ -1397,10 +1589,10 @@ class CallStorage:
             conn, cur = self._sqlite_conn()
             try:
                 cur.execute(
-                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, description, is_active, use_claude_features, use_roo_features) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO upstreams (name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id, description, is_active, use_claude_features, use_roo_features) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home,
+                        name, target_base_url, api_key, auth_mode, oauth_key, oauth_host, oauth_home, auth_file_id,
                         description, int(is_active), int(use_claude_features), int(use_roo_features),
                     )
                 )
@@ -1412,7 +1604,8 @@ class CallStorage:
                         api_key: str = None, description: str = None, is_active: bool = None,
                         use_claude_features: bool = None, use_roo_features: bool = None,
                         auth_mode: str = None, oauth_key: str = None, oauth_host: str = None,
-                        oauth_home: str = None,
+                        oauth_home: str = None, auth_file_id: int = None,
+                        update_auth_file_id: bool = False,
                         health_status: str = None, consecutive_failures: int = None) -> bool:
         """更新上游"""
         fields, params = [], []
@@ -1449,6 +1642,9 @@ class CallStorage:
         if oauth_home is not None:
             fields.append("oauth_home = %s" if self.postgresql else "oauth_home = ?")
             params.append(oauth_home)
+        if update_auth_file_id:
+            fields.append("auth_file_id = %s" if self.postgresql else "auth_file_id = ?")
+            params.append(auth_file_id)
         if health_status is not None:
             fields.append("health_status = %s" if self.postgresql else "health_status = ?")
             params.append(health_status)

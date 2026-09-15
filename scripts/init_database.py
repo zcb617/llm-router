@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.1.9"
+CURRENT_VERSION = "1.2.0"
 
 
 def get_pg_conn(config):
@@ -187,6 +187,17 @@ PG_TABLES = [
             PRIMARY KEY (role_id, menu_id)
         )
     """),
+    ("auth_files", """
+        CREATE TABLE IF NOT EXISTS auth_files (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100) UNIQUE NOT NULL,
+            path VARCHAR(500) NOT NULL,
+            auth_type VARCHAR(32) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(auth_type, path)
+        )
+    """),
     ("upstreams", """
         CREATE TABLE IF NOT EXISTS upstreams (
             id SERIAL PRIMARY KEY,
@@ -197,6 +208,7 @@ PG_TABLES = [
             oauth_key VARCHAR(100) DEFAULT 'oauth/kimi-code',
             oauth_host VARCHAR(200) DEFAULT 'https://auth.kimi.com',
             oauth_home VARCHAR(500) DEFAULT '',
+            auth_file_id INTEGER REFERENCES auth_files(id),
             is_active BOOLEAN DEFAULT true,
             description VARCHAR(200),
             use_claude_features BOOLEAN DEFAULT false,
@@ -329,6 +341,17 @@ SQLITE_TABLES = [
             PRIMARY KEY (role_id, menu_id)
         )
     """),
+    ("auth_files", """
+        CREATE TABLE IF NOT EXISTS auth_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            path TEXT NOT NULL,
+            auth_type TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(auth_type, path)
+        )
+    """),
     ("upstreams", """
         CREATE TABLE IF NOT EXISTS upstreams (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -339,6 +362,7 @@ SQLITE_TABLES = [
             oauth_key TEXT DEFAULT 'oauth/kimi-code',
             oauth_host TEXT DEFAULT 'https://auth.kimi.com',
             oauth_home TEXT DEFAULT '',
+            auth_file_id INTEGER REFERENCES auth_files(id),
             is_active INTEGER DEFAULT 1,
             description TEXT,
             use_claude_features INTEGER DEFAULT 0,
@@ -387,17 +411,18 @@ SEED_DATA = {
         {"code": "subscription_quotas", "name": "订阅额度", "icon": "💳", "sort_order": 1},
         {"code": "logs", "name": "调用日志", "icon": "📋", "sort_order": 2},
         {"code": "keys", "name": "密钥管理", "icon": "🔑", "sort_order": 3},
-        {"code": "upstreams", "name": "上游管理", "icon": "🔗", "sort_order": 4},
-        {"code": "models", "name": "模型配置", "icon": "⚙️", "sort_order": 5},
-        {"code": "users", "name": "用户管理", "icon": "", "sort_order": 6},
-        {"code": "roles", "name": "角色管理", "icon": "🛡️", "sort_order": 7},
+        {"code": "auth_files", "name": "认证文件", "icon": "📂", "sort_order": 4},
+        {"code": "upstreams", "name": "上游管理", "icon": "🔗", "sort_order": 5},
+        {"code": "models", "name": "模型配置", "icon": "⚙️", "sort_order": 6},
+        {"code": "users", "name": "用户管理", "icon": "", "sort_order": 7},
+        {"code": "roles", "name": "角色管理", "icon": "🛡️", "sort_order": 8},
     ],
     "roles": [
         {"name": "admin", "description": "管理员，拥有所有菜单权限"},
         {"name": "viewer", "description": "普通用户，仅查看日志和密钥"},
     ],
     "role_menus": {
-        "admin": ["usage_stats", "subscription_quotas", "logs", "keys", "upstreams", "models", "users", "roles"],
+        "admin": ["usage_stats", "subscription_quotas", "logs", "keys", "auth_files", "upstreams", "models", "users", "roles"],
         "viewer": ["usage_stats", "logs", "keys"],
     },
 }
@@ -410,7 +435,7 @@ def run_v100_pg(config):
     cur = conn.cursor()
 
     # 1. 建表（先建 roles 等被引用的表）
-    table_order = ["roles", "menus", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
+    table_order = ["roles", "menus", "auth_files", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in PG_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")
@@ -479,7 +504,7 @@ def run_v100_sqlite(config):
     cur = conn.cursor()
 
     # 1. 建表
-    table_order = ["roles", "menus", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
+    table_order = ["roles", "menus", "auth_files", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in SQLITE_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")
@@ -904,6 +929,83 @@ def run_v119_sqlite(conn):
     _sqlite_add_column(conn, "upstreams", "oauth_home", "TEXT DEFAULT ''")
 
 
+def run_v120_pg(conn):
+    """v1.1.9 -> v1.2.0：认证文件表、上游绑定字段和菜单。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auth_files (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) UNIQUE NOT NULL,
+                path VARCHAR(500) NOT NULL,
+                auth_type VARCHAR(32) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(auth_type, path)
+            )
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+    _pg_add_column(conn, "upstreams", "auth_file_id", "INTEGER REFERENCES auth_files(id)")
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM menus WHERE code = %s", ("auth_files",))
+        if cur.fetchone() is None:
+            cur.execute("UPDATE menus SET sort_order = sort_order + 1 WHERE sort_order >= %s", (4,))
+        cur.execute(
+            "INSERT INTO menus (code, name, icon, sort_order) VALUES (%s, %s, %s, %s) ON CONFLICT (code) DO NOTHING",
+            ("auth_files", "认证文件", "📂", 4),
+        )
+        cur.execute(
+            "INSERT INTO role_menus (role_id, menu_id) "
+            "SELECT r.id, m.id FROM roles r, menus m "
+            "WHERE r.name = %s AND m.code = %s ON CONFLICT DO NOTHING",
+            ("admin", "auth_files"),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v120_sqlite(conn):
+    """v1.1.9 -> v1.2.0：认证文件表、上游绑定字段和菜单。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auth_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                path TEXT NOT NULL,
+                auth_type TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(auth_type, path)
+            )
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+    _sqlite_add_column(conn, "upstreams", "auth_file_id", "INTEGER")
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM menus WHERE code = ?", ("auth_files",))
+        if cur.fetchone() is None:
+            cur.execute("UPDATE menus SET sort_order = sort_order + 1 WHERE sort_order >= ?", (4,))
+        cur.execute(
+            "INSERT OR IGNORE INTO menus (code, name, icon, sort_order) VALUES (?, ?, ?, ?)",
+            ("auth_files", "认证文件", "📂", 4),
+        )
+        cur.execute(
+            "INSERT OR IGNORE INTO role_menus (role_id, menu_id) "
+            "SELECT r.id, m.id FROM roles r, menus m WHERE r.name = ? AND m.code = ?",
+            ("admin", "auth_files"),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -934,7 +1036,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -1016,6 +1118,12 @@ def main():
             run_v119_pg(conn)
         else:
             run_v119_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", CURRENT_VERSION):
+        print("\n[v1.2.0] 检查/补齐认证文件表、上游绑定字段和菜单...")
+        if is_pg:
+            run_v120_pg(conn)
+        else:
+            run_v120_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)
