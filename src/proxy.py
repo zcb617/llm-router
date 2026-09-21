@@ -2348,6 +2348,12 @@ class LLMRouterAddon:
         if not isinstance(data, dict) or not isinstance(data.get("thinking"), dict):
             return body
 
+        # 用户已显式关闭思考（thinking.type == "disabled"）时，原样放行，
+        # 不得进入下方的降级逻辑把这条关闭指令删掉——删掉等于违背用户意图，
+        # 让上游回退到默认带思考。
+        if data["thinking"].get("type") == "disabled":
+            return body
+
         messages = data.get("messages")
         if not isinstance(messages, list):
             return body
