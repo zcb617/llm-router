@@ -788,6 +788,48 @@ def _pick_codex_responses_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if k in _CODEX_RESPONSES_API_REQUEST_KEYS}
 
 
+def _normalize_codex_responses_agent_message_content(items: list[Any]) -> list[Any]:
+    """将 agent_message 中可读的 encrypted_content 转为 input_text，保留合法密文。"""
+    normalized_items: list[Any] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            normalized_items.append(item)
+            continue
+
+        content = item.get("content")
+        if not isinstance(content, list):
+            normalized_items.append(item)
+            continue
+
+        normalized_item = dict(item)
+        normalized_content: list[Any] = []
+        for part in content:
+            if not isinstance(part, dict):
+                normalized_content.append(part)
+                continue
+
+            normalized_part = dict(part)
+            encrypted_content = normalized_part.get("encrypted_content")
+            if (
+                normalized_part.get("type") == "encrypted_content"
+                and isinstance(encrypted_content, str)
+                and (
+                    any(character.isspace() for character in encrypted_content)
+                    or any(ord(character) > 127 for character in encrypted_content)
+                )
+            ):
+                normalized_part = {
+                    "type": "input_text",
+                    "text": encrypted_content,
+                }
+            normalized_content.append(normalized_part)
+
+        normalized_item["content"] = normalized_content
+        normalized_items.append(normalized_item)
+
+    return normalized_items
+
+
 def convert_tools_for_codex_responses_api(tools: Any) -> Optional[list]:
     """Map tools to Codex Responses function-tool shape (structure map, keep values).
 
@@ -1208,7 +1250,10 @@ def prepare_codex_responses_body(
     # --- Responses-shaped path ---
     if "input" in payload and "messages" not in payload:
         _collect_top_level_unmappable(payload, unmappable=unmappable, chat_mode=False)
-        out = _pick_codex_responses_fields(payload)
+        out = dict(payload)
+        if isinstance(out.get("input"), list):
+            out["input"] = _normalize_codex_responses_agent_message_content(out["input"])
+        out = _pick_codex_responses_fields(out)
         out["model"] = model
         out["stream"] = stream
         if "store" not in out:

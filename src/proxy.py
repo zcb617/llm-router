@@ -301,6 +301,10 @@ class LLMRouterAddon:
         body_lower = body.lower()
         if (
             "event:error" in body_lower
+            or "event: error" in body_lower
+            or '"type":"error"' in body_lower
+            or '"type": "error"' in body_lower
+            or "response.failed" in body_lower
             or '"type":"api_error"' in body_lower
             or '"type": "api_error"' in body_lower
             or "the server had an error while processing your request" in body_lower
