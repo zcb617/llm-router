@@ -862,6 +862,40 @@ def test_load_model_configs_preserves_kimi_oauth_base_url():
     )
 
 
+def test_load_model_configs_preserves_multi_upstream_protocol_converter():
+    """验证多上游模型缓存保留模型级及路由级协议转换器配置。"""
+    addon = _make_addon_for_route_tests()
+
+    class Storage:
+        def get_all_model_configs(self):
+            return [{
+                "id": 1,
+                "model_key": "k3-256k",
+                "is_active": True,
+                "is_default": False,
+                "use_multi_upstream": True,
+                "protocol_converter": "kimi3",
+            }]
+
+        def get_all_model_routes(self):
+            return [{
+                "model_key": "k3-256k",
+                "upstream_id": 7,
+                "target_base_url": "https://kimi.example.com",
+                "protocol_converter": "kimi3",
+            }]
+
+    addon._external_storage = Storage()
+    addon._storage = None
+
+    addon._load_model_configs()
+
+    cached_model = addon._model_cache["k3-256k"]
+    assert cached_model["multi_upstream"] is True
+    assert cached_model["protocol_converter"] == "kimi3"
+    assert cached_model["routes"][0]["protocol_converter"] == "kimi3"
+
+
 def test_codex_route_rejects_non_chat_completions_path():
     addon = _make_addon_for_route_tests()
     addon._codex_bridge_url = "http://127.0.0.1:45678"

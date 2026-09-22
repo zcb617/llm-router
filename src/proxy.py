@@ -590,6 +590,7 @@ class LLMRouterAddon:
                         self._model_cache[mk] = {
                             "multi_upstream": True,
                             "routes": routes_by_model[mk],
+                            "protocol_converter": cfg.get("protocol_converter") or None,
                         }
                     else:
                         # 单上游模式（原有逻辑）
