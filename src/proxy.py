@@ -411,8 +411,51 @@ class LLMRouterAddon:
         return json.dumps(timeline, ensure_ascii=False, separators=(",", ":"), default=str)
 
     @staticmethod
+    def _is_invalid_encrypted_content_response(response_body: Optional[str | bytes]) -> bool:
+        """识别 Codex OAuth 返回的确定性 encrypted content 解密错误。"""
+        if response_body is None:
+            return False
+        body_text = (
+            response_body.decode("utf-8", errors="replace")
+            if isinstance(response_body, (bytes, bytearray))
+            else str(response_body)
+        )
+        payloads = []
+        if body_text.strip():
+            try:
+                payloads.append(json.loads(body_text))
+            except (TypeError, ValueError):
+                pass
+        for line in body_text.splitlines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                payloads.append(json.loads(data))
+            except (TypeError, ValueError):
+                continue
+
+        pending = list(payloads)
+        while pending:
+            payload = pending.pop()
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict) and error.get("code") == "invalid_encrypted_content":
+                    return True
+                if payload.get("type") == "error" and payload.get("code") == "invalid_encrypted_content":
+                    return True
+                pending.extend(value for value in payload.values() if isinstance(value, (dict, list)))
+            elif isinstance(payload, list):
+                pending.extend(payload)
+        return False
+
+    @staticmethod
     def _is_retryable_api_error(response_status: Optional[int], response_body: Optional[str]) -> bool:
         """仅识别可自动重试的 server-internal api_error 场景。"""
+        if LLMRouterAddon._is_invalid_encrypted_content_response(response_body):
+            return False
         if response_status is None or not (200 <= response_status < 300):
             return False
         body_lower = (response_body or "").lower()
@@ -1318,6 +1361,35 @@ class LLMRouterAddon:
                     "thread_id": thread_id,
                 },
             )
+            if self._is_invalid_encrypted_content_response(resp_body):
+                status = 400
+                resp_body = json.dumps(
+                    {
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_encrypted_content",
+                            "message": (
+                                "Upstream cannot decrypt encrypted content; do not retry the same request; "
+                                "use plaintext/input_text or valid ciphertext from the same provider."
+                            ),
+                            "retryable": False,
+                            "param": None,
+                        }
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                resp_headers = [
+                    (key, value)
+                    for key, value in resp_headers
+                    if key.lower()
+                    not in {
+                        "content-length",
+                        "content-encoding",
+                        "transfer-encoding",
+                        "content-type",
+                    }
+                ]
+                resp_headers.append(("Content-Type", "application/json"))
             # include_usage decision B: ensure response carries usage (Responses completed/body.usage).
             resp_body, usage_warnings = ensure_usage_in_upstream_response(
                 resp_body,
