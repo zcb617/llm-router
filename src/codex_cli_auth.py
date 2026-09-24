@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 import httpx
 
 # Fixed Codex CLI fingerprint version (must match real codex_cli_rs clients).
-CODEX_CLI_VERSION = "0.147.0"
+CODEX_CLI_VERSION = "0.155.1"
 CODEX_ORIGINATOR = "codex_cli_rs"
 # Default when ~/.codex/config.toml has no openai_base_url (Codex ChatGPT OAuth).
 # Source: model-provider-info CHATGPT_CODEX_BASE_URL + AuthMode::Chatgpt branch.

@@ -700,6 +700,27 @@ def test_error_fallback_marks_completed_converted_stream_success_with_api_usage(
     assert "[ERROR_SAVE]" not in caplog.text
 
 
+def test_error_fallback_marks_failed_converted_stream_when_successful_false(caplog):
+    """验证 converter 已发送失败终止时客户端断开保存为 failed。"""
+    converter = SimpleNamespace(
+        _completed=True,
+        _successful=False,
+        _usage={"input_tokens": 100, "output_tokens": 20},
+    )
+    with caplog.at_level(logging.WARNING):
+        saved_calls = _run_client_disconnect_fallback(
+            streamed_chunks=[b'data: {"choices":[]}' + b"\n\n"],
+            codex_cli_oauth=False,
+            stream_converter=converter,
+        )
+
+    assert saved_calls[0]["call_status"] == "failed"
+    assert "[ERROR_DIAG] status=failed" in caplog.text
+    assert "[ERROR_SAVE] status=failed" in caplog.text
+    assert "[STREAM_COMPLETE]" not in caplog.text
+    assert "[STREAM_SAVE]" not in caplog.text
+
+
 def test_error_fallback_marks_incomplete_converted_stream_failed(caplog):
     converter = SimpleNamespace(_completed=False, _usage=None)
     with caplog.at_level(logging.WARNING):

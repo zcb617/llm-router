@@ -3186,7 +3186,10 @@ class LLMRouterAddon:
         overridden_model = flow.metadata.get("overridden_model")
         is_multi = flow.metadata.get("multi_upstream_native")
         stream_converter = flow.metadata.get("stream_converter")
-        stream_completed = bool(getattr(stream_converter, "_completed", False))
+        converter_successful = getattr(stream_converter, "_successful", None)
+        if converter_successful is None:
+            converter_successful = bool(getattr(stream_converter, "_completed", False))
+        stream_completed = bool(converter_successful)
         downstream = flow.metadata.get("protocol_downstream_diagnostics") or {}
         stream_context = (
             f"is_multi={is_multi}, captured_req={'YES' if captured_req else 'NO'}, "
