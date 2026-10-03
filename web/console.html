@@ -1064,6 +1064,7 @@ const COLUMNS = [
   { key: 'original_model', label: '原始模型', default: true, minWidth: '140px' },
   { key: 'overridden_model', label: '映射模型', default: true, minWidth: '140px' },
   { key: 'duration_ms', label: '耗时(ms)', default: true, minWidth: '100px' },
+  { key: 'last_activity_at', label: '最近活动', default: true, minWidth: '165px' },
   { key: 'first_token_ms', label: '首字耗时(ms)', default: true, minWidth: '120px' },
   { key: 'stream_type', label: '流式类型', default: true, minWidth: '100px' },
   { key: 'tokens_input', label: '输入Token', default: true, minWidth: '100px' },
@@ -1360,11 +1361,15 @@ function renderTable(data) {
       td.style.width = col.width;
       td.style.minWidth = col.width;
       let val = row[col.key] ?? '';
-      if (col.key === 'timestamp' && val) {
+      if ((col.key === 'timestamp' || col.key === 'last_activity_at') && val) {
         try {
           const d = new Date(val);
           val = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
         } catch(e) {}
+      }
+      if (col.key === 'duration_ms' && row.call_status === 'in_progress' && row.duration_ms == null && row.timestamp) {
+        const startedAt = Date.parse(row.timestamp);
+        if (Number.isFinite(startedAt)) val = Math.max(0, Date.now() - startedAt);
       }
       if (col.key === 'call_id' && !val) val = row.id != null ? '#' + row.id : '';
       if (col.key === 'call_id') {
@@ -1381,6 +1386,9 @@ function renderTable(data) {
         } else if (val === 'success') {
           val = '成功';
           td.classList.add('text-emerald-600', 'dark:text-emerald-400');
+        } else if (val === 'in_progress') {
+          val = '进行中';
+          td.classList.add('text-blue-600', 'dark:text-blue-400', 'font-semibold');
         } else {
           val = '-';
         }
@@ -1449,11 +1457,16 @@ function showDetail(row) {
   document.getElementById('dCallId').textContent = row.call_id || 'N/A';
   document.getElementById('dTimestamp').textContent = row.timestamp || '';
   document.getElementById('dMethod').textContent = row.method || '';
-  document.getElementById('dStatus').textContent = row.call_status === 'failed' ? '失败' : (row.call_status === 'success' ? '成功' : '-');
+  document.getElementById('dStatus').textContent = row.call_status === 'failed' ? '失败' : (row.call_status === 'success' ? '成功' : (row.call_status === 'in_progress' ? '进行中' : '-'));
   document.getElementById('dUrl').textContent = row.url || '';
   document.getElementById('dOriginalModel').textContent = row.original_model || '-';
   document.getElementById('dOverriddenModel').textContent = row.overridden_model || '-';
-  document.getElementById('dDuration').textContent = (row.duration_ms ?? '-') + ' ms';
+  let detailDuration = row.duration_ms;
+  if (row.call_status === 'in_progress' && detailDuration == null && row.timestamp) {
+    const startedAt = Date.parse(row.timestamp);
+    if (Number.isFinite(startedAt)) detailDuration = Math.max(0, Date.now() - startedAt);
+  }
+  document.getElementById('dDuration').textContent = (detailDuration ?? '-') + ' ms';
   document.getElementById('dFirstToken').textContent = row.first_token_ms ? row.first_token_ms + ' ms' : '-';
   document.getElementById('dStreamType').textContent = row.stream_type === 'stream' ? '流式' : '非流式';
   document.getElementById('dTokens').textContent = `输入: ${row.tokens_input ?? 0}, 输出: ${row.tokens_output ?? 0}`;

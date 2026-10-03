@@ -12,6 +12,7 @@ import threading
 import time
 import queue
 import socket
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -509,7 +510,13 @@ class LLMRouterAddon:
         while True:
             payload = self._save_queue.get()
             try:
-                self.storage.save_call_with_user(**payload)
+                operation = payload.pop("_call_save_operation", None)
+                if operation == "activity":
+                    self.storage.update_call_activity(**payload)
+                elif operation == "finalize":
+                    self.storage.finalize_call_with_user(**payload)
+                else:
+                    self.storage.save_call_with_user(**payload)
             except Exception as e:
                 logger.error(f"Failed to save call record in worker: {e}", exc_info=True)
             finally:
@@ -1802,6 +1809,34 @@ class LLMRouterAddon:
         """记录等待响应阶段补全的请求数据。"""
         with self._pending_requests_lock:
             self._pending_requests[id(flow)] = captured_req
+        if self._is_stream_request(captured_req.body):
+            last_activity_at = datetime.now().isoformat()
+            try:
+                self.storage.start_call_with_user(
+                    call_id=captured_req.call_id,
+                    timestamp=captured_req.timestamp,
+                    url=captured_req.url,
+                    method=captured_req.method,
+                    request_headers=captured_req.headers,
+                    request_body=captured_req.body or "",
+                    stream_type="stream",
+                    original_model=captured_req.original_model,
+                    overridden_model=captured_req.overridden_model,
+                    user_id=flow.metadata.get("user_id"),
+                    api_key_id=flow.metadata.get("api_key_id"),
+                    previous_response_id=flow.metadata.get("previous_response_id"),
+                    last_activity_at=last_activity_at,
+                    is_internal_relay=int(bool(flow.metadata.get("is_internal_relay"))),
+                )
+                flow.metadata["stream_call_started"] = True
+                flow.metadata["call_start_time"] = captured_req.start_time
+                flow.metadata["last_activity_persisted_at"] = time.time()
+            except Exception:
+                logger.warning(
+                    "Failed to create in-progress stream call record: call_id=%s",
+                    captured_req.call_id,
+                    exc_info=True,
+                )
 
     def _pop_pending_request(self, flow):
         """取出等待响应阶段补全的请求数据。"""
@@ -1825,12 +1860,29 @@ class LLMRouterAddon:
 
         return b"".join(chunks), first_body_time
 
-    def _capture_stream_chunk(self, flow, chunk: bytes):
-        """透传流式响应 chunk，并保留一份用于调用记录。"""
+    def _record_stream_activity(self, flow, chunk: bytes):
+        """记录非空流式 chunk，并按节流频率异步更新调用活动状态。"""
         if chunk and flow.metadata.get("first_token_time") is None:
             flow.metadata["first_token_time"] = time.time()
         if chunk:
             flow.metadata.setdefault("streamed_response_chunks", []).append(chunk)
+            call_id = flow.metadata.get("call_id")
+            call_start_time = flow.metadata.get("call_start_time")
+            last_persisted_at = flow.metadata.get("last_activity_persisted_at")
+            current_time = time.time()
+            if (
+                call_id
+                and call_start_time is not None
+                and last_persisted_at is not None
+                and current_time - last_persisted_at >= 10
+            ):
+                flow.metadata["last_activity_persisted_at"] = current_time
+                self._enqueue_call_save({
+                    "_call_save_operation": "activity",
+                    "call_id": call_id,
+                    "duration_ms": int((current_time - call_start_time) * 1000),
+                    "last_activity_at": datetime.now().isoformat(),
+                })
         return chunk
 
     @staticmethod
@@ -2763,7 +2815,7 @@ class LLMRouterAddon:
         status = getattr(flow.response, "status_code", 0) if flow.response else 0
         if status and not (200 <= status < 300):
             logger.warning(f"[ProtocolConvert] Upstream returned {status}, skipping conversion")
-            flow.response.stream = lambda chunk: self._capture_stream_chunk(flow, chunk)
+            flow.response.stream = lambda chunk: self._record_stream_activity(flow, chunk)
             return
         # 检查是否需要协议转换
         if flow.metadata.get("needs_protocol_conversion"):
@@ -2794,10 +2846,7 @@ class LLMRouterAddon:
                 else:
                     upstream_diagnostics["clean_eof_at"] = chunk_at
 
-                if chunk and flow.metadata.get("first_token_time") is None:
-                    flow.metadata["first_token_time"] = time.time()
-                if chunk:
-                    flow.metadata.setdefault("streamed_response_chunks", []).append(chunk)
+                self._record_stream_activity(flow, chunk)
                 raw_text = chunk.decode("utf-8", errors="replace")
                 buffer = flow.metadata.get("sse_buffer", "") + raw_text
                 # 流结束时(chunk为空)，若buffer还有数据，尝试强制解析末尾事件
@@ -2878,7 +2927,7 @@ class LLMRouterAddon:
 
             flow.response.stream = converted_stream
         else:
-            flow.response.stream = lambda chunk: self._capture_stream_chunk(flow, chunk)
+            flow.response.stream = lambda chunk: self._record_stream_activity(flow, chunk)
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
@@ -3145,7 +3194,7 @@ class LLMRouterAddon:
                 "token_source": token_source,
             }
 
-        self._enqueue_call_save({
+        call_save_payload = {
             "call_id": captured_req.call_id,
             "timestamp": captured_req.timestamp,
             "url": captured_req.url,
@@ -3173,7 +3222,11 @@ class LLMRouterAddon:
             "previous_response_id": previous_response_id,
             "full_context": full_context,
             "outbound_diagnostics": outbound_diagnostics,
-        })
+        }
+        if stream_type == "stream" and flow.metadata.get("stream_call_started"):
+            call_save_payload["_call_save_operation"] = "finalize"
+            call_save_payload["last_activity_at"] = datetime.now().isoformat()
+        self._enqueue_call_save(call_save_payload)
 
     def error(self, flow: http.HTTPFlow):
         """上游连接/传输错误时标记当前多上游路由失败。"""
@@ -3382,7 +3435,7 @@ class LLMRouterAddon:
                     "token_source": token_source,
                 }
 
-            self._enqueue_call_save({
+            call_save_payload = {
                 "call_id": captured_req.call_id,
                 "timestamp": captured_req.timestamp,
                 "url": captured_req.url,
@@ -3392,9 +3445,10 @@ class LLMRouterAddon:
                 "response_headers": response_headers,
                 "response_body": response_body,
                 "final_responses_body": None,
+                # 流式请求未完整结束时，即使 HTTP 状态为 2xx 也必须记录失败。
                 "call_status": (
                     "success" if stream_completed else "failed"
-                ) if stream_converter is not None else self._infer_call_status(
+                ) if stream_type == "stream" else self._infer_call_status(
                     resp_status, response_body
                 ),
                 "duration_ms": duration_ms,
@@ -3414,7 +3468,11 @@ class LLMRouterAddon:
                 "previous_response_id": flow.metadata.get("previous_response_id"),
                 "full_context": None,
                 "outbound_diagnostics": outbound_diagnostics,
-            })
+            }
+            if stream_type == "stream" and flow.metadata.get("stream_call_started"):
+                call_save_payload["_call_save_operation"] = "finalize"
+                call_save_payload["last_activity_at"] = datetime.now().isoformat()
+            self._enqueue_call_save(call_save_payload)
         elif captured_req and resp_status is None:
             duration_ms = int((time.time() - captured_req.start_time) * 1000)
             stream_type = "non_stream"
@@ -3431,7 +3489,7 @@ class LLMRouterAddon:
                 outbound_diagnostics["duration_ms"] = duration_ms
                 outbound_diagnostics["first_token_ms"] = None
 
-            self._enqueue_call_save({
+            call_save_payload = {
                 "call_id": captured_req.call_id,
                 "timestamp": captured_req.timestamp,
                 "url": captured_req.url,
@@ -3459,7 +3517,11 @@ class LLMRouterAddon:
                 "previous_response_id": flow.metadata.get("previous_response_id"),
                 "full_context": None,
                 "outbound_diagnostics": outbound_diagnostics,
-            })
+            }
+            if stream_type == "stream" and flow.metadata.get("stream_call_started"):
+                call_save_payload["_call_save_operation"] = "finalize"
+                call_save_payload["last_activity_at"] = datetime.now().isoformat()
+            self._enqueue_call_save(call_save_payload)
 
         if not is_multi:
             return

@@ -128,6 +128,7 @@ class CallStorage:
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS cache_miss_tokens INTEGER")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS tokens_per_second REAL")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS call_status TEXT")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS last_activity_at TEXT")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS user_id INTEGER")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS api_key_id INTEGER")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS previous_response_id TEXT")
@@ -156,6 +157,8 @@ class CallStorage:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN tokens_per_second REAL")
                     if "call_status" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN call_status TEXT")
+                    if "last_activity_at" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN last_activity_at TEXT")
                     if "user_id" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN user_id INTEGER")
                     if "api_key_id" not in existing_columns:
@@ -410,6 +413,7 @@ class CallStorage:
                         response_body TEXT,
                         final_responses_body TEXT,
                         call_status TEXT,
+                        last_activity_at TEXT,
                         duration_ms INTEGER,
                         tokens_input INTEGER,
                         tokens_output INTEGER,
@@ -447,6 +451,7 @@ class CallStorage:
                         response_body TEXT,
                         final_responses_body TEXT,
                         call_status TEXT,
+                        last_activity_at TEXT,
                         duration_ms INTEGER,
                         tokens_input INTEGER,
                         tokens_output INTEGER,
@@ -949,6 +954,7 @@ class CallStorage:
         tokens_per_second: Optional[float] = None,
         outbound_diagnostics: Optional[dict] = None,
         is_internal_relay: int = 0,
+        last_activity_at: Optional[str] = None,
     ):
         """保存调用记录（带用户和 API Key 关联）"""
         self._ensure_llm_calls_schema_extensions()
@@ -968,6 +974,7 @@ class CallStorage:
             json.dumps(outbound_diagnostics, ensure_ascii=False)
             if outbound_diagnostics is not None else None,
             is_internal_relay,
+            last_activity_at,
         )
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -980,8 +987,8 @@ class CallStorage:
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
-                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -996,11 +1003,196 @@ class CallStorage:
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
-                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
+
+    def start_call_with_user(
+        self,
+        call_id: str, timestamp: str, url: str, method: str,
+        request_headers: dict, request_body: str, stream_type: str,
+        original_model: str, overridden_model: str,
+        user_id: Optional[int], api_key_id: Optional[int],
+        previous_response_id: Optional[str], last_activity_at: Optional[str],
+        is_internal_relay: int = 0,
+    ):
+        """创建流式调用的进行中记录，供请求开始阶段立即展示调用状态。"""
+        self._ensure_llm_calls_schema_extensions()
+        self._ensure_hot_path_indexes()
+        args = (
+            call_id, timestamp, url, method,
+            json.dumps(request_headers, ensure_ascii=False), request_body,
+            json.dumps({}, ensure_ascii=False), "", None, "in_progress",
+            0, None, None, None, None, None, None,
+            stream_type, None, original_model, overridden_model,
+            user_id, api_key_id, previous_response_id, None, None,
+            is_internal_relay, last_activity_at,
+        )
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("""
+                    INSERT INTO llm_calls (
+                        call_id, timestamp, url, method,
+                        request_headers, request_body,
+                        response_headers, response_body, final_responses_body, call_status,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
+                        stream_type, first_token_ms,
+                        original_model, overridden_model, user_id, api_key_id,
+                        previous_response_id, full_context, outbound_diagnostics,
+                        is_internal_relay, last_activity_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (call_id) DO NOTHING
+                """, args)
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("""
+                    INSERT OR IGNORE INTO llm_calls (
+                        call_id, timestamp, url, method,
+                        request_headers, request_body,
+                        response_headers, response_body, final_responses_body, call_status,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
+                        stream_type, first_token_ms,
+                        original_model, overridden_model, user_id, api_key_id,
+                        previous_response_id, full_context, outbound_diagnostics,
+                        is_internal_relay, last_activity_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, args)
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def update_call_activity(self, call_id: str, duration_ms: int, last_activity_at: str):
+        """更新进行中流式调用的运行耗时和最近活动时间。"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "UPDATE llm_calls SET duration_ms = %s, last_activity_at = %s "
+                    "WHERE call_id = %s AND call_status = 'in_progress'",
+                    (duration_ms, last_activity_at, call_id),
+                )
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "UPDATE llm_calls SET duration_ms = ?, last_activity_at = ? "
+                    "WHERE call_id = ? AND call_status = 'in_progress'",
+                    (duration_ms, last_activity_at, call_id),
+                )
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def finalize_call_with_user(
+        self,
+        call_id: str, timestamp: str, url: str, method: str,
+        request_headers: dict, request_body: str,
+        response_headers: dict, response_body: str,
+        duration_ms: int, tokens_input: int, tokens_output: int, token_source: str,
+        stream_type: str = "non_stream", first_token_ms: Optional[int] = None,
+        original_model: str = None, overridden_model: str = None,
+        user_id: Optional[int] = None, api_key_id: Optional[int] = None,
+        previous_response_id: Optional[str] = None, full_context: Optional[str] = None,
+        final_responses_body: Optional[str] = None,
+        call_status: Optional[str] = None,
+        cached_hit_tokens: Optional[int] = None,
+        cache_miss_tokens: Optional[int] = None,
+        tokens_per_second: Optional[float] = None,
+        outbound_diagnostics: Optional[dict] = None,
+        is_internal_relay: int = 0,
+        last_activity_at: Optional[str] = None,
+    ):
+        """按 call_id 完成调用记录，开始记录不存在时回退插入最终记录。"""
+        self._ensure_llm_calls_schema_extensions()
+        self._ensure_hot_path_indexes()
+        args = (
+            url, method,
+            json.dumps(request_headers, ensure_ascii=False), request_body,
+            json.dumps(response_headers, ensure_ascii=False), response_body,
+            final_responses_body, call_status, duration_ms,
+            tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens,
+            tokens_per_second, token_source, stream_type, first_token_ms,
+            original_model, overridden_model, user_id, api_key_id,
+            previous_response_id, full_context,
+            json.dumps(outbound_diagnostics, ensure_ascii=False)
+            if outbound_diagnostics is not None else None,
+            is_internal_relay, last_activity_at, call_id,
+        )
+        updated = False
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute("""
+                    UPDATE llm_calls SET
+                        url = %s, method = %s, request_headers = %s, request_body = %s,
+                        response_headers = %s, response_body = %s, final_responses_body = %s,
+                        call_status = %s, duration_ms = %s, tokens_input = %s, tokens_output = %s,
+                        cached_hit_tokens = %s, cache_miss_tokens = %s, tokens_per_second = %s,
+                        token_source = %s, stream_type = %s, first_token_ms = %s,
+                        original_model = %s, overridden_model = %s, user_id = %s, api_key_id = %s,
+                        previous_response_id = %s, full_context = %s, outbound_diagnostics = %s,
+                        is_internal_relay = %s, last_activity_at = %s
+                    WHERE call_id = %s
+                """, args)
+                updated = cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute("""
+                    UPDATE llm_calls SET
+                        url = ?, method = ?, request_headers = ?, request_body = ?,
+                        response_headers = ?, response_body = ?, final_responses_body = ?,
+                        call_status = ?, duration_ms = ?, tokens_input = ?, tokens_output = ?,
+                        cached_hit_tokens = ?, cache_miss_tokens = ?, tokens_per_second = ?,
+                        token_source = ?, stream_type = ?, first_token_ms = ?,
+                        original_model = ?, overridden_model = ?, user_id = ?, api_key_id = ?,
+                        previous_response_id = ?, full_context = ?, outbound_diagnostics = ?,
+                        is_internal_relay = ?, last_activity_at = ?
+                    WHERE call_id = ?
+                """, args)
+                updated = cur.rowcount > 0
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+        if not updated:
+            self.save_call_with_user(
+                call_id=call_id,
+                timestamp=timestamp,
+                url=url,
+                method=method,
+                request_headers=request_headers,
+                request_body=request_body,
+                response_headers=response_headers,
+                response_body=response_body,
+                duration_ms=duration_ms,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                token_source=token_source,
+                stream_type=stream_type,
+                first_token_ms=first_token_ms,
+                original_model=original_model,
+                overridden_model=overridden_model,
+                user_id=user_id,
+                api_key_id=api_key_id,
+                previous_response_id=previous_response_id,
+                full_context=full_context,
+                final_responses_body=final_responses_body,
+                call_status=call_status,
+                cached_hit_tokens=cached_hit_tokens,
+                cache_miss_tokens=cache_miss_tokens,
+                tokens_per_second=tokens_per_second,
+                outbound_diagnostics=outbound_diagnostics,
+                is_internal_relay=is_internal_relay,
+                last_activity_at=last_activity_at,
+            )
 
     def get_call_history(self, call_id: str, api_key_id: int) -> Optional[dict]:
         """查询历史调用记录，按 api_key_id 隔离。
