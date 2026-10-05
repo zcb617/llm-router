@@ -2570,6 +2570,15 @@ class LLMRouterAddon:
                     flow.response = http.Response.make(404, b"Login page not found", {"Content-Type": "text/plain"})
                 return
 
+            if path == "/web/auth-interceptor.js":
+                auth_interceptor_path = Path(__file__).parent.parent / 'web' / 'auth-interceptor.js'
+                if auth_interceptor_path.exists():
+                    content = auth_interceptor_path.read_bytes()
+                    flow.response = http.Response.make(200, content, {'Content-Type': 'application/javascript; charset=utf-8'})
+                else:
+                    flow.response = http.Response.make(404, b'Auth interceptor not found', {'Content-Type': 'text/plain'})
+                return
+
             if path == "/web/console.html":
                 console_path = Path(__file__).parent.parent / "web" / "console.html"
                 if console_path.exists():

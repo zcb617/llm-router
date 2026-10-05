@@ -118,6 +118,7 @@
     </div>
   </main>
 
+<script src="/web/auth-interceptor.js"></script>
 <script>
 const token = localStorage.getItem('llm_token');
 if (!token) {
@@ -289,10 +290,6 @@ function renderModels() {
 async function loadUser() {
   try {
     const res = await fetch('/api/auth/me', { headers: getAuthHeaders() });
-    if (res.status === 401) {
-      window.location.href = '/web/login.html';
-      return false;
-    }
     const data = await res.json();
     if (res.ok) {
       document.getElementById('userEmail').textContent = data.email || localStorage.getItem('llm_email') || '';
@@ -309,10 +306,6 @@ async function loadModels() {
   loadState.classList.remove('hidden');
   try {
     const res = await fetch('/api/models/available', { headers: getAuthHeaders() });
-    if (res.status === 401) {
-      window.location.href = '/web/login.html';
-      return;
-    }
     const data = await res.json();
     if (!res.ok) {
       throw new Error(data.error || '加载失败');

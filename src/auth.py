@@ -10,7 +10,7 @@ from typing import Optional
 # JWT 配置
 JWT_SECRET = "llm-router-secret-change-in-production"
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = 24
+JWT_EXPIRE_HOURS = 30 * 24
 
 # 邮箱正则
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
