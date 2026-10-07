@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.2.0"
+CURRENT_VERSION = "1.2.1"
 
 
 def get_pg_conn(config):
@@ -129,6 +129,18 @@ PG_TABLES = [
             previous_response_id TEXT,
             full_context TEXT,
             outbound_diagnostics JSON
+        )
+    """),
+    ("token_usage_history", """
+        CREATE TABLE IF NOT EXISTS token_usage_history (
+            id SERIAL PRIMARY KEY,
+            usage_day DATE NOT NULL,
+            user_id INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            call_count INTEGER NOT NULL,
+            cache_miss_tokens BIGINT NOT NULL,
+            cached_hit_tokens BIGINT NOT NULL,
+            tokens_output BIGINT NOT NULL
         )
     """),
     ("codex_prompt_cache_affinity", """
@@ -286,6 +298,18 @@ SQLITE_TABLES = [
             outbound_diagnostics TEXT
         )
     """),
+    ("token_usage_history", """
+        CREATE TABLE IF NOT EXISTS token_usage_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usage_day TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            call_count INTEGER NOT NULL,
+            cache_miss_tokens INTEGER NOT NULL,
+            cached_hit_tokens INTEGER NOT NULL,
+            tokens_output INTEGER NOT NULL
+        )
+    """),
     ("codex_prompt_cache_affinity", """
         CREATE TABLE IF NOT EXISTS codex_prompt_cache_affinity (
             account_id TEXT NOT NULL DEFAULT '',
@@ -437,7 +461,7 @@ def run_v100_pg(config):
     cur = conn.cursor()
 
     # 1. 建表（先建 roles 等被引用的表）
-    table_order = ["roles", "menus", "auth_files", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
+    table_order = ["roles", "menus", "auth_files", "upstreams", "llm_calls", "token_usage_history", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in PG_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")
@@ -506,7 +530,7 @@ def run_v100_sqlite(config):
     cur = conn.cursor()
 
     # 1. 建表
-    table_order = ["roles", "menus", "auth_files", "upstreams", "llm_calls", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
+    table_order = ["roles", "menus", "auth_files", "upstreams", "llm_calls", "token_usage_history", "codex_prompt_cache_affinity", "users", "api_keys", "role_menus", "model_configs", "model_upstream_routes"]
     table_sql = {name: sql for name, sql in SQLITE_TABLES}
     for name in table_order:
         print(f"    [v1.0.0] 创建表: {name}")
@@ -1010,6 +1034,48 @@ def run_v120_sqlite(conn):
         cur.close()
 
 
+def run_v121_pg(conn):
+    """执行 v1.2.1 升级：创建历史 Token 使用表（PostgreSQL）。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS token_usage_history (
+                id SERIAL PRIMARY KEY,
+                usage_day DATE NOT NULL,
+                user_id INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                call_count INTEGER NOT NULL,
+                cache_miss_tokens BIGINT NOT NULL,
+                cached_hit_tokens BIGINT NOT NULL,
+                tokens_output BIGINT NOT NULL
+            )
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v121_sqlite(conn):
+    """执行 v1.2.1 升级：创建历史 Token 使用表（SQLite）。"""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS token_usage_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usage_day TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                call_count INTEGER NOT NULL,
+                cache_miss_tokens INTEGER NOT NULL,
+                cached_hit_tokens INTEGER NOT NULL,
+                tokens_output INTEGER NOT NULL
+            )
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -1040,7 +1106,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -1128,6 +1194,12 @@ def main():
             run_v120_pg(conn)
         else:
             run_v120_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", CURRENT_VERSION):
+        print("\n[v1.2.1] 检查/补齐历史 Token 使用表...")
+        if is_pg:
+            run_v121_pg(conn)
+        else:
+            run_v121_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

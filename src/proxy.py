@@ -12,7 +12,7 @@ import threading
 import time
 import queue
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -130,6 +130,7 @@ class LLMRouterAddon:
         self._health_check_timer = None
         self._health_check_interval = 60  # 秒
         self._health_check_started = False
+        self._token_usage_history_started = False  # 历史 Token 使用每日调度线程是否已启动
 
         # API key 校验缓存
         self._api_key_cache = {}
@@ -744,6 +745,9 @@ class LLMRouterAddon:
 
         # 启动健康检查定时器
         self._start_health_check_timer()
+
+        # 启动历史 Token 使用每日导入定时器
+        self._start_token_usage_history_timer()
 
     async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
@@ -2356,6 +2360,43 @@ class LLMRouterAddon:
         self._health_check_started = True
         threading.Thread(target=self._health_check_loop, daemon=True).start()
         logger.info(f"Health check timer started (interval: {self._health_check_interval}s)")
+
+    def _start_token_usage_history_timer(self):
+        """启动每日凌晨导入历史 Token 使用量的后台线程。"""
+        if self._token_usage_history_started:
+            return
+        self._token_usage_history_started = True
+        threading.Thread(
+            target=self._token_usage_history_loop,
+            name="token-usage-history-timer",
+            daemon=True,
+        ).start()
+        logger.info("Token usage history timer started (daily at 05:00)")
+
+    def _token_usage_history_loop(self):
+        """按本地时间每天凌晨 5 点导入前一天的历史 Token 使用量。"""
+        while True:
+            now = datetime.now()
+            next_run = now.replace(hour=5, minute=0, second=0, microsecond=0)
+            if next_run <= now:
+                next_run += timedelta(days=1)
+            time.sleep((next_run - now).total_seconds())
+
+            usage_day = (datetime.now().date() - timedelta(days=1)).isoformat()
+            try:
+                inserted_count = self.storage.import_token_usage_history(usage_day)
+                logger.info(
+                    "Token usage history imported for %s: %s grouped rows",
+                    usage_day,
+                    inserted_count,
+                )
+            except Exception as e:
+                logger.error(
+                    "Token usage history import failed for %s: %s",
+                    usage_day,
+                    e,
+                    exc_info=True,
+                )
 
     def _health_check_loop(self):
         """健康检查循环"""

@@ -5,7 +5,7 @@ import json
 import threading
 from pathlib import Path
 from typing import Optional
-from datetime import date
+from datetime import date, timedelta
 
 from src.config import PostgreSQLConfig
 
@@ -25,6 +25,8 @@ class CallStorage:
         self._llm_calls_schema_lock = threading.Lock()
         self._prompt_cache_affinity_schema_ready = False
         self._prompt_cache_affinity_schema_lock = threading.Lock()
+        self._token_usage_history_schema_ready = False  # 历史 Token 使用表是否已确认存在
+        self._token_usage_history_schema_lock = threading.Lock()  # 历史 Token 使用表建表并发锁
 
         if self._use_postgres:
             import psycopg2.pool
@@ -304,6 +306,58 @@ class CallStorage:
             else:
                 self._sqlite_close(conn, cur)
 
+    def _ensure_token_usage_history_table(self):
+        """确保历史 Token 使用表存在，供每日汇总任务写入历史用量。"""
+        if self._token_usage_history_schema_ready:
+            return
+
+        with self._token_usage_history_schema_lock:
+            if self._token_usage_history_schema_ready:
+                return
+
+            conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+            try:
+                if self.postgresql:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS token_usage_history (
+                            id SERIAL PRIMARY KEY,
+                            usage_day DATE NOT NULL,
+                            user_id INTEGER NOT NULL,
+                            model TEXT NOT NULL,
+                            call_count INTEGER NOT NULL,
+                            cache_miss_tokens BIGINT NOT NULL,
+                            cached_hit_tokens BIGINT NOT NULL,
+                            tokens_output BIGINT NOT NULL
+                        )
+                    """)
+                    conn.commit()
+                else:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS token_usage_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            usage_day TEXT NOT NULL,
+                            user_id INTEGER NOT NULL,
+                            model TEXT NOT NULL,
+                            call_count INTEGER NOT NULL,
+                            cache_miss_tokens INTEGER NOT NULL,
+                            cached_hit_tokens INTEGER NOT NULL,
+                            tokens_output INTEGER NOT NULL
+                        )
+                    """)
+                    conn.commit()
+                self._token_usage_history_schema_ready = True
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                if self.postgresql:
+                    self._pg_close(conn, cur)
+                else:
+                    self._sqlite_close(conn, cur)
+
     def upsert_prompt_cache_affinity(
         self,
         account_id: str,
@@ -373,6 +427,83 @@ class CallStorage:
             else:
                 self._sqlite_close(conn, cur, commit=True)
 
+    def import_token_usage_history(self, usage_day: str) -> int:
+        """汇总指定日期的调用日志并直接追加写入历史 Token 使用表。"""
+        self._ensure_token_usage_history_table()
+        usage_date = date.fromisoformat(usage_day)
+        next_day = usage_date + timedelta(days=1)
+        start_timestamp = f"{usage_date.isoformat()} 00:00:00"
+        end_timestamp = f"{next_day.isoformat()} 00:00:00"
+
+        conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
+        try:
+            if self.postgresql:
+                cur.execute(
+                    "SELECT user_id, original_model, COUNT(*), "
+                    "COALESCE(SUM(cache_miss_tokens), 0), "
+                    "COALESCE(SUM(cached_hit_tokens), 0), "
+                    "COALESCE(SUM(tokens_output), 0) "
+                    "FROM llm_calls "
+                    "WHERE timestamp >= %s AND timestamp < %s "
+                    "AND call_status <> 'failed' "
+                    "GROUP BY user_id, original_model",
+                    (start_timestamp, end_timestamp),
+                )
+                grouped_rows = cur.fetchall()
+                cur.executemany(
+                    "INSERT INTO token_usage_history "
+                    "(usage_day, user_id, model, call_count, cache_miss_tokens, cached_hit_tokens, tokens_output) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    [(
+                        usage_day,
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                    ) for row in grouped_rows],
+                )
+            else:
+                cur.execute(
+                    "SELECT user_id, original_model, COUNT(*), "
+                    "COALESCE(SUM(cache_miss_tokens), 0), "
+                    "COALESCE(SUM(cached_hit_tokens), 0), "
+                    "COALESCE(SUM(tokens_output), 0) "
+                    "FROM llm_calls "
+                    "WHERE timestamp >= ? AND timestamp < ? "
+                    "AND call_status <> 'failed' "
+                    "GROUP BY user_id, original_model",
+                    (start_timestamp, end_timestamp),
+                )
+                grouped_rows = cur.fetchall()
+                cur.executemany(
+                    "INSERT INTO token_usage_history "
+                    "(usage_day, user_id, model, call_count, cache_miss_tokens, cached_hit_tokens, tokens_output) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [(
+                        usage_day,
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                    ) for row in grouped_rows],
+                )
+
+            inserted_count = cur.rowcount if grouped_rows else 0
+            conn.commit()
+            return inserted_count
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if self.postgresql:
+                self._pg_close(conn, cur)
+            else:
+                self._sqlite_close(conn, cur)
+
     def close(self):
         """释放底层连接资源。"""
         if self._pg_pool is not None:
@@ -429,6 +560,18 @@ class CallStorage:
                         outbound_diagnostics JSON
                     )
                 """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS token_usage_history (
+                        id SERIAL PRIMARY KEY,
+                        usage_day DATE NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        call_count INTEGER NOT NULL,
+                        cache_miss_tokens BIGINT NOT NULL,
+                        cached_hit_tokens BIGINT NOT NULL,
+                        tokens_output BIGINT NOT NULL
+                    )
+                """)
             finally:
                 await conn.close()
         else:
@@ -465,6 +608,18 @@ class CallStorage:
                         previous_response_id TEXT,
                         full_context TEXT,
                         outbound_diagnostics TEXT
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS token_usage_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        usage_day TEXT NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        call_count INTEGER NOT NULL,
+                        cache_miss_tokens INTEGER NOT NULL,
+                        cached_hit_tokens INTEGER NOT NULL,
+                        tokens_output INTEGER NOT NULL
                     )
                 """)
                 await db.commit()
