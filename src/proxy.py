@@ -2654,7 +2654,18 @@ class LLMRouterAddon:
                 is_pg = False
 
             if path.startswith("/api/calls/"):
-                call_id = int(path.split("/")[-1])
+                try:
+                    record_id = int(path.split("/")[-1])
+                except (TypeError, ValueError):
+                    flow.response = http.Response.make(
+                        400,
+                        b'{"error": "Call id must be an integer"}',
+                        {"Content-Type": "application/json"}
+                    )
+                    if not is_pg:
+                        cur.close()
+                        conn.close()
+                    return
                 # 从 JWT 提取 user_id
                 from src.auth import verify_jwt_token
                 auth_header = flow.request.headers.get("Authorization", "")
@@ -2666,14 +2677,14 @@ class LLMRouterAddon:
                 
                 if is_pg:
                     if user_id:
-                        cur.execute("SELECT * FROM llm_calls WHERE (id = %s OR call_id = %s) AND user_id = %s", (call_id, call_id, user_id))
+                        cur.execute("SELECT * FROM llm_calls WHERE is_internal_relay = 0 AND id = %s AND user_id = %s", (record_id, user_id))
                     else:
-                        cur.execute("SELECT * FROM llm_calls WHERE id = %s OR call_id = %s", (call_id, call_id))
+                        cur.execute("SELECT * FROM llm_calls WHERE is_internal_relay = 0 AND id = %s", (record_id,))
                 else:
                     if user_id:
-                        cur.execute("SELECT * FROM llm_calls WHERE (id = ? OR call_id = ?) AND user_id = ?", (call_id, call_id, user_id))
+                        cur.execute("SELECT * FROM llm_calls WHERE is_internal_relay = 0 AND id = ? AND user_id = ?", (record_id, user_id))
                     else:
-                        cur.execute("SELECT * FROM llm_calls WHERE id = ? OR call_id = ?", (call_id, call_id))
+                        cur.execute("SELECT * FROM llm_calls WHERE is_internal_relay = 0 AND id = ?", (record_id,))
                 row = cur.fetchone()
                 if row:
                     if is_pg:
@@ -2702,11 +2713,36 @@ class LLMRouterAddon:
                         user_id = payload.get("user_id")
 
                 query_str = urlencode(list(flow.request.query.items()))
-                params = parse_qs(query_str)
+                params = parse_qs(query_str, keep_blank_values=True)
                 limit = int(params.get("limit", [100])[0])
                 offset = int(params.get("offset", [0])[0])
                 search_original = params.get("search_original", [""])[0].strip()
                 search_overridden = params.get("search_overridden", [""])[0].strip()
+                columns_param = params.get("columns")
+                # 调用日志列表允许返回的轻量展示字段白名单，避免查询和响应携带日志大字段
+                lightweight_columns = [
+                    "id", "call_id", "timestamp", "method", "call_status", "url",
+                    "original_model", "overridden_model", "duration_ms", "last_activity_at",
+                    "first_token_ms", "stream_type", "tokens_input", "tokens_output",
+                    "cached_hit_tokens", "cache_miss_tokens", "tokens_per_second"
+                ]
+                if columns_param is None:
+                    requested_columns = list(lightweight_columns)
+                else:
+                    requested_columns = [column.strip() for column in columns_param[0].split(",") if column.strip()]
+                selected_columns = []
+                for column in requested_columns:
+                    if column in lightweight_columns and column not in selected_columns:
+                        selected_columns.append(column)
+                for required_column in ("id", "timestamp"):
+                    if required_column not in selected_columns:
+                        selected_columns.append(required_column)
+                if "duration_ms" in selected_columns and "call_status" not in selected_columns:
+                    selected_columns.append("call_status")
+                sort_column = params.get("sort", [""])[0]
+                if sort_column in lightweight_columns and sort_column not in selected_columns:
+                    selected_columns.append(sort_column)
+                select_sql = ", ".join(selected_columns)
                 pagination_mode = params.get("pagination_mode", ["offset"])[0]
                 cursor_direction = params.get("cursor_direction", [""])[0]
                 cursor_timestamp = params.get("cursor_timestamp", [""])[0]
@@ -2792,7 +2828,7 @@ class LLMRouterAddon:
                     cur.execute(f"SELECT COUNT(*) FROM llm_calls {count_where_sql}", count_args)
                     total = cur.fetchone()[0]
                     cur.execute(
-                        f"SELECT * FROM llm_calls {data_where_sql} ORDER BY {data_order_sql} LIMIT %s OFFSET %s",
+                        f"SELECT {select_sql} FROM llm_calls {data_where_sql} ORDER BY {data_order_sql} LIMIT %s OFFSET %s",
                         tuple(data_args) + (limit, data_offset)
                     )
                     rows = cur.fetchall()
@@ -2801,7 +2837,7 @@ class LLMRouterAddon:
                     cur.execute(f"SELECT COUNT(*) FROM llm_calls {count_where_sql}", count_args)
                     total = cur.fetchone()[0]
                     cur.execute(
-                        f"SELECT * FROM llm_calls {data_where_sql} ORDER BY {data_order_sql} LIMIT ? OFFSET ?",
+                        f"SELECT {select_sql} FROM llm_calls {data_where_sql} ORDER BY {data_order_sql} LIMIT ? OFFSET ?",
                         tuple(data_args) + (limit, data_offset)
                     )
                     calls = [dict(r) for r in cur.fetchall()]

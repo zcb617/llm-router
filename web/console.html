@@ -1417,7 +1417,8 @@ async function loadLogsData(paginationMode = 'offset', cursorDirection = '', cur
     pagination_mode: paginationMode,
     limit: logsState.pageSize, offset: (logsState.page - 1) * logsState.pageSize,
     sort: logsState.sortKey, dir: logsState.sortDir,
-    search_original: logsState.searchOriginal, search_overridden: logsState.searchOverridden
+    search_original: logsState.searchOriginal, search_overridden: logsState.searchOverridden,
+    columns: getVisibleColumns().map(col => col.key).join(',')
   });
   if (paginationMode === 'cursor') {
     params.set('cursor_direction', cursorDirection);
@@ -1454,31 +1455,44 @@ async function loadLogsData(paginationMode = 'offset', cursorDirection = '', cur
   }
 }
 
-function showDetail(row) {
-  document.getElementById('dCallId').textContent = row.call_id || 'N/A';
-  document.getElementById('dTimestamp').textContent = row.timestamp || '';
-  document.getElementById('dMethod').textContent = row.method || '';
-  document.getElementById('dStatus').textContent = row.call_status === 'failed' ? '失败' : (row.call_status === 'success' ? '成功' : (row.call_status === 'in_progress' ? '进行中' : '-'));
-  document.getElementById('dUrl').textContent = row.url || '';
-  document.getElementById('dOriginalModel').textContent = row.original_model || '-';
-  document.getElementById('dOverriddenModel').textContent = row.overridden_model || '-';
-  let detailDuration = row.duration_ms;
-  if (row.call_status === 'in_progress' && detailDuration == null && row.timestamp) {
-    const startedAt = Date.parse(row.timestamp);
-    if (Number.isFinite(startedAt)) detailDuration = Math.max(0, Date.now() - startedAt);
+// 按数据库记录 ID 加载调用日志完整详情并展示请求与响应内容
+async function showDetail(row) {
+  try {
+    if (!row || row.id == null || row.id === '') throw new Error('缺少调用 ID');
+    const res = await fetch('/api/calls/' + encodeURIComponent(row.id), { headers: getAuthHeaders() });
+    const data = await res.json();
+    if (!res.ok || (data && data.error)) {
+      throw new Error((data && data.error) || res.statusText || ('HTTP ' + res.status));
+    }
+    const detail = data;
+    document.getElementById('dCallId').textContent = detail.call_id || 'N/A';
+    document.getElementById('dTimestamp').textContent = detail.timestamp || '';
+    document.getElementById('dMethod').textContent = detail.method || '';
+    document.getElementById('dStatus').textContent = detail.call_status === 'failed' ? '失败' : (detail.call_status === 'success' ? '成功' : (detail.call_status === 'in_progress' ? '进行中' : '-'));
+    document.getElementById('dUrl').textContent = detail.url || '';
+    document.getElementById('dOriginalModel').textContent = detail.original_model || '-';
+    document.getElementById('dOverriddenModel').textContent = detail.overridden_model || '-';
+    let detailDuration = detail.duration_ms;
+    if (detail.call_status === 'in_progress' && detailDuration == null && detail.timestamp) {
+      const startedAt = Date.parse(detail.timestamp);
+      if (Number.isFinite(startedAt)) detailDuration = Math.max(0, Date.now() - startedAt);
+    }
+    document.getElementById('dDuration').textContent = (detailDuration ?? '-') + ' ms';
+    document.getElementById('dFirstToken').textContent = detail.first_token_ms ? detail.first_token_ms + ' ms' : '-';
+    document.getElementById('dStreamType').textContent = detail.stream_type === 'stream' ? '流式' : '非流式';
+    document.getElementById('dTokens').textContent = `输入: ${detail.tokens_input ?? 0}, 输出: ${detail.tokens_output ?? 0}`;
+    document.getElementById('dCached').textContent = detail.cached_hit_tokens != null ? detail.cached_hit_tokens : '-';
+    document.getElementById('dCacheMiss').textContent = detail.cache_miss_tokens != null ? detail.cache_miss_tokens : '-';
+    document.getElementById('dSpeed').textContent = detail.tokens_per_second != null ? detail.tokens_per_second + ' t/s' : '-';
+    try { document.getElementById('dReqHeaders').textContent = JSON.stringify(JSON.parse(detail.request_headers || '{}'), null, 2); } catch { document.getElementById('dReqHeaders').textContent = detail.request_headers || ''; }
+    try { document.getElementById('dReqBody').textContent = JSON.stringify(JSON.parse(detail.request_body || '{}'), null, 2); } catch { document.getElementById('dReqBody').textContent = detail.request_body || ''; }
+    try { document.getElementById('dResHeaders').textContent = JSON.stringify(JSON.parse(detail.response_headers || '{}'), null, 2); } catch { document.getElementById('dResHeaders').textContent = detail.response_headers || ''; }
+    try { document.getElementById('dResBody').textContent = JSON.stringify(JSON.parse(detail.response_body || '{}'), null, 2); } catch { document.getElementById('dResBody').textContent = detail.response_body || ''; }
+    document.getElementById('detailModal').classList.remove('hidden');
+  } catch (e) {
+    document.getElementById('detailModal').classList.add('hidden');
+    alert('加载调用详情失败: ' + e.message);
   }
-  document.getElementById('dDuration').textContent = (detailDuration ?? '-') + ' ms';
-  document.getElementById('dFirstToken').textContent = row.first_token_ms ? row.first_token_ms + ' ms' : '-';
-  document.getElementById('dStreamType').textContent = row.stream_type === 'stream' ? '流式' : '非流式';
-  document.getElementById('dTokens').textContent = `输入: ${row.tokens_input ?? 0}, 输出: ${row.tokens_output ?? 0}`;
-  document.getElementById('dCached').textContent = row.cached_hit_tokens != null ? row.cached_hit_tokens : '-';
-  document.getElementById('dCacheMiss').textContent = row.cache_miss_tokens != null ? row.cache_miss_tokens : '-';
-  document.getElementById('dSpeed').textContent = row.tokens_per_second != null ? row.tokens_per_second + ' t/s' : '-';
-  try { document.getElementById('dReqHeaders').textContent = JSON.stringify(JSON.parse(row.request_headers || '{}'), null, 2); } catch { document.getElementById('dReqHeaders').textContent = row.request_headers || ''; }
-  try { document.getElementById('dReqBody').textContent = JSON.stringify(JSON.parse(row.request_body || '{}'), null, 2); } catch { document.getElementById('dReqBody').textContent = row.request_body || ''; }
-  try { document.getElementById('dResHeaders').textContent = JSON.stringify(JSON.parse(row.response_headers || '{}'), null, 2); } catch { document.getElementById('dResHeaders').textContent = row.response_headers || ''; }
-  try { document.getElementById('dResBody').textContent = JSON.stringify(JSON.parse(row.response_body || '{}'), null, 2); } catch { document.getElementById('dResBody').textContent = row.response_body || ''; }
-  document.getElementById('detailModal').classList.remove('hidden');
 }
 
 document.getElementById('closeDetailBtn').addEventListener('click', () => document.getElementById('detailModal').classList.add('hidden'));
