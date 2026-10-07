@@ -251,7 +251,7 @@ class LLMRouterAddon:
             return cfg.get("target_base_url") or KIMI_CLI_OAUTH_BASE_URL
         if self._is_codex_cli_oauth(cfg):
             # Prefer 指定 oauth_home 的 config.toml openai_base_url; fallback to Codex default.
-            return resolve_codex_base_url(oauth_home=cfg.get("oauth_home") or None)
+            return cfg.get("target_base_url") or resolve_codex_base_url(oauth_home=cfg.get("oauth_home") or None)
         return cfg.get("target_base_url", "")
 
     @staticmethod
@@ -617,7 +617,7 @@ class LLMRouterAddon:
                 if auth_mode == "kimi_cli_oauth":
                     target_base_url = r.get("target_base_url") or KIMI_CLI_OAUTH_BASE_URL
                 elif auth_mode == "codex_cli_oauth":
-                    target_base_url = resolve_codex_base_url(oauth_home=r.get("oauth_home") or None)
+                    target_base_url = r.get("target_base_url") or resolve_codex_base_url(oauth_home=r.get("oauth_home") or None)
                 else:
                     target_base_url = r["target_base_url"]
                 routes_by_model[mk].append({
@@ -657,7 +657,7 @@ class LLMRouterAddon:
                         if auth_mode == "kimi_cli_oauth":
                             target_base_url = target_base_url or KIMI_CLI_OAUTH_BASE_URL
                         elif auth_mode == "codex_cli_oauth":
-                            target_base_url = resolve_codex_base_url(oauth_home=cfg.get("oauth_home") or None)
+                            target_base_url = target_base_url or resolve_codex_base_url(oauth_home=cfg.get("oauth_home") or None)
                         elif not target_base_url:
                             continue
 

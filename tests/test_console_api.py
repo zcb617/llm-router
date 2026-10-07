@@ -285,6 +285,34 @@ class DummyUpstreamStorage:
         return True
 
 
+class CodexUpstreamStorage(DummyUpstreamStorage):
+    """测试 Codex CLI OAuth 上游的认证目录和既有上游数据。"""
+
+    def __init__(self, existing_target_base_url="https://existing-codex.example/v1"):
+        """初始化 Codex OAuth 测试所需的认证目录和既有基础 URL。"""
+        super().__init__()
+        # 测试用 Codex OAuth 认证目录，使用任务要求的认证文件 ID 1。
+        self.auth_files[1] = {
+            "id": 1,
+            "name": "codex-home",
+            "path": "/custom/.codex",
+            "auth_type": "codex_cli_oauth",
+        }
+        # 测试用既有 Codex 上游基础 URL，用于验证更新空值回退。
+        self.existing_target_base_url = existing_target_base_url
+
+    def get_upstream(self, upstream_id):
+        """返回绑定 Codex OAuth 认证目录的既有上游测试数据。"""
+        upstream = super().get_upstream(upstream_id)
+        upstream.update({
+            "target_base_url": self.existing_target_base_url,
+            "auth_mode": "codex_cli_oauth",
+            "oauth_home": "/custom/.codex",
+            "auth_file_id": 1,
+        })
+        return upstream
+
+
 def test_create_kimi_oauth_upstream_preserves_custom_base_url(monkeypatch):
     monkeypatch.delenv("KIMI_CODE_BASE_URL", raising=False)
     flow = DummyFlow("POST", {
@@ -347,6 +375,88 @@ def test_create_codex_upstream_preserves_user_url_and_token():
     assert storage.created["auth_mode"] == "codex"
     assert storage.created["target_base_url"] == "ws://192.168.1.254:45001"
     assert storage.created["api_key"] == "app-server-token"
+
+
+def test_create_codex_cli_oauth_upstream_preserves_custom_base_url():
+    """创建 Codex CLI OAuth 上游时保存用户填写的基础 URL。"""
+    flow = DummyFlow("POST", {
+        "name": "codex-oauth",
+        "target_base_url": "https://custom-codex.example/v1",
+        "api_key": "should-be-cleared",
+        "auth_mode": "codex_cli_oauth",
+        "auth_file_id": 1,
+    })
+    storage = CodexUpstreamStorage()
+
+    handled = handle_console_api(flow, storage, "/api/upstreams")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.created["target_base_url"] == "https://custom-codex.example/v1"
+    assert storage.created["api_key"] == ""
+    assert storage.created["auth_mode"] == "codex_cli_oauth"
+    assert storage.created["oauth_home"] == "/custom/.codex"
+    assert storage.created["auth_file_id"] == 1
+
+
+def test_create_codex_cli_oauth_upstream_defaults_empty_base_url(monkeypatch):
+    """创建 Codex CLI OAuth 上游时空基础 URL 回退后端默认地址。"""
+    monkeypatch.setattr(
+        "src.console_api._default_codex_cli_oauth_base_url",
+        lambda: "https://default-codex.example/v1",
+    )
+    flow = DummyFlow("POST", {
+        "name": "codex-oauth",
+        "target_base_url": "",
+        "auth_mode": "codex_cli_oauth",
+        "auth_file_id": 1,
+    })
+    storage = CodexUpstreamStorage()
+
+    handled = handle_console_api(flow, storage, "/api/upstreams")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.created["target_base_url"] == "https://default-codex.example/v1"
+
+
+def test_update_codex_cli_oauth_upstream_preserves_custom_base_url():
+    """更新 Codex CLI OAuth 上游时保存用户填写的新基础 URL。"""
+    flow = DummyFlow("PUT", {
+        "name": "codex-oauth-updated",
+        "target_base_url": "https://custom-codex.example/v2",
+        "auth_mode": "codex_cli_oauth",
+        "auth_file_id": 1,
+        "api_key": "should-be-cleared",
+    })
+    storage = CodexUpstreamStorage()
+
+    handled = handle_console_api(flow, storage, "/api/upstreams/7")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.updated["target_base_url"] == "https://custom-codex.example/v2"
+    assert storage.updated["api_key"] == ""
+    assert storage.updated["auth_mode"] == "codex_cli_oauth"
+    assert storage.updated["oauth_home"] == "/custom/.codex"
+    assert storage.updated["auth_file_id"] == 1
+
+
+def test_update_codex_cli_oauth_empty_base_url_keeps_existing_value():
+    """更新 Codex CLI OAuth 上游时空基础 URL 保留已有地址。"""
+    flow = DummyFlow("PUT", {
+        "name": "codex-oauth-updated",
+        "target_base_url": "",
+        "auth_mode": "codex_cli_oauth",
+        "auth_file_id": 1,
+    })
+    storage = CodexUpstreamStorage(existing_target_base_url="https://existing-codex.example/v3")
+
+    handled = handle_console_api(flow, storage, "/api/upstreams/7")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.updated["target_base_url"] == "https://existing-codex.example/v3"
 
 
 def test_codex_model_endpoint_returns_server_models(monkeypatch):

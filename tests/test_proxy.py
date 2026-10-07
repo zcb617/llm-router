@@ -852,6 +852,35 @@ def test_load_model_configs_keeps_single_upstream_id_for_codex():
     assert addon._model_cache["codex-main"]["upstream_id"] == 42
 
 
+def test_resolve_target_base_url_prefers_codex_cli_oauth_custom_url(monkeypatch):
+    """Codex CLI OAuth 运行时优先使用自定义地址，空值才解析默认地址。"""
+    addon = _make_addon_for_route_tests()
+    fallback_calls = []
+
+    def fake_resolve_codex_base_url(*, oauth_home=None):
+        """记录默认地址解析调用并返回可识别的测试地址。"""
+        fallback_calls.append(oauth_home)
+        return "https://resolved-codex.example/v1"
+
+    monkeypatch.setattr(proxy_module, "resolve_codex_base_url", fake_resolve_codex_base_url)
+
+    custom_config = {
+        "auth_mode": "codex_cli_oauth",
+        "target_base_url": "https://custom-codex.example/v1",
+        "oauth_home": "/custom/.codex",
+    }
+    empty_config = {
+        "auth_mode": "codex_cli_oauth",
+        "target_base_url": "",
+        "oauth_home": "/custom/.codex",
+    }
+
+    assert addon._resolve_target_base_url(custom_config) == "https://custom-codex.example/v1"
+    assert fallback_calls == []
+    assert addon._resolve_target_base_url(empty_config) == "https://resolved-codex.example/v1"
+    assert fallback_calls == ["/custom/.codex"]
+
+
 def test_load_model_configs_preserves_kimi_oauth_base_url():
     addon = _make_addon_for_route_tests()
 
@@ -880,6 +909,74 @@ def test_load_model_configs_preserves_kimi_oauth_base_url():
 
     assert addon._model_cache["kimi-main"]["target_base_url"] == (
         "https://custom-kimi.example/coding/v1"
+    )
+
+
+def test_load_model_configs_preserves_single_codex_cli_oauth_base_url():
+    """单上游模型缓存应保留 Codex CLI OAuth 的自定义基础 URL。"""
+    addon = _make_addon_for_route_tests()
+
+    class Storage:
+        def get_all_model_configs(self):
+            """返回启用多上游 Codex OAuth 模型配置。"""
+            return [{
+                "id": 1,
+                "model_key": "codex-oauth-main",
+                "upstream_id": 9,
+                "target_base_url": "https://custom-codex.example/v1",
+                "api_key": "",
+                "auth_mode": "codex_cli_oauth",
+                "oauth_home": "/custom/.codex",
+                "forward_model": "gpt-5.5",
+                "is_active": True,
+                "is_default": False,
+                "use_multi_upstream": False,
+            }]
+
+        def get_all_model_routes(self):
+            return []
+
+    addon._external_storage = Storage()
+    addon._storage = None
+
+    addon._load_model_configs()
+
+    assert addon._model_cache["codex-oauth-main"]["target_base_url"] == (
+        "https://custom-codex.example/v1"
+    )
+
+
+def test_load_model_configs_preserves_multi_codex_cli_oauth_base_url():
+    """多上游路由缓存应保留 Codex CLI OAuth 的自定义基础 URL。"""
+    addon = _make_addon_for_route_tests()
+
+    class Storage:
+        def get_all_model_configs(self):
+            return [{
+                "id": 1,
+                "model_key": "codex-oauth-route",
+                "is_active": True,
+                "is_default": False,
+                "use_multi_upstream": True,
+            }]
+
+        def get_all_model_routes(self):
+            """返回带自定义基础 URL 的 Codex OAuth 路由。"""
+            return [{
+                "model_key": "codex-oauth-route",
+                "upstream_id": 9,
+                "target_base_url": "https://custom-codex.example/v1",
+                "auth_mode": "codex_cli_oauth",
+                "oauth_home": "/custom/.codex",
+            }]
+
+    addon._external_storage = Storage()
+    addon._storage = None
+
+    addon._load_model_configs()
+
+    assert addon._model_cache["codex-oauth-route"]["routes"][0]["target_base_url"] == (
+        "https://custom-codex.example/v1"
     )
 
 

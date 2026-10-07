@@ -885,7 +885,7 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             oauth_host = KIMI_DEFAULT_OAUTH_HOST
         elif auth_mode == "codex_cli_oauth":
             api_key = ""
-            target_base_url = _default_codex_cli_oauth_base_url()
+            target_base_url = target_base_url or _default_codex_cli_oauth_base_url()
             use_claude_features = False
             use_roo_features = False
 
@@ -963,7 +963,11 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             oauth_host = KIMI_DEFAULT_OAUTH_HOST
         elif effective_auth_mode == "codex_cli_oauth":
             api_key_value = ""
-            target_base_url = _default_codex_cli_oauth_base_url()
+            target_base_url = (
+                target_base_url
+                or existing.get("target_base_url")
+                or _default_codex_cli_oauth_base_url()
+            )
             body["use_claude_features"] = False
             body["use_roo_features"] = False
             oauth_key = body.get("oauth_key")

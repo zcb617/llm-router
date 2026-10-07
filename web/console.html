@@ -2060,7 +2060,7 @@ function renderUpstreams() {
     const statusClass = u.is_active ? 'text-green-500' : 'text-red-500';
     const statusText = u.is_active ? '启用' : '禁用';
     const authMode = u.auth_mode || 'api_key';
-    const displayBaseUrl = authMode === 'codex_cli_oauth' ? '-' : (u.target_base_url || '-');
+    const displayBaseUrl = u.target_base_url || '-';
     const authBadge = authMode === 'kimi_cli_oauth'
       ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">kimi-cli auth</span>'
       : authMode === 'codex_cli_oauth'
@@ -2101,7 +2101,6 @@ function renderUpstreams() {
 const KIMI_OAUTH_DEFAULT_KEY = 'oauth/kimi-code';
 const KIMI_OAUTH_DEFAULT_HOST = 'https://auth.kimi.com';
 const KIMI_OAUTH_DEFAULT_BASE_URL = 'https://api.kimi.com/coding/v1';
-const CODEX_CLI_OAUTH_DEFAULT_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 
 function bindUpstreamTableEvents() {
   const tbody = document.getElementById('upstreamsTableBody');
@@ -2251,10 +2250,12 @@ async function syncUpstreamAuthModeFields() {
     if (mode === 'kimi_cli_oauth') {
       baseUrlWrap.classList.remove('hidden');
       baseUrlInput.required = true;
+      baseUrlInput.placeholder = '留空默认地址为 https://api.kimi.com/coding/v1';
       if (!baseUrlInput.value.trim()) baseUrlInput.value = KIMI_OAUTH_DEFAULT_BASE_URL;
     } else {
-      baseUrlWrap.classList.add('hidden');
+      baseUrlWrap.classList.remove('hidden');
       baseUrlInput.required = false;
+      baseUrlInput.placeholder = '留空默认地址为 https://chatgpt.com/backend-api/codex';
     }
     await fillAuthFileSelect(mode);
     apiWrap.classList.add('hidden');
@@ -2273,6 +2274,7 @@ async function syncUpstreamAuthModeFields() {
     if (oauthHomeWrap) oauthHomeWrap.classList.add('hidden');
     baseUrlWrap.classList.remove('hidden');
     baseUrlInput.required = true;
+    baseUrlInput.placeholder = 'https://api.moonshot.cn/v1';
     apiWrap.classList.remove('hidden');
     claudeFeaturesWrap.classList.remove('hidden');
     rooFeaturesWrap.classList.remove('hidden');
@@ -2346,7 +2348,7 @@ document.getElementById('submitUpstreamEdit').addEventListener('click', async (e
     const effectiveApiKey = isManagedOauth ? '' : apiKey;
     const effectiveTargetBaseUrl = isKimiOauth
       ? (targetBaseUrl || KIMI_OAUTH_DEFAULT_BASE_URL)
-      : (isCodexCliOauth ? (targetBaseUrl || CODEX_CLI_OAUTH_DEFAULT_BASE_URL) : targetBaseUrl);
+      : targetBaseUrl;
     const description = document.getElementById('upstreamDescription').value.trim();
     const isActive = document.getElementById('upstreamIsActive').checked;
     const useClaudeFeatures = isManagedOauth ? false : document.getElementById('upstreamUseClaudeFeatures').checked;
