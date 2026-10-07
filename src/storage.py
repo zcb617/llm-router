@@ -2981,18 +2981,21 @@ class CallStorage:
         """获取用户用量统计：今日、本周、本月，以及各模型的明细。"""
         from datetime import datetime, date, timedelta
 
+        self._ensure_token_usage_history_table()
+
         today = date.today()
-        today_start = datetime(today.year, today.month, today.day).isoformat()
+        today_start = datetime.combine(today, datetime.min.time()).isoformat()
+        tomorrow_start = datetime.combine(today + timedelta(days=1), datetime.min.time()).isoformat()
 
         # 本周一
         weekday = today.weekday()
-        monday = today - timedelta(days=weekday)
-        week_start = datetime(monday.year, monday.month, monday.day).isoformat()
+        week_start_date = today - timedelta(days=weekday)
 
         # 本月1日
-        month_start = datetime(today.year, today.month, 1).isoformat()
+        month_start_date = date(today.year, today.month, 1)
 
         def _make_result(calls, cached_hit, cache_miss, tokens_output):
+            """组装统计周期结果，统一计算命中、未命中和输出 Token 总量。"""
             total = (cached_hit or 0) + (cache_miss or 0) + (tokens_output or 0)
             return {
                 "calls": calls or 0,
@@ -3002,146 +3005,260 @@ class CallStorage:
                 "total_tokens": total,
             }
 
-        def _run_query(conn, cur, period_start):
-            if self.postgresql:
-                cur.execute("""
-                    SELECT
-                        COUNT(*) AS calls,
-                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
-                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
-                        COALESCE(SUM(tokens_output), 0) AS tokens_output
-                    FROM llm_calls
-                    WHERE user_id = %s AND timestamp >= %s
-                """, (user_id, period_start))
-            else:
-                cur.execute("""
-                    SELECT
-                        COUNT(*) AS calls,
-                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
-                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
-                        COALESCE(SUM(tokens_output), 0) AS tokens_output
-                    FROM llm_calls
-                    WHERE user_id = ? AND timestamp >= ?
-                """, (user_id, period_start))
-            row = cur.fetchone()
-            return _make_result(row[0], row[1], row[2], row[3])
-
-        def _run_model_query(conn, cur, period_start):
-            if self.postgresql:
-                cur.execute("""
-                    SELECT
-                        original_model,
-                        COUNT(*) AS calls,
-                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
-                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
-                        COALESCE(SUM(tokens_output), 0) AS tokens_output
-                    FROM llm_calls
-                    WHERE user_id = %s AND timestamp >= %s
-                    GROUP BY original_model
-                    ORDER BY calls DESC
-                """, (user_id, period_start))
-            else:
-                cur.execute("""
-                    SELECT
-                        original_model,
-                        COUNT(*) AS calls,
-                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
-                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
-                        COALESCE(SUM(tokens_output), 0) AS tokens_output
-                    FROM llm_calls
-                    WHERE user_id = ? AND timestamp >= ?
-                    GROUP BY original_model
-                    ORDER BY calls DESC
-                """, (user_id, period_start))
-            rows = cur.fetchall()
-            result = []
-            for row in rows:
-                result.append({
-                    "original_model": row[0] or "unknown",
-                    "calls": row[1] or 0,
-                    "cached_hit_tokens": row[2] or 0,
-                    "cache_miss_tokens": row[3] or 0,
-                    "tokens_output": row[4] or 0,
-                })
-            return result
-
         if self.postgresql:
             conn, cur = self._pg_conn()
         else:
             conn, cur = self._sqlite_conn()
 
         try:
-            day = _run_query(conn, cur, today_start)
-            week = _run_query(conn, cur, week_start)
-            month = _run_query(conn, cur, month_start)
-
-            day_models = _run_model_query(conn, cur, today_start)
-            week_models = _run_model_query(conn, cur, week_start)
-            month_models = _run_model_query(conn, cur, month_start)
-
-            # 合并三个周期的模型数据
-            model_map = {}
-            for m in day_models:
-                model_map.setdefault(m["original_model"], {})["day"] = m
-            for m in week_models:
-                model_map.setdefault(m["original_model"], {})["week"] = m
-            for m in month_models:
-                model_map.setdefault(m["original_model"], {})["month"] = m
-
-            models = []
-            for name in sorted(model_map.keys()):
-                m = model_map[name]
-                models.append({
-                    "original_model": name,
-                    "day": m.get("day", {"calls": 0, "cached_hit_tokens": 0, "cache_miss_tokens": 0, "tokens_output": 0}),
-                    "week": m.get("week", {"calls": 0, "cached_hit_tokens": 0, "cache_miss_tokens": 0, "tokens_output": 0}),
-                    "month": m.get("month", {"calls": 0, "cached_hit_tokens": 0, "cache_miss_tokens": 0, "tokens_output": 0}),
-                })
-
-            # 查询当前用户全历史逐日 Token，用于用量活动统计和热力图。
+            # 当天统计只读取当前用户当天的成功调用，避免失败调用进入任何当天结果。
             if self.postgresql:
                 cur.execute("""
                     SELECT
-                        SUBSTR(timestamp, 1, 10) AS usage_date,
-                        COALESCE(SUM(cached_hit_tokens), 0)
-                            + COALESCE(SUM(cache_miss_tokens), 0)
-                            + COALESCE(SUM(tokens_output), 0) AS total_tokens
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
                     FROM llm_calls
                     WHERE user_id = %s
-                    GROUP BY SUBSTR(timestamp, 1, 10)
-                    ORDER BY usage_date ASC
-                """, (user_id,))
+                      AND timestamp >= %s
+                      AND timestamp < %s
+                      AND call_status <> 'failed'
+                """, (user_id, today_start, tomorrow_start))
             else:
                 cur.execute("""
                     SELECT
-                        SUBSTR(timestamp, 1, 10) AS usage_date,
-                        COALESCE(SUM(cached_hit_tokens), 0)
-                            + COALESCE(SUM(cache_miss_tokens), 0)
-                            + COALESCE(SUM(tokens_output), 0) AS total_tokens
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
                     FROM llm_calls
                     WHERE user_id = ?
-                    GROUP BY SUBSTR(timestamp, 1, 10)
-                    ORDER BY usage_date ASC
-                """, (user_id,))
+                      AND timestamp >= ?
+                      AND timestamp < ?
+                      AND call_status <> 'failed'
+                """, (user_id, today_start, tomorrow_start))
+            row = cur.fetchone()
+            day = _make_result(row[0], row[1], row[2], row[3])
 
-            usage_by_date = {}
-            total_tokens = 0
-            peak_daily_tokens = 0
+            # 当天模型统计按日志原始模型聚合，并沿用未知模型名称处理。
+            if self.postgresql:
+                cur.execute("""
+                    SELECT
+                        original_model,
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
+                    FROM llm_calls
+                    WHERE user_id = %s
+                      AND timestamp >= %s
+                      AND timestamp < %s
+                      AND call_status <> 'failed'
+                    GROUP BY original_model
+                    ORDER BY calls DESC
+                """, (user_id, today_start, tomorrow_start))
+            else:
+                cur.execute("""
+                    SELECT
+                        original_model,
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(cached_hit_tokens), 0) AS cached_hit,
+                        COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss,
+                        COALESCE(SUM(tokens_output), 0) AS tokens_output
+                    FROM llm_calls
+                    WHERE user_id = ?
+                      AND timestamp >= ?
+                      AND timestamp < ?
+                      AND call_status <> 'failed'
+                    GROUP BY original_model
+                    ORDER BY calls DESC
+                """, (user_id, today_start, tomorrow_start))
+            day_models = []
+            for row in cur.fetchall():
+                day_models.append({
+                    "original_model": row[0] or "unknown",
+                    "calls": row[1] or 0,
+                    "cached_hit_tokens": row[2] or 0,
+                    "cache_miss_tokens": row[3] or 0,
+                    "tokens_output": row[4] or 0,
+                })
+
+            # 历史统计只读取今天以前的汇总行，重复行按现有数据直接累加。
+            if self.postgresql:
+                cur.execute("""
+                    SELECT usage_day, model, call_count,
+                           cache_miss_tokens, cached_hit_tokens, tokens_output
+                    FROM token_usage_history
+                    WHERE user_id = %s AND usage_day < %s
+                """, (user_id, today))
+            else:
+                cur.execute("""
+                    SELECT usage_day, model, call_count,
+                           cache_miss_tokens, cached_hit_tokens, tokens_output
+                    FROM token_usage_history
+                    WHERE user_id = ? AND usage_day < ?
+                """, (user_id, today.isoformat()))
+
+            history_by_date_model = {}
             for row in cur.fetchall():
                 raw_date = row[0]
-                raw_tokens = row[1] or 0
                 try:
-                    daily_tokens = int(raw_tokens)
+                    if isinstance(raw_date, datetime):
+                        usage_date = raw_date.date()
+                    elif isinstance(raw_date, date):
+                        usage_date = raw_date
+                    else:
+                        usage_date = date.fromisoformat(str(raw_date))
                 except (TypeError, ValueError):
-                    daily_tokens = 0
+                    continue
+
+                model_name = row[1] or "unknown"
+                model_key = (usage_date, model_name)
+                totals = history_by_date_model.setdefault(model_key, {
+                    "calls": 0,
+                    "cached_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                    "tokens_output": 0,
+                })
+                totals["calls"] += row[2] or 0
+                totals["cached_hit_tokens"] += row[4] or 0
+                totals["cache_miss_tokens"] += row[3] or 0
+                totals["tokens_output"] += row[5] or 0
+
+            history_by_date = {}
+            history_week = {
+                "calls": 0,
+                "cached_hit_tokens": 0,
+                "cache_miss_tokens": 0,
+                "tokens_output": 0,
+            }
+            history_month = {
+                "calls": 0,
+                "cached_hit_tokens": 0,
+                "cache_miss_tokens": 0,
+                "tokens_output": 0,
+            }
+            history_week_models = {}
+            history_month_models = {}
+            for (usage_date, model_name), totals in history_by_date_model.items():
+                history_by_date[usage_date] = history_by_date.get(usage_date, 0) + (
+                    totals["cached_hit_tokens"]
+                    + totals["cache_miss_tokens"]
+                    + totals["tokens_output"]
+                )
+
+                if usage_date >= week_start_date:
+                    history_week["calls"] += totals["calls"]
+                    history_week["cached_hit_tokens"] += totals["cached_hit_tokens"]
+                    history_week["cache_miss_tokens"] += totals["cache_miss_tokens"]
+                    history_week["tokens_output"] += totals["tokens_output"]
+                    model_totals = history_week_models.setdefault(model_name, {
+                        "original_model": model_name,
+                        "calls": 0,
+                        "cached_hit_tokens": 0,
+                        "cache_miss_tokens": 0,
+                        "tokens_output": 0,
+                    })
+                    model_totals["calls"] += totals["calls"]
+                    model_totals["cached_hit_tokens"] += totals["cached_hit_tokens"]
+                    model_totals["cache_miss_tokens"] += totals["cache_miss_tokens"]
+                    model_totals["tokens_output"] += totals["tokens_output"]
+
+                if usage_date >= month_start_date:
+                    history_month["calls"] += totals["calls"]
+                    history_month["cached_hit_tokens"] += totals["cached_hit_tokens"]
+                    history_month["cache_miss_tokens"] += totals["cache_miss_tokens"]
+                    history_month["tokens_output"] += totals["tokens_output"]
+                    model_totals = history_month_models.setdefault(model_name, {
+                        "original_model": model_name,
+                        "calls": 0,
+                        "cached_hit_tokens": 0,
+                        "cache_miss_tokens": 0,
+                        "tokens_output": 0,
+                    })
+                    model_totals["calls"] += totals["calls"]
+                    model_totals["cached_hit_tokens"] += totals["cached_hit_tokens"]
+                    model_totals["cache_miss_tokens"] += totals["cache_miss_tokens"]
+                    model_totals["tokens_output"] += totals["tokens_output"]
+
+            week = _make_result(
+                history_week["calls"] + day["calls"],
+                history_week["cached_hit_tokens"] + day["cached_hit_tokens"],
+                history_week["cache_miss_tokens"] + day["cache_miss_tokens"],
+                history_week["tokens_output"] + day["tokens_output"],
+            )
+            month = _make_result(
+                history_month["calls"] + day["calls"],
+                history_month["cached_hit_tokens"] + day["cached_hit_tokens"],
+                history_month["cache_miss_tokens"] + day["cache_miss_tokens"],
+                history_month["tokens_output"] + day["tokens_output"],
+            )
+
+            # 合并三个周期的模型数据，同一模型的当天结果加入周/月结果。
+            day_model_map = {m["original_model"]: m for m in day_models}
+            model_names = set(day_model_map) | set(history_week_models) | set(history_month_models)
+            models = []
+            for name in sorted(model_names):
+                day_model = day_model_map.get(name, {
+                    "calls": 0,
+                    "cached_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                    "tokens_output": 0,
+                })
+                week_model = history_week_models.get(name, {
+                    "calls": 0,
+                    "cached_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                    "tokens_output": 0,
+                })
+                month_model = history_month_models.get(name, {
+                    "calls": 0,
+                    "cached_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                    "tokens_output": 0,
+                })
+                week_has_data = name in history_week_models or name in day_model_map
+                month_has_data = name in history_month_models or name in day_model_map
+                week_result = {
+                    "calls": week_model["calls"] + day_model["calls"],
+                    "cached_hit_tokens": week_model["cached_hit_tokens"] + day_model["cached_hit_tokens"],
+                    "cache_miss_tokens": week_model["cache_miss_tokens"] + day_model["cache_miss_tokens"],
+                    "tokens_output": week_model["tokens_output"] + day_model["tokens_output"],
+                }
+                if week_has_data:
+                    week_result = {
+                        "original_model": name,
+                        **week_result,
+                    }
+                month_result = {
+                    "calls": month_model["calls"] + day_model["calls"],
+                    "cached_hit_tokens": month_model["cached_hit_tokens"] + day_model["cached_hit_tokens"],
+                    "cache_miss_tokens": month_model["cache_miss_tokens"] + day_model["cache_miss_tokens"],
+                    "tokens_output": month_model["tokens_output"] + day_model["tokens_output"],
+                }
+                if month_has_data:
+                    month_result = {
+                        "original_model": name,
+                        **month_result,
+                    }
+                models.append({
+                    "original_model": name,
+                    "day": day_model,
+                    "week": week_result,
+                    "month": month_result,
+                })
+
+            # 今天只有存在成功调用时才进入活动日，历史日期全部来自汇总表。
+            usage_by_date = dict(history_by_date)
+            if day["calls"] > 0:
+                usage_by_date[today] = day["total_tokens"]
+
+            total_tokens = 0
+            peak_daily_tokens = 0
+            for daily_tokens in usage_by_date.values():
                 total_tokens += daily_tokens
                 peak_daily_tokens = max(peak_daily_tokens, daily_tokens)
-                try:
-                    usage_date = date.fromisoformat(str(raw_date))
-                except (TypeError, ValueError):
-                    # 无法解析的日期不参与连续天数和近一年热力图映射。
-                    continue
-                usage_by_date[usage_date] = daily_tokens
 
             current_streak_days = 0
             streak_date = today
