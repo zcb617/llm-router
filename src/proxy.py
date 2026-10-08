@@ -6,6 +6,7 @@ from mitmproxy.addonmanager import Loader
 
 import logging
 import json
+import hashlib
 import asyncio
 import uuid
 import threading
@@ -15,7 +16,7 @@ import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from src.protocol_converter_registry import get_protocol_converter
 from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
@@ -507,17 +508,42 @@ class LLMRouterAddon:
         except queue.Full:
             logger.warning("Call save queue is full, dropping one record")
 
+    def _is_postgresql_connection_error(self, exc):
+        """判断调用记录保存异常是否属于可重试的 PostgreSQL 连接级异常。"""
+        try:
+            import psycopg2
+        except ImportError:
+            return False
+        return isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+
     def _save_worker_loop(self):
         while True:
             payload = self._save_queue.get()
             try:
                 operation = payload.pop("_call_save_operation", None)
-                if operation == "activity":
-                    self.storage.update_call_activity(**payload)
-                elif operation == "finalize":
-                    self.storage.finalize_call_with_user(**payload)
-                else:
-                    self.storage.save_call_with_user(**payload)
+                retry_delays = (0.5, 1.0)
+                for attempt in range(3):
+                    try:
+                        if operation == "activity":
+                            self.storage.update_call_activity(**payload)
+                        elif operation == "finalize":
+                            self.storage.finalize_call_with_user(**payload)
+                        else:
+                            self.storage.save_call_with_user(**payload)
+                        break
+                    except Exception as exc:
+                        if not self._is_postgresql_connection_error(exc) or attempt == 2:
+                            raise
+                        delay = retry_delays[attempt]
+                        logger.warning(
+                            "Retrying call record save: operation=%s attempt=%s/3 "
+                            "delay=%.1fs error=%s",
+                            operation,
+                            attempt + 2,
+                            delay,
+                            exc,
+                        )
+                        time.sleep(delay)
             except Exception as e:
                 logger.error(f"Failed to save call record in worker: {e}", exc_info=True)
             finally:
@@ -749,8 +775,74 @@ class LLMRouterAddon:
         # 启动历史 Token 使用每日导入定时器
         self._start_token_usage_history_timer()
 
+    @staticmethod
+    def _extract_url_api_key(request) -> str | None:
+        """提取并剥离兼容路径前缀中的 URL API Key，供统一鉴权流程使用。"""
+        parsed = urlparse(request.url)
+        parts = parsed.path.split("/", 2)
+        if len(parts) < 2 or not parts[1]:
+            return None
+
+        first = parts[1]
+        reserved_paths = {
+            "v1",
+            "api",
+            "web",
+            "health",
+            "favicon.ico",
+            "responses",
+            "messages",
+            "chat",
+            "completions",
+            "embeddings",
+            "models",
+            "images",
+            "audio",
+            "files",
+            "batches",
+            "fine_tuning",
+        }
+        if first in reserved_paths:
+            return None
+
+        remaining = "/" + parts[2] if len(parts) == 3 else "/"
+        if not (
+            remaining == "/"
+            or remaining == "/v1"
+            or remaining.startswith("/v1/")
+            or remaining == "/responses"
+            or remaining == "/messages"
+            or remaining == "/chat/completions"
+            or remaining == "/completions"
+            or remaining == "/embeddings"
+            or remaining == "/models"
+            or remaining.startswith("/images/")
+            or remaining.startswith("/audio/")
+        ):
+            return None
+
+        candidate = unquote(first)
+        request.url = parsed._replace(path=remaining).geturl()
+        return candidate
+
     async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
+        url_api_key = self._extract_url_api_key(flow.request)
+        key_info = None
+        if url_api_key is not None:
+            key_info = self._verify_api_key_cached(url_api_key)
+            if key_info is None:
+                flow.response = http.Response.make(
+                    403,
+                    json.dumps({"error": "Invalid or expired API key"}, ensure_ascii=False).encode("utf-8"),
+                    {"Content-Type": "application/json"}
+                )
+                flow.metadata["local_response"] = True
+                return
+
+            flow.metadata["user_id"] = key_info["user_id"]
+            flow.metadata["api_key_id"] = key_info["id"]
+
         path = flow.request.path
 
         # 处理本地Web UI和控制台API（优先级最高）
@@ -769,35 +861,151 @@ class LLMRouterAddon:
             flow.metadata["local_response"] = True
             return
 
+        # 临时记录脱敏后的入站数据包特征，用于区分 Codex 直连请求与普通请求。
+        try:
+            sensitive_header_names = {
+                "authorization",
+                "proxy-authorization",
+                "x-api-key",
+                "cookie",
+                "set-cookie",
+            }
+            diagnostic_headers = {}
+            for header_name, header_value in flow.request.headers.items():
+                header_name_text = str(header_name).lower()
+                header_value_text = str(header_value)
+                if header_name_text in sensitive_header_names:
+                    sensitive_header = {
+                        # 标记敏感 Header 已出现，不暴露其原文。
+                        "present": True,
+                        # 记录敏感 Header 原文长度，用于区分请求包。
+                        "length": len(header_value_text),
+                        # 记录敏感 Header 原文摘要，用于区分请求包且不可还原原文。
+                        "sha256_12": hashlib.sha256(header_value_text.encode("utf-8")).hexdigest()[:12],
+                    }
+                    if header_name_text == "authorization":
+                        # 仅记录 Authorization 的认证方案，不记录 Token 内容。
+                        sensitive_header["scheme"] = header_value_text.split(None, 1)[0] if header_value_text else None
+                    diagnostic_headers[header_name_text] = sensitive_header
+                else:
+                    # 普通 Header 仅记录名称和最多 200 个字符的值。
+                    diagnostic_headers[header_name_text] = header_value_text[:200]
+
+            request_content = flow.request.content or b""
+            diagnostic_body = {
+                # 记录请求体字节长度，不记录请求体正文。
+                "length": len(request_content),
+                # 记录 JSON 顶层字段名称，不记录 Prompt 内容。
+                "keys": [],
+            }
+            try:
+                request_json = json.loads(request_content)
+            except (TypeError, ValueError):
+                request_json = None
+            if isinstance(request_json, dict):
+                diagnostic_body["keys"] = sorted(str(key) for key in request_json.keys())
+                if "model" in request_json:
+                    # 记录请求使用的模型名称，帮助区分请求类型。
+                    diagnostic_body["model"] = request_json["model"]
+                client_metadata = request_json.get("client_metadata")
+                if isinstance(client_metadata, dict):
+                    # 仅记录 client_metadata 的字段名称，不记录字段值。
+                    diagnostic_body["client_metadata_keys"] = sorted(
+                        str(key) for key in client_metadata.keys()
+                    )
+
+            client_connection = getattr(flow, "client_conn", None)
+            client_address = getattr(client_connection, "address", None)
+            client = str(client_address) if client_address is not None else None
+            packet_diagnostic = {
+                # 记录入站请求方法。
+                "method": str(flow.request.method),
+                # 记录入站请求路径。
+                "path": str(flow.request.path),
+                # 记录客户端地址；地址不可用时记录 null。
+                "client": client,
+                # 记录脱敏后的入站请求头。
+                "headers": diagnostic_headers,
+                # 记录不含正文的请求体特征。
+                "body": diagnostic_body,
+            }
+            logger.info(
+                "[PACKET_DIAG] %s",
+                json.dumps(packet_diagnostic, ensure_ascii=False, sort_keys=True, default=str),
+            )
+        except Exception:
+            logger.warning("[PACKET_DIAG] diagnostic logging failed; continuing request flow")
+
+        routing_hint = flow.request.headers.get("x-codex-routing-hint", "")
+        handshake_model = next(
+            (
+                part.strip()[len("model=") :].strip()
+                for part in routing_hint.split(";")
+                if part.strip().lower().startswith("model=")
+            ),
+            "",
+        )
+        if (
+            flow.request.method == "GET"
+            and request_path == "/v1/responses"
+            and flow.request.headers.get("chatgpt-account-id")
+            and flow.request.headers.get("sec-websocket-key")
+            and handshake_model.lower().startswith("gpt")
+        ):
+            logger.info(
+                "[CODEX_HTTP_FALLBACK] WebSocket handshake rejected with 426: model=%s path=%s",
+                handshake_model,
+                request_path,
+            )
+            flow.response = http.Response.make(
+                426,
+                json.dumps(
+                    {"error": "WebSocket transport is not supported by llm-router; use HTTP."},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
+            flow.metadata["local_response"] = True
+            return
+
         # === LLM 转发请求：验证 API Key ===
+        request_body = (flow.request.content or b"").decode("utf-8", errors="replace")
+        request_model = self._extract_model(request_body)
+        codex_passthrough = (
+            bool(flow.request.headers.get("chatgpt-account-id"))
+            and isinstance(request_model, str)
+            and request_model.lower().startswith("gpt")
+        )
+        flow.metadata["codex_passthrough"] = codex_passthrough
         auth_header = flow.request.headers.get("Authorization", "")
         anthropic_api_key = flow.request.headers.get("X-Api-Key", "")
-        if auth_header.startswith("Bearer "):
-            user_api_key = auth_header[7:]
-        elif anthropic_api_key:
-            user_api_key = anthropic_api_key
-        else:
-            # 无 API Key，返回 401
-            flow.response = http.Response.make(
-                401,
-                json.dumps({"error": "Unauthorized: missing API key"}, ensure_ascii=False).encode("utf-8"),
-                {"Content-Type": "application/json"}
-            )
-            return
+        if key_info is None and not codex_passthrough:
+            if auth_header.startswith("Bearer "):
+                user_api_key = auth_header[7:]
+            elif anthropic_api_key:
+                user_api_key = anthropic_api_key
+            else:
+                # 无 API Key，返回 401
+                flow.response = http.Response.make(
+                    401,
+                    json.dumps({"error": "Unauthorized: missing API key"}, ensure_ascii=False).encode("utf-8"),
+                    {"Content-Type": "application/json"}
+                )
+                return
 
-        # 验证 API Key
-        key_info = self._verify_api_key_cached(user_api_key)
-        if key_info is None:
-            flow.response = http.Response.make(
-                403,
-                json.dumps({"error": "Invalid or expired API key"}, ensure_ascii=False).encode("utf-8"),
-                {"Content-Type": "application/json"}
-            )
-            return
+            # 验证 API Key
+            key_info = self._verify_api_key_cached(user_api_key)
+            if key_info is None:
+                flow.response = http.Response.make(
+                    403,
+                    json.dumps({"error": "Invalid or expired API key"}, ensure_ascii=False).encode("utf-8"),
+                    {"Content-Type": "application/json"}
+                )
+                return
 
-        # 存储用户信息到 flow.metadata，供 response() 使用
-        flow.metadata["user_id"] = key_info["user_id"]
-        flow.metadata["api_key_id"] = key_info["id"]
+            # 存储用户信息到 flow.metadata，供 response() 使用
+            flow.metadata["user_id"] = key_info["user_id"]
+            flow.metadata["api_key_id"] = key_info["id"]
 
         # 捕获请求数据
         captured_req = self.capturer.capture_request(flow)
@@ -855,6 +1063,15 @@ class LLMRouterAddon:
 
         # Codex CLI OAuth：走 Rust 出站 + ChatGPT codex responses 专用通道。
         if self._is_codex_cli_oauth(mapping):
+            if flow.metadata.get("codex_passthrough"):
+                await asyncio.to_thread(
+                    self._forward_codex_passthrough,
+                    flow,
+                    mapping,
+                    captured_req,
+                    model_name,
+                )
+                return
             await asyncio.to_thread(
                 self._forward_codex_cli_oauth,
                 flow,
@@ -1266,6 +1483,115 @@ class LLMRouterAddon:
                 502,
                 json.dumps({"error": f"Kimi streaming upstream failed: {e}"}, ensure_ascii=False).encode("utf-8"),
                 {"Content-Type": "application/json"}
+            )
+            flow.metadata["local_response"] = True
+
+    def _forward_codex_passthrough(self, flow, mapping, captured_req, model_name):
+        """处理带 chatgpt-account-id 的 Codex 直连请求，保留入站 Responses 请求原文。"""
+        try:
+            full_url = resolve_codex_outbound_url(self._resolve_target_base_url(mapping))
+
+            def build_packet_diagnostic(label, method, url, headers, raw_body, decoded_body):
+                """构造 Codex 直连请求的脱敏包特征，供入站和出站日志对比使用。"""
+                normalized_headers = {
+                    str(name).lower(): value
+                    for name, value in (headers or {}).items()
+                }
+                sensitive_headers = {}
+                for header_name in ("authorization", "cookie", "x-api-key"):
+                    if header_name in normalized_headers:
+                        sensitive_value = str(normalized_headers[header_name])
+                        sensitive_headers[header_name] = {
+                            "present": True,
+                            "length": len(sensitive_value),
+                            "sha256_12": hashlib.sha256(
+                                sensitive_value.encode("utf-8")
+                            ).hexdigest()[:12],
+                        }
+                return {
+                    "label": label,
+                    "method": method,
+                    "url": url,
+                    "headers": {
+                        "host": normalized_headers.get("host"),
+                        "content-encoding": normalized_headers.get("content-encoding"),
+                        "content-length": normalized_headers.get("content-length"),
+                        "transfer-encoding": normalized_headers.get("transfer-encoding"),
+                        "connection": normalized_headers.get("connection"),
+                        "content-type": normalized_headers.get("content-type"),
+                        "accept": normalized_headers.get("accept"),
+                        **sensitive_headers,
+                    },
+                    "header_names": sorted(normalized_headers),
+                    "body": {
+                        "raw_length": len(raw_body),
+                        "raw_sha256": hashlib.sha256(raw_body).hexdigest(),
+                        "decoded_length": len(decoded_body),
+                        "decoded_sha256": hashlib.sha256(decoded_body).hexdigest(),
+                    },
+                }
+
+            try:
+                inbound_raw_body = flow.request.raw_content or b""
+                inbound_decoded_body = flow.request.content or b""
+                inbound_diagnostic = build_packet_diagnostic(
+                    "[CODEX_PASSTHROUGH_INBOUND]",
+                    captured_req.method,
+                    captured_req.url,
+                    captured_req.headers,
+                    inbound_raw_body,
+                    inbound_decoded_body,
+                )
+                logger.info(
+                    "[CODEX_PASSTHROUGH_INBOUND] %s",
+                    json.dumps(inbound_diagnostic, ensure_ascii=False, sort_keys=True, default=str),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[CODEX_PASSTHROUGH_INBOUND] diagnostic logging failed; continuing request flow: %s",
+                    exc,
+                )
+
+            flow.request.url = full_url
+            flow.request.scheme = urlparse(full_url).scheme
+            flow.request.headers["Host"] = host_from_url(full_url)
+
+            try:
+                outbound_raw_body = flow.request.raw_content or b""
+                outbound_decoded_body = flow.request.content or b""
+                outbound_diagnostic = build_packet_diagnostic(
+                    "[CODEX_PASSTHROUGH_OUTBOUND]",
+                    flow.request.method,
+                    flow.request.url,
+                    flow.request.headers,
+                    outbound_raw_body,
+                    outbound_decoded_body,
+                )
+                logger.info(
+                    "[CODEX_PASSTHROUGH_OUTBOUND] %s",
+                    json.dumps(outbound_diagnostic, ensure_ascii=False, sort_keys=True, default=str),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[CODEX_PASSTHROUGH_OUTBOUND] diagnostic logging failed; continuing request flow: %s",
+                    exc,
+                )
+
+            captured_req.original_model = model_name
+            captured_req.overridden_model = mapping.get("forward_model") or model_name
+            captured_req.url = full_url
+            captured_req.call_id = str(uuid.uuid4())
+            flow.metadata["call_id"] = captured_req.call_id
+            flow.metadata["codex_response_protocol"] = "responses"
+            flow.metadata["codex_cli_oauth"] = True
+            flow.metadata["codex_cli_oauth_first_body_at_ms"] = None
+            self._store_pending_request(flow, captured_req)
+        except Exception as e:
+            logger.error(f"Codex passthrough setup failed: {e}")
+            flow.response = http.Response.make(
+                502,
+                json.dumps({"error": f"Codex passthrough setup failed: {e}"}, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"},
             )
             flow.metadata["local_response"] = True
 

@@ -1233,7 +1233,7 @@ class CallStorage:
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
