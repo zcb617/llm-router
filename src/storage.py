@@ -57,20 +57,28 @@ class CallStorage:
 
     def _pg_close(self, conn, cur, commit: bool = False):
         """关闭 PostgreSQL 连接"""
+        discard = False
         try:
             if commit:
-                conn.commit()
+                try:
+                    conn.commit()
+                except Exception:
+                    discard = True
             elif self._pg_pool is not None:
-                conn.rollback()
-        except Exception:
-            pass
+                try:
+                    conn.rollback()
+                except Exception:
+                    discard = True
         finally:
             try:
                 cur.close()
             except Exception:
-                pass
+                discard = True
             if self._pg_pool is not None:
-                self._pg_pool.putconn(conn)
+                self._pg_pool.putconn(
+                    conn,
+                    close=discard or bool(getattr(conn, "closed", 0)),
+                )
             else:
                 conn.close()
 
@@ -330,6 +338,11 @@ class CallStorage:
                             tokens_output BIGINT NOT NULL
                         )
                     """)
+                    cur.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "idx_token_usage_history_usage_day_user_model "
+                        "ON token_usage_history (usage_day, user_id, model)"
+                    )
                     conn.commit()
                 else:
                     cur.execute("""
@@ -344,6 +357,11 @@ class CallStorage:
                             tokens_output INTEGER NOT NULL
                         )
                     """)
+                    cur.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "idx_token_usage_history_usage_day_user_model "
+                        "ON token_usage_history (usage_day, user_id, model)"
+                    )
                     conn.commit()
                 self._token_usage_history_schema_ready = True
             except Exception:
@@ -428,7 +446,7 @@ class CallStorage:
                 self._sqlite_close(conn, cur, commit=True)
 
     def import_token_usage_history(self, usage_day: str) -> int:
-        """汇总指定日期的调用日志并直接追加写入历史 Token 使用表。"""
+        """按指定日期幂等重建历史 Token 使用汇总，避免空日志覆盖已有汇总。"""
         self._ensure_token_usage_history_table()
         usage_date = date.fromisoformat(usage_day)
         next_day = usage_date + timedelta(days=1)
@@ -438,6 +456,10 @@ class CallStorage:
         conn, cur = self._pg_conn() if self.postgresql else self._sqlite_conn()
         try:
             if self.postgresql:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"token_usage_history:{usage_day}",),
+                )
                 cur.execute(
                     "SELECT user_id, original_model, COUNT(*), "
                     "COALESCE(SUM(cache_miss_tokens), 0), "
@@ -450,6 +472,67 @@ class CallStorage:
                     (start_timestamp, end_timestamp),
                 )
                 grouped_rows = cur.fetchall()
+                cur.execute(
+                    "SELECT usage_day, user_id, model, "
+                    "SUM(call_count), SUM(cache_miss_tokens), "
+                    "SUM(cached_hit_tokens), SUM(tokens_output) "
+                    "FROM token_usage_history "
+                    "WHERE usage_day = %s "
+                    "GROUP BY usage_day, user_id, model",
+                    (usage_day,),
+                )
+                history_rows = cur.fetchall()
+            else:
+                cur.execute("BEGIN IMMEDIATE")
+                cur.execute(
+                    "SELECT user_id, original_model, COUNT(*), "
+                    "COALESCE(SUM(cache_miss_tokens), 0), "
+                    "COALESCE(SUM(cached_hit_tokens), 0), "
+                    "COALESCE(SUM(tokens_output), 0) "
+                    "FROM llm_calls "
+                    "WHERE timestamp >= ? AND timestamp < ? "
+                    "AND call_status <> 'failed' "
+                    "GROUP BY user_id, original_model",
+                    (start_timestamp, end_timestamp),
+                )
+                grouped_rows = cur.fetchall()
+                cur.execute(
+                    "SELECT usage_day, user_id, model, "
+                    "SUM(call_count), SUM(cache_miss_tokens), "
+                    "SUM(cached_hit_tokens), SUM(tokens_output) "
+                    "FROM token_usage_history "
+                    "WHERE usage_day = ? "
+                    "GROUP BY usage_day, user_id, model",
+                    (usage_day,),
+                )
+                history_rows = cur.fetchall()
+
+            source_values = sorted((
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+            ) for row in grouped_rows)
+            history_values = sorted((
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+                row[6],
+            ) for row in history_rows)
+
+            if not source_values or source_values == history_values:
+                conn.commit()
+                return 0
+
+            if self.postgresql:
+                cur.execute(
+                    "DELETE FROM token_usage_history WHERE usage_day = %s",
+                    (usage_day,),
+                )
                 cur.executemany(
                     "INSERT INTO token_usage_history "
                     "(usage_day, user_id, model, call_count, cache_miss_tokens, cached_hit_tokens, tokens_output) "
@@ -466,17 +549,9 @@ class CallStorage:
                 )
             else:
                 cur.execute(
-                    "SELECT user_id, original_model, COUNT(*), "
-                    "COALESCE(SUM(cache_miss_tokens), 0), "
-                    "COALESCE(SUM(cached_hit_tokens), 0), "
-                    "COALESCE(SUM(tokens_output), 0) "
-                    "FROM llm_calls "
-                    "WHERE timestamp >= ? AND timestamp < ? "
-                    "AND call_status <> 'failed' "
-                    "GROUP BY user_id, original_model",
-                    (start_timestamp, end_timestamp),
+                    "DELETE FROM token_usage_history WHERE usage_day = ?",
+                    (usage_day,),
                 )
-                grouped_rows = cur.fetchall()
                 cur.executemany(
                     "INSERT INTO token_usage_history "
                     "(usage_day, user_id, model, call_count, cache_miss_tokens, cached_hit_tokens, tokens_output) "
@@ -492,9 +567,8 @@ class CallStorage:
                     ) for row in grouped_rows],
                 )
 
-            inserted_count = cur.rowcount if grouped_rows else 0
             conn.commit()
-            return inserted_count
+            return len(grouped_rows)
         except Exception:
             conn.rollback()
             raise

@@ -6,7 +6,7 @@
     python3 scripts/init_token_usage_history.py config.yaml     # 指定配置文件
 
 脚本只读取今天以前的日志日期，并复用每日定时任务使用的
-CallStorage.import_token_usage_history() 逐日导入，不删除、不去重历史数据。
+CallStorage.import_token_usage_history() 逐日导入；已有汇总且数据相等时跳过，来源非空且不一致时重建该日汇总。
 """
 import sys
 from datetime import date

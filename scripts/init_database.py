@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.2.1"
+CURRENT_VERSION = "1.2.2"
 
 
 def get_pg_conn(config):
@@ -1076,6 +1076,34 @@ def run_v121_sqlite(conn):
         cur.close()
 
 
+def run_v122_pg(conn):
+    """执行 v1.2.2 升级：为历史 Token 使用汇总建立唯一索引（PostgreSQL）。"""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_token_usage_history_usage_day_user_model "
+            "ON token_usage_history (usage_day, user_id, model)"
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def run_v122_sqlite(conn):
+    """执行 v1.2.2 升级：为历史 Token 使用汇总建立唯一索引（SQLite）。"""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_token_usage_history_usage_day_user_model "
+            "ON token_usage_history (usage_day, user_id, model)"
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -1106,7 +1134,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -1200,6 +1228,12 @@ def main():
             run_v121_pg(conn)
         else:
             run_v121_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1", CURRENT_VERSION):
+        print("\n[v1.2.2] 检查/补齐历史 Token 使用汇总唯一索引...")
+        if is_pg:
+            run_v122_pg(conn)
+        else:
+            run_v122_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)
