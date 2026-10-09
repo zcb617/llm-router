@@ -8,6 +8,7 @@ import logging
 import pytest
 import sys
 import threading
+import time
 import types
 from types import SimpleNamespace
 
@@ -524,10 +525,55 @@ def test_response_uses_codex_rust_first_body_time_without_fallback(
     assert saved_calls[0]["is_internal_relay"] == 0
 
 
+def test_response_passthrough_uses_normal_first_body_time_and_calculates_speed():
+    """验证 Codex 直连 Responses 流式响应使用普通首包时间并计算速度。"""
+    addon = _make_addon_for_route_tests()
+    addon._auto_retry_max_attempts = 0
+    addon._update_native_multi_upstream_health = lambda *_args: None
+    addon._build_full_context_for_save = lambda *_args, **_kwargs: None
+    saved_calls = []
+    addon._enqueue_call_save = saved_calls.append
+
+    flow = _make_flow()
+    flow.request.content = json.dumps(
+        {"model": "gpt-5.6-luna", "input": "hello", "stream": True}
+    ).encode("utf-8")
+    flow.response = SimpleNamespace(
+        status_code=200,
+        content=(
+            b'data: {"type":"response.completed","response":{"usage":'
+            b'{"input_tokens":100,"output_tokens":20}}}\n\n'
+        ),
+        headers={"Content-Type": "text/event-stream"},
+    )
+    captured_req = _make_captured_request(flow)
+    captured_req.call_id = "passthrough-call"
+    captured_req.start_time = time.time() - 2.5
+    flow.metadata.update(
+        {
+            "codex_passthrough": True,
+            "codex_cli_oauth": True,
+            "codex_cli_oauth_first_body_at_ms": None,
+            "first_token_time": captured_req.start_time + 1.5,
+            "headers_time": captured_req.start_time + 1.0,
+            "codex_response_protocol": "responses",
+        }
+    )
+    addon._store_pending_request(flow, captured_req)
+
+    addon.response(flow)
+
+    assert saved_calls[0]["first_token_ms"] == 1500
+    assert saved_calls[0]["tokens_per_second"] is not None
+    assert saved_calls[0]["tokens_per_second"] > 0
+
+
 def _run_client_disconnect_fallback(
     *, streamed_chunks=None, buffered_response=b"", codex_cli_oauth=True,
     stream_converter=None, response_present=True, model="gpt-5.6-luna",
     multi_upstream_stream_relay=False, is_internal_relay=None,
+    codex_passthrough=False, first_body_at_ms=1250,
+    first_token_time=None, headers_time=None, start_time=1.0,
 ):
     """构造客户端断开场景并返回中继调用保存记录。"""
     addon = _make_addon_for_route_tests()
@@ -552,15 +598,21 @@ def _run_client_disconnect_fallback(
     captured_req.call_id = "disconnect-call"
     captured_req.original_model = model
     captured_req.overridden_model = model
-    captured_req.start_time = 1.0
+    captured_req.start_time = start_time
+    flow.timestamp_created = captured_req.start_time
+    flow.client_conn = SimpleNamespace()
+    flow.server_conn = SimpleNamespace()
     flow.metadata.update(
         {
             "call_id": captured_req.call_id,
             "original_model": captured_req.original_model,
             "overridden_model": captured_req.overridden_model,
+            "codex_passthrough": codex_passthrough,
             "codex_cli_oauth": codex_cli_oauth,
             "codex_response_protocol": "responses",
-            "codex_cli_oauth_first_body_at_ms": 1250,
+            "codex_cli_oauth_first_body_at_ms": first_body_at_ms,
+            "first_token_time": first_token_time,
+            "headers_time": headers_time,
             "multi_upstream_stream_relay": multi_upstream_stream_relay,
         }
     )
@@ -574,6 +626,30 @@ def _run_client_disconnect_fallback(
     addon._store_pending_request(flow, captured_req)
     addon.error(flow)
     return saved_calls
+
+
+def test_error_fallback_passthrough_uses_normal_first_body_time_and_calculates_speed():
+    """验证 Codex 直连错误保存路径与正常响应使用相同首包时间规则。"""
+    response_body = (
+        b'data: {"type":"response.completed","response":{"usage":'
+        b'{"input_tokens":100,"output_tokens":20}}}\n\n'
+    )
+    start_time = time.time() - 2.5
+
+    saved_calls = _run_client_disconnect_fallback(
+        buffered_response=response_body,
+        codex_passthrough=True,
+        first_body_at_ms=None,
+        start_time=start_time,
+        first_token_time=start_time + 1.5,
+        headers_time=start_time + 1.0,
+    )
+
+    assert len(saved_calls) == 1
+    assert saved_calls[0]["call_status"] == "failed"
+    assert saved_calls[0]["first_token_ms"] == 1500
+    assert saved_calls[0]["tokens_per_second"] is not None
+    assert saved_calls[0]["tokens_per_second"] > 0
 
 
 def test_error_fallback_prefers_streamed_chunks_over_buffered_response():

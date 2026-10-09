@@ -3341,6 +3341,42 @@ class LLMRouterAddon:
         else:
             flow.response.stream = lambda chunk: self._record_stream_activity(flow, chunk)
 
+    def _resolve_first_token_ms(
+        self, flow, captured_req, stream_type, *, use_headers_fallback
+    ):
+        """按调用通道选择流式首包时间，统一正常响应和错误保存的统计口径。"""
+        if stream_type != "stream":
+            return None
+
+        if flow.metadata.get("codex_passthrough"):
+            first_token_time = flow.metadata.get("first_token_time")
+            if first_token_time is None:
+                first_token_time = flow.metadata.get("headers_time")
+            if first_token_time is None:
+                return None
+            first_token_ms = int(
+                (first_token_time - captured_req.start_time) * 1000
+            )
+            return first_token_ms if first_token_ms >= 0 else None
+
+        if flow.metadata.get("codex_cli_oauth"):
+            first_body_at_ms = flow.metadata.get(
+                "codex_cli_oauth_first_body_at_ms"
+            )
+            if type(first_body_at_ms) is not int:
+                return None
+            first_token_ms = int(
+                first_body_at_ms - captured_req.start_time * 1000
+            )
+            return first_token_ms if first_token_ms >= 0 else None
+
+        first_token_time = flow.metadata.get("first_token_time")
+        if first_token_time is None and use_headers_fallback:
+            first_token_time = flow.metadata.get("headers_time")
+        if first_token_time is None:
+            return None
+        return int((first_token_time - captured_req.start_time) * 1000)
+
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
         from src.tokenizer import (
@@ -3505,17 +3541,12 @@ class LLMRouterAddon:
         except Exception:
             pass
 
-        first_token_ms = None
-        if flow.metadata.get("codex_cli_oauth"):
-            first_body_at_ms = flow.metadata.get("codex_cli_oauth_first_body_at_ms")
-            if stream_type == "stream" and type(first_body_at_ms) is int:
-                first_token_ms = int(first_body_at_ms - captured_req.start_time * 1000)
-                if first_token_ms < 0:
-                    first_token_ms = None
-        else:
-            first_token_time = flow.metadata.get("first_token_time") or flow.metadata.get("headers_time")
-            if first_token_time and stream_type == "stream":
-                first_token_ms = int((first_token_time - captured_req.start_time) * 1000)
+        first_token_ms = self._resolve_first_token_ms(
+            flow,
+            captured_req,
+            stream_type,
+            use_headers_fallback=True,
+        )
         claude_code_feature_request = bool(flow.metadata.get("claude_code_feature_request"))
 
         if flow.metadata.get("codex_response_protocol") == "responses":
@@ -3731,22 +3762,12 @@ class LLMRouterAddon:
             except Exception:
                 pass
 
-            if flow.metadata.get("codex_cli_oauth"):
-                first_body_at_ms = flow.metadata.get(
-                    "codex_cli_oauth_first_body_at_ms"
-                )
-                if stream_type == "stream" and type(first_body_at_ms) is int:
-                    first_token_ms = int(
-                        first_body_at_ms - captured_req.start_time * 1000
-                    )
-                    if first_token_ms < 0:
-                        first_token_ms = None
-            else:
-                first_token_time = flow.metadata.get("first_token_time")
-                if first_token_time and stream_type == "stream":
-                    first_token_ms = int(
-                        (first_token_time - captured_req.start_time) * 1000
-                    )
+            first_token_ms = self._resolve_first_token_ms(
+                flow,
+                captured_req,
+                stream_type,
+                use_headers_fallback=False,
+            )
 
             if flow.metadata.get("codex_response_protocol") == "responses":
                 tokens_input = responses_cache_tokens_parser.get_input_tokens(
