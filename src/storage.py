@@ -468,6 +468,7 @@ class CallStorage:
                     "FROM llm_calls "
                     "WHERE timestamp >= %s AND timestamp < %s "
                     "AND call_status <> 'failed' "
+                    "AND user_id IS NOT NULL "
                     "GROUP BY user_id, original_model",
                     (start_timestamp, end_timestamp),
                 )
@@ -492,6 +493,7 @@ class CallStorage:
                     "FROM llm_calls "
                     "WHERE timestamp >= ? AND timestamp < ? "
                     "AND call_status <> 'failed' "
+                    "AND user_id IS NOT NULL "
                     "GROUP BY user_id, original_model",
                     (start_timestamp, end_timestamp),
                 )
