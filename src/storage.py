@@ -145,6 +145,10 @@ class CallStorage:
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS full_context TEXT")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS outbound_diagnostics JSON")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS is_internal_relay INTEGER NOT NULL DEFAULT 0")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS transport_status TEXT")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS transport_error TEXT")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS business_status TEXT")
+                    cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS business_error TEXT")
                 else:
                     cur.execute("PRAGMA table_info(llm_calls)")
                     existing_columns = {row[1] for row in cur.fetchall()}
@@ -172,6 +176,14 @@ class CallStorage:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN outbound_diagnostics TEXT")
                     if "is_internal_relay" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN is_internal_relay INTEGER NOT NULL DEFAULT 0")
+                    if "transport_status" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN transport_status TEXT")
+                    if "transport_error" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN transport_error TEXT")
+                    if "business_status" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN business_status TEXT")
+                    if "business_error" not in existing_columns:
+                        cur.execute("ALTER TABLE llm_calls ADD COLUMN business_error TEXT")
 
                 conn.commit()
                 self._llm_calls_schema_ready = True

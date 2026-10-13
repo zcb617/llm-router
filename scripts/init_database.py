@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.2.2"
+CURRENT_VERSION = "1.2.3"
 
 
 def get_pg_conn(config):
@@ -1104,6 +1104,28 @@ def run_v122_sqlite(conn):
         cur.close()
 
 
+def run_v123_pg(conn):
+    """执行 v1.2.3 升级：为 llm_calls 补齐网络与业务状态四列（PostgreSQL）。
+
+    只加列（ADD COLUMN IF NOT EXISTS，幂等），绝不 UPDATE 任何历史数据。
+    """
+    _pg_add_column(conn, "llm_calls", "transport_status", "TEXT")
+    _pg_add_column(conn, "llm_calls", "transport_error", "TEXT")
+    _pg_add_column(conn, "llm_calls", "business_status", "TEXT")
+    _pg_add_column(conn, "llm_calls", "business_error", "TEXT")
+
+
+def run_v123_sqlite(conn):
+    """执行 v1.2.3 升级：为 llm_calls 补齐网络与业务状态四列（SQLite）。
+
+    只加列（幂等），绝不 UPDATE 任何历史数据。
+    """
+    _sqlite_add_column(conn, "llm_calls", "transport_status", "TEXT")
+    _sqlite_add_column(conn, "llm_calls", "transport_error", "TEXT")
+    _sqlite_add_column(conn, "llm_calls", "business_status", "TEXT")
+    _sqlite_add_column(conn, "llm_calls", "business_error", "TEXT")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -1234,6 +1256,12 @@ def main():
             run_v122_pg(conn)
         else:
             run_v122_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1", "1.2.2", CURRENT_VERSION):
+        print("\n[v1.2.3] 检查/补齐网络与业务状态四列...")
+        if is_pg:
+            run_v123_pg(conn)
+        else:
+            run_v123_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)
