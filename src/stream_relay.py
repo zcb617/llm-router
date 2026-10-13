@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Callable
 
 import httpx
@@ -42,7 +43,7 @@ class StreamRelayServer:
     def __init__(
         self,
         failure_recorder: Callable[[int], None] | None = None,
-        connect_timeout: float = 0.8,
+        connect_timeout: float = 10.0,
     ):
         self.failure_recorder = failure_recorder
         self.connect_timeout = connect_timeout
@@ -155,6 +156,7 @@ class StreamRelayServer:
             raise _DownstreamDisconnected from exc
 
     async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
+        """接收流式请求，按上游实际 HTTP 结果执行首字节前故障转移并记录诊断。"""
         token = request.headers.get(RELAY_TOKEN_HEADER, "")
         attempts = self._take_attempts(token)
         if not attempts:
@@ -175,9 +177,29 @@ class StreamRelayServer:
             last_upstream_id = upstream_id
             last_url = attempt.get("url", "")
             last_forward_model = attempt.get("forward_model", "")
+            record = {
+                "upstream_id": upstream_id,
+                "url": last_url,
+                "http_status": None,
+                "stage": "connect",
+                "outcome": "pending",
+                "error_type": None,
+                "error": None,
+                "elapsed_ms": 0,
+            }
+            diagnostics = attempt.get("diagnostics")
+            if isinstance(diagnostics, dict):
+                diagnostics.setdefault("attempts", []).append(record)
+            call_id = attempt.get("call_id")
+            start = time.monotonic()
             downstream_started = False
+            upstream_failure_recorded = False
             client = self._client
             if client is None:
+                record["outcome"] = "failed"
+                record["error_type"] = "RelayNotReady"
+                record["error"] = "stream relay is not ready"
+                record["elapsed_ms"] = int((time.monotonic() - start) * 1000)
                 return web.json_response({"error": "stream relay is not ready"}, status=503)
 
             try:
@@ -189,18 +211,27 @@ class StreamRelayServer:
                 ) as upstream:
                     last_status = upstream.status_code
                     last_headers = self._response_headers(upstream.headers)
+                    record["http_status"] = upstream.status_code
+                    record["stage"] = "first_body"
                     logger.info(
-                        "[RELAY_UPSTREAM_HEADERS] upstream_id=%s, status=%d, url=%s",
-                        upstream_id, upstream.status_code, attempt["url"],
+                        "[RELAY_UPSTREAM_HEADERS] call_id=%s upstream_id=%s status=%d url=%s",
+                        call_id, upstream_id, upstream.status_code, attempt["url"],
                     )
 
                     if not 200 <= upstream.status_code < 300:
                         last_body = await upstream.aread()
+                        error = last_body.decode("utf-8", errors="replace")[:2048]
+                        record["stage"] = "http_status"
+                        record["outcome"] = "failed"
+                        record["error_type"] = "HTTPStatusError"
+                        record["error"] = error or f"HTTP {upstream.status_code}"
                         self._record_failure(upstream_id)
+                        upstream_failure_recorded = True
                         logger.warning(
-                            "Stream upstream %s returned %s; trying next",
-                            upstream_id,
-                            upstream.status_code,
+                            "Stream upstream failed: call_id=%s upstream_id=%s url=%s "
+                            "http_status=%s stage=%s outcome=%s error_type=%s error=%r; trying next",
+                            call_id, upstream_id, attempt["url"], record["http_status"],
+                            record["stage"], record["outcome"], record["error_type"], record["error"],
                         )
                         continue
 
@@ -211,12 +242,18 @@ class StreamRelayServer:
                             if chunk:
                                 first_chunk = chunk
                                 break
-                    except (httpx.HTTPError, OSError):
+                    except (httpx.HTTPError, OSError) as exc:
                         # No downstream bytes have been sent yet, so this attempt is safe to retry.
+                        record["stage"] = "first_body"
+                        record["outcome"] = "failed"
+                        record["error_type"] = type(exc).__name__
+                        record["error"] = str(exc) or repr(exc)
                         self._record_failure(upstream_id)
+                        upstream_failure_recorded = True
                         logger.warning(
-                            "Stream upstream %s failed before first body chunk; trying next",
-                            upstream_id,
+                            "Stream upstream failed before first body chunk: call_id=%s "
+                            "upstream_id=%s error_type=%s error=%r; trying next",
+                            call_id, upstream_id, type(exc).__name__, repr(exc),
                             exc_info=True,
                         )
                         continue
@@ -228,14 +265,23 @@ class StreamRelayServer:
                         "forward_model", ""
                     )
                     if first_chunk is None:
+                        record["stage"] = "first_body"
+                        record["outcome"] = "failed"
+                        record["error_type"] = "EmptyResponse"
+                        record["error"] = "upstream closed before first body chunk"
                         self._record_failure(upstream_id)
+                        upstream_failure_recorded = True
                         last_body = b""
                         logger.warning(
-                            "Stream upstream %s closed before first body chunk; trying next",
-                            upstream_id,
+                            "Stream upstream failed: call_id=%s upstream_id=%s url=%s "
+                            "stage=%s outcome=%s error_type=%s error=%r; trying next",
+                            call_id, upstream_id, attempt["url"], record["stage"],
+                            record["outcome"], record["error_type"], record["error"],
                         )
                         continue
 
+                    record["stage"] = "stream"
+                    record["outcome"] = "streaming"
                     response = web.StreamResponse(
                         status=upstream.status_code,
                         headers=response_headers,
@@ -244,8 +290,8 @@ class StreamRelayServer:
                     downstream_started = True
                     await self._write_downstream(response, first_chunk)
                     logger.info(
-                        "[RELAY_FIRST_CHUNK] upstream_id=%s, first_chunk_len=%d",
-                        upstream_id, len(first_chunk),
+                        "[RELAY_FIRST_CHUNK] call_id=%s upstream_id=%s first_chunk_len=%d",
+                        call_id, upstream_id, len(first_chunk),
                     )
                     relay_chunk_count = 1
                     relay_total_bytes = len(first_chunk)
@@ -255,43 +301,75 @@ class StreamRelayServer:
                                 await self._write_downstream(response, chunk)
                                 relay_chunk_count += 1
                                 relay_total_bytes += len(chunk)
+                        record["outcome"] = "completed"
                         logger.info(
-                            "[RELAY_STREAM_DONE] upstream_id=%s, all chunks written, "
+                            "[RELAY_STREAM_DONE] call_id=%s upstream_id=%s all chunks written, "
                             "total_chunks=%d, total_bytes=%d, about to write_eof",
-                            upstream_id, relay_chunk_count, relay_total_bytes,
+                            call_id, upstream_id, relay_chunk_count, relay_total_bytes,
                         )
                         await self._finish_downstream_response(response)
                         logger.info(
-                            "[RELAY_COMPLETE] upstream_id=%s, stream fully relayed and EOF written",
-                            upstream_id,
+                            "[RELAY_COMPLETE] call_id=%s upstream_id=%s stream fully relayed and EOF written",
+                            call_id, upstream_id,
                         )
                     except _DownstreamDisconnected:
                         # 下游已经断开，不是上游健康问题。
+                        record["stage"] = "downstream"
+                        record["outcome"] = "disconnected"
+                        record["error_type"] = "DownstreamDisconnected"
+                        record["error"] = "downstream disconnected"
                         logger.warning(
-                            "[RELAY_DOWNSTREAM_DISCONNECT] upstream_id=%s, "
+                            "[RELAY_DOWNSTREAM_DISCONNECT] call_id=%s upstream_id=%s, "
                             "chunks_written=%d, bytes_written=%d, "
                             "downstream(mitmproxy) disconnected during relay",
-                            upstream_id, relay_chunk_count, relay_total_bytes,
+                            call_id, upstream_id, relay_chunk_count, relay_total_bytes,
                         )
                         raise
-                    except (httpx.HTTPError, OSError):
+                    except (httpx.HTTPError, OSError) as exc:
                         # 下游已经收到数据，不能重试；只记录上游读流失败。
+                        record["stage"] = "stream"
+                        record["outcome"] = "failed"
+                        record["error_type"] = type(exc).__name__
+                        record["error"] = str(exc) or repr(exc)
                         self._record_failure(upstream_id)
+                        upstream_failure_recorded = True
+                        logger.warning(
+                            "Stream upstream read failed: call_id=%s upstream_id=%s "
+                            "error_type=%s error=%r",
+                            call_id, upstream_id, type(exc).__name__, repr(exc),
+                        )
                         raise
                     return response
 
             except (httpx.HTTPError, OSError) as exc:
                 if downstream_started:
+                    if not upstream_failure_recorded:
+                        record["stage"] = record.get("stage") or "stream"
+                        record["outcome"] = "failed"
+                        record["error_type"] = type(exc).__name__
+                        record["error"] = str(exc) or repr(exc)
+                        self._record_failure(upstream_id)
+                        upstream_failure_recorded = True
                     raise
+                record["outcome"] = "failed"
+                record["error_type"] = type(exc).__name__
+                record["error"] = str(exc) or repr(exc)
                 self._record_failure(upstream_id)
+                upstream_failure_recorded = True
                 logger.warning(
-                    "Stream upstream %s request failed before downstream output; trying next: %s",
-                    upstream_id,
-                    exc,
+                    "Stream upstream request failed before downstream output: call_id=%s "
+                    "upstream_id=%s stage=%s error_type=%s error=%r; trying next",
+                    call_id, upstream_id, record["stage"], type(exc).__name__, repr(exc),
                 )
                 continue
             except _DownstreamDisconnected:
+                record["stage"] = "downstream"
+                record["outcome"] = "disconnected"
+                record["error_type"] = "DownstreamDisconnected"
+                record["error"] = "downstream disconnected"
                 raise
+            finally:
+                record["elapsed_ms"] = int((time.monotonic() - start) * 1000)
 
         if 200 <= last_status < 300:
             last_status = 502

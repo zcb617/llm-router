@@ -12,7 +12,6 @@ import uuid
 import threading
 import time
 import queue
-import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -158,14 +157,9 @@ class LLMRouterAddon:
         self._kimi_cli_auth = KimiCliAuthManager(Path(__file__).resolve().parent.parent)
         self._codex_cli_auth = CodexCliAuthManager()
 
-        # 多上游流式预探活超时
-        self._stream_route_preconnect_timeout_s = max(
-            0.1,
-            getattr(self.config.proxy, "stream_route_preconnect_timeout_ms", 800) / 1000.0,
-        )
         self._stream_relay = StreamRelayServer(
             self._record_upstream_failure,
-            connect_timeout=self._stream_route_preconnect_timeout_s,
+            connect_timeout=10.0,
         )
     
     @property
@@ -1407,6 +1401,14 @@ class LLMRouterAddon:
 
         original_url = flow.request.url
         original_query = urlparse(original_url).query
+        captured_req.call_id = str(uuid.uuid4())
+        flow.metadata["call_id"] = captured_req.call_id
+        diagnostics = {
+            "transport": "stream_relay",
+            "connect_timeout_s": 10.0,
+            "attempts": [],
+        }
+        flow.metadata["stream_relay_diagnostics"] = diagnostics
         relay_attempts = []
         last_error = "pre-connect failed"
 
@@ -1420,16 +1422,6 @@ class LLMRouterAddon:
                 continue
 
             target_base_url = self._resolve_target_base_url(route)
-            if not self._is_route_reachable(target_base_url):
-                last_error = f"{upstream_id}: pre-connect failed"
-                logger.warning(
-                    "Streaming upstream pre-connect failed: %s %s, trying next",
-                    upstream_id,
-                    target_base_url,
-                )
-                if upstream_id is not None:
-                    self._record_upstream_failure(upstream_id)
-                continue
 
             try:
                 normalized_path = (
@@ -1460,6 +1452,8 @@ class LLMRouterAddon:
 
                 relay_attempts.append(
                     {
+                        "call_id": captured_req.call_id,
+                        "diagnostics": diagnostics,
                         "upstream_id": upstream_id,
                         "url": target_url,
                         "body": req_body.encode("utf-8") if isinstance(req_body, str) else req_body,
@@ -1469,11 +1463,26 @@ class LLMRouterAddon:
                 )
             except Exception as exc:
                 last_error = f"{upstream_id}: {exc}"
+                diagnostics["attempts"].append(
+                    {
+                        "upstream_id": upstream_id,
+                        "url": target_base_url,
+                        "http_status": None,
+                        "stage": "prepare",
+                        "outcome": "failed",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc) or repr(exc),
+                        "elapsed_ms": 0,
+                    }
+                )
                 logger.warning(
-                    "Streaming upstream request preparation failed: %s %s: %s, trying next",
+                    "Streaming upstream request preparation failed: call_id=%s upstream_id=%s "
+                    "url=%s error_type=%s error=%r, trying next",
+                    captured_req.call_id,
                     upstream_id,
                     target_base_url,
-                    exc,
+                    type(exc).__name__,
+                    repr(exc),
                 )
                 if upstream_id is not None:
                     self._record_upstream_failure(upstream_id)
@@ -1508,8 +1517,6 @@ class LLMRouterAddon:
         captured_req.original_model = model_name
         captured_req.overridden_model = model_name
         captured_req.url = flow.request.url
-        captured_req.call_id = str(uuid.uuid4())
-        flow.metadata["call_id"] = captured_req.call_id
         flow.metadata["multi_upstream_native"] = True
         flow.metadata["multi_upstream_stream_relay"] = True
         flow.metadata["multi_upstream_original_path"] = path
@@ -2040,23 +2047,6 @@ class LLMRouterAddon:
             {"Content-Type": "application/json"}
         )
         flow.metadata["local_response"] = True
-
-    def _is_route_reachable(self, target_base_url: str) -> bool:
-        """流式路由预探活：先做 TCP 连通性筛选，降低首路由硬失败概率。"""
-        try:
-            parsed = urlparse(target_base_url)
-            host = parsed.hostname
-            if not host:
-                return False
-            if parsed.port:
-                port = parsed.port
-            else:
-                port = 443 if parsed.scheme == "https" else 80
-
-            with socket.create_connection((host, port), timeout=self._stream_route_preconnect_timeout_s):
-                return True
-        except Exception:
-            return False
 
     @staticmethod
     def _is_stream_request(body: str | None) -> bool:
@@ -3706,7 +3696,7 @@ class LLMRouterAddon:
         if original_request_body:
             captured_req.body = original_request_body
 
-        outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
+        outbound_diagnostics = flow.metadata.get("stream_relay_diagnostics") or flow.metadata.get("codex_outbound_diagnostics")
         if isinstance(outbound_diagnostics, dict):
             outbound_diagnostics = dict(outbound_diagnostics)
             outbound_diagnostics["duration_ms"] = captured_resp.duration_ms
@@ -3983,7 +3973,7 @@ class LLMRouterAddon:
                 f"[ERROR_SAVE] status=failed, error={flow.error}, {metrics_message}"
             )
 
-            outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
+            outbound_diagnostics = flow.metadata.get("stream_relay_diagnostics") or flow.metadata.get("codex_outbound_diagnostics")
             if isinstance(outbound_diagnostics, dict):
                 outbound_diagnostics = dict(outbound_diagnostics)
                 outbound_diagnostics["duration_ms"] = duration_ms
@@ -4047,7 +4037,7 @@ class LLMRouterAddon:
             except Exception:
                 pass
 
-            outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
+            outbound_diagnostics = flow.metadata.get("stream_relay_diagnostics") or flow.metadata.get("codex_outbound_diagnostics")
             if isinstance(outbound_diagnostics, dict):
                 outbound_diagnostics = dict(outbound_diagnostics)
                 outbound_diagnostics["duration_ms"] = duration_ms
