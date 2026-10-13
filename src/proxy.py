@@ -3418,6 +3418,18 @@ class LLMRouterAddon:
         # 捕获响应数据
         captured_resp = self.capturer.capture_response(flow, captured_req)
 
+        # 新增：记录 response() 正常触发时的流状态，用于和 error() 对比
+        resp_streamed_chunks = flow.metadata.get("streamed_response_chunks", [])
+        logger.info(
+            f"[RESPONSE_OK] call_id={flow.metadata.get('call_id')}, "
+            f"status={captured_resp.status_code}, "
+            f"response_timestamp_end={getattr(flow.response, 'timestamp_end', None)}, "
+            f"raw_content_len={len(flow.response.raw_content) if flow.response.raw_content else 0}, "
+            f"streamed_chunks_count={len(resp_streamed_chunks)}, "
+            f"is_multi={flow.metadata.get('multi_upstream_native')}, "
+            f"is_relay={flow.metadata.get('multi_upstream_stream_relay')}"
+        )
+
         retry_attempt = int(flow.metadata.get("auto_retry_attempt", 0))
         if (
             self._auto_retry_max_attempts > 0
@@ -3719,9 +3731,42 @@ class LLMRouterAddon:
         )
         # 网络异常分支：无论转换器是否曾收到业务结束标记，网络层一律记 failed。
         connection_timeline = self._stream_connection_timeline(flow)
+
+        # 新增：记录 error() 触发时 flow.response 的完整状态，用于区分
+        # "流完整传完后客户端断开" 和 "流没传完就断开"
+        response_obj = flow.response
+        response_timestamp_end = getattr(response_obj, "timestamp_end", None) if response_obj else None
+        response_raw_content_len = (
+            len(response_obj.raw_content)
+            if response_obj and response_obj.raw_content
+            else 0
+        )
+        streamed_chunks_list = flow.metadata.get("streamed_response_chunks", [])
+        streamed_chunks_count = len(streamed_chunks_list)
+        streamed_total_bytes = sum(len(c) for c in streamed_chunks_list) if streamed_chunks_list else 0
+        stream_has_terminator = False
+        if streamed_chunks_list:
+            last_chunks_text = b"".join(streamed_chunks_list[-3:]).decode("utf-8", errors="replace")
+            stream_has_terminator = (
+                "message_stop" in last_chunks_text
+                or "[DONE]" in last_chunks_text
+                or "response.completed" in last_chunks_text
+            )
+
         logger.warning(
             f"[ERROR_DIAG] status=failed, error={flow.error}, {stream_context}, "
             f"connection_timeline={connection_timeline}"
+        )
+        logger.warning(
+            f"[ERROR_FLOW_STATE] call_id={call_id}, "
+            f"response_exists={response_obj is not None}, "
+            f"response_timestamp_end={response_timestamp_end}, "
+            f"response_raw_content_len={response_raw_content_len}, "
+            f"streamed_chunks_count={streamed_chunks_count}, "
+            f"streamed_total_bytes={streamed_total_bytes}, "
+            f"stream_has_terminator={stream_has_terminator}, "
+            f"flow_error_timestamp={getattr(flow.error, 'timestamp', None)}, "
+            f"flow_timestamp_created={flow.timestamp_created}"
         )
 
         # 架构铁律：已进入 error() 说明网络层发生异常。

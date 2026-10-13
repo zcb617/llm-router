@@ -135,13 +135,23 @@ class StreamRelayServer:
         try:
             await response.write(chunk)
         except OSError as exc:
+            logger.warning(
+                "[RELAY_WRITE_FAIL] write chunk failed: %s, chunk_len=%d, response_prepared=%s",
+                exc, len(chunk), response.prepared,
+            )
             raise _DownstreamDisconnected from exc
 
     @staticmethod
     async def _finish_downstream_response(response) -> None:
         try:
             await response.write_eof()
+            logger.info("[RELAY_EOF_OK] write_eof completed normally")
         except OSError as exc:
+            logger.warning(
+                "[RELAY_EOF_FAIL] write_eof failed: %s, response_prepared=%s, "
+                "this means downstream(mitmproxy) already closed connection",
+                exc, response.prepared,
+            )
             raise _DownstreamDisconnected from exc
 
     async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
@@ -179,6 +189,10 @@ class StreamRelayServer:
                 ) as upstream:
                     last_status = upstream.status_code
                     last_headers = self._response_headers(upstream.headers)
+                    logger.info(
+                        "[RELAY_UPSTREAM_HEADERS] upstream_id=%s, status=%d, url=%s",
+                        upstream_id, upstream.status_code, attempt["url"],
+                    )
 
                     if not 200 <= upstream.status_code < 300:
                         last_body = await upstream.aread()
@@ -229,13 +243,36 @@ class StreamRelayServer:
                     await self._prepare_downstream_response(response, request)
                     downstream_started = True
                     await self._write_downstream(response, first_chunk)
+                    logger.info(
+                        "[RELAY_FIRST_CHUNK] upstream_id=%s, first_chunk_len=%d",
+                        upstream_id, len(first_chunk),
+                    )
+                    relay_chunk_count = 1
+                    relay_total_bytes = len(first_chunk)
                     try:
                         async for chunk in upstream_chunks:
                             if chunk:
                                 await self._write_downstream(response, chunk)
+                                relay_chunk_count += 1
+                                relay_total_bytes += len(chunk)
+                        logger.info(
+                            "[RELAY_STREAM_DONE] upstream_id=%s, all chunks written, "
+                            "total_chunks=%d, total_bytes=%d, about to write_eof",
+                            upstream_id, relay_chunk_count, relay_total_bytes,
+                        )
                         await self._finish_downstream_response(response)
+                        logger.info(
+                            "[RELAY_COMPLETE] upstream_id=%s, stream fully relayed and EOF written",
+                            upstream_id,
+                        )
                     except _DownstreamDisconnected:
                         # 下游已经断开，不是上游健康问题。
+                        logger.warning(
+                            "[RELAY_DOWNSTREAM_DISCONNECT] upstream_id=%s, "
+                            "chunks_written=%d, bytes_written=%d, "
+                            "downstream(mitmproxy) disconnected during relay",
+                            upstream_id, relay_chunk_count, relay_total_bytes,
+                        )
                         raise
                     except (httpx.HTTPError, OSError):
                         # 下游已经收到数据，不能重试；只记录上游读流失败。
