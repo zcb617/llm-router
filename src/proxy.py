@@ -1582,6 +1582,15 @@ class LLMRouterAddon:
             captured_req.url = full_url
             captured_req.call_id = str(uuid.uuid4())
             flow.metadata["call_id"] = captured_req.call_id
+            client_request_id = flow.request.headers.get("x-client-request-id") or "-"
+            flow.request.headers["X-Llm-Router-Call-Id"] = captured_req.call_id
+            flow.metadata["codex_client_request_id"] = client_request_id
+            logger.info(
+                "[CODEX_PASSTHROUGH_CORRELATION] client_request_id=%s llm_router_call_id=%s target_url=%s",
+                client_request_id,
+                captured_req.call_id,
+                full_url,
+            )
             flow.metadata["codex_response_protocol"] = "responses"
             flow.metadata["codex_cli_oauth"] = True
             flow.metadata["codex_cli_oauth_first_body_at_ms"] = None
@@ -3681,6 +3690,11 @@ class LLMRouterAddon:
         original_model = flow.metadata.get("original_model")
         overridden_model = flow.metadata.get("overridden_model")
         is_multi = flow.metadata.get("multi_upstream_native")
+        client_request_id = (
+            flow.metadata.get("codex_client_request_id")
+            or flow.request.headers.get("x-client-request-id")
+            or "-"
+        )
         stream_converter = flow.metadata.get("stream_converter")
         converter_successful = getattr(stream_converter, "_successful", None)
         if converter_successful is None:
@@ -3690,7 +3704,8 @@ class LLMRouterAddon:
         stream_context = (
             f"is_multi={is_multi}, captured_req={'YES' if captured_req else 'NO'}, "
             f"resp_status={resp_status}, has_stream_chunks={has_stream_chunks}, "
-            f"call_id={call_id}, original={original_model}, overridden={overridden_model}, "
+            f"call_id={call_id}, client_request_id={client_request_id}, "
+            f"original={original_model}, overridden={overridden_model}, "
             f"returned_completed={bool(downstream.get('response_completed_returned'))}, "
             f"eof_seen={bool(downstream.get('eof_seen'))}, "
             f"returned_chunks={downstream.get('returned_chunks', 0)}, "
@@ -3730,8 +3745,6 @@ class LLMRouterAddon:
                 extract_cache_miss_tokens,
                 extract_cached_hit_tokens,
             )
-            import json
-            import time
 
             if has_stream_chunks:
                 streamed_chunks = flow.metadata.get("streamed_response_chunks", [])
