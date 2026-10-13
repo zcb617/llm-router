@@ -3703,10 +3703,6 @@ class LLMRouterAddon:
             or "-"
         )
         stream_converter = flow.metadata.get("stream_converter")
-        converter_successful = getattr(stream_converter, "_successful", None)
-        if converter_successful is None:
-            converter_successful = bool(getattr(stream_converter, "_completed", False))
-        stream_completed = bool(converter_successful)
         downstream = flow.metadata.get("protocol_downstream_diagnostics") or {}
         stream_context = (
             f"is_multi={is_multi}, captured_req={'YES' if captured_req else 'NO'}, "
@@ -3721,16 +3717,16 @@ class LLMRouterAddon:
             f"last_sequence={downstream.get('last_sequence_number')}, "
             f"tail={downstream.get('tail_events', [])}"
         )
-        if stream_completed:
-            logger.info(
-                f"[STREAM_COMPLETE] status=success, response_completed=true, {stream_context}"
-            )
-        else:
-            connection_timeline = self._stream_connection_timeline(flow)
-            logger.warning(
-                f"[ERROR_DIAG] status=failed, error={flow.error}, {stream_context}, "
-                f"connection_timeline={connection_timeline}"
-            )
+        # 网络异常分支：无论转换器是否曾收到业务结束标记，网络层一律记 failed。
+        connection_timeline = self._stream_connection_timeline(flow)
+        logger.warning(
+            f"[ERROR_DIAG] status=failed, error={flow.error}, {stream_context}, "
+            f"connection_timeline={connection_timeline}"
+        )
+
+        # 架构铁律：已进入 error() 说明网络层发生异常。
+        # 网络失败一律记失败，绝不用 stream_completed（业务结束标记）反推业务成功，
+        # 绝不用业务标记证明网络传输成功。
 
         # 兜底保存：客户端断开但上游已正常响应时，优先使用累积的流式数据，
         # Codex CLI OAuth 没有流式分片时，使用 Rust 出站已写入 flow.response 的完整响应。
@@ -3868,12 +3864,10 @@ class LLMRouterAddon:
                 f"cached={cached_hit_tokens}, miss={cache_miss_tokens}, "
                 f"speed={tokens_per_second}"
             )
-            if stream_completed:
-                logger.info(f"[STREAM_SAVE] status=success, {metrics_message}")
-            else:
-                logger.warning(
-                    f"[ERROR_SAVE] status=failed, error={flow.error}, {metrics_message}"
-                )
+            # 网络异常分支：一律记 failed，不用 stream_completed 反推成功
+            logger.warning(
+                f"[ERROR_SAVE] status=failed, error={flow.error}, {metrics_message}"
+            )
 
             outbound_diagnostics = flow.metadata.get("codex_outbound_diagnostics")
             if isinstance(outbound_diagnostics, dict):
@@ -3898,12 +3892,9 @@ class LLMRouterAddon:
                 "response_headers": response_headers,
                 "response_body": response_body,
                 "final_responses_body": None,
-                # 流式请求未完整结束时，即使 HTTP 状态为 2xx 也必须记录失败。
-                "call_status": (
-                    "success" if stream_completed else "failed"
-                ) if stream_type == "stream" else self._infer_call_status(
-                    resp_status, response_body
-                ),
+                # 架构铁律：本分支在 error()（网络异常）内，网络失败一律记 failed，
+                # 不看 stream_completed，不用业务结束标记反推网络/业务成功。
+                "call_status": "failed",
                 "duration_ms": duration_ms,
                 "tokens_input": tokens_input,
                 "tokens_output": tokens_output,
