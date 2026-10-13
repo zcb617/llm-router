@@ -1,9 +1,16 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LLM Router - 模型广场</title>
+  <script>
+    // 在渲染前根据用户偏好应用主题，避免闪烁
+    (function () {
+      var theme = localStorage.getItem('llm_theme') || 'dark';
+      if (theme === 'dark') document.documentElement.classList.add('dark');
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -43,8 +50,8 @@
       max-width: 100%;
       align-items: center;
       border: 1px solid rgba(113, 113, 122, 0.35);
-      background: rgba(39, 39, 42, 0.62);
-      color: #f4f4f5;
+      background: rgba(244, 244, 245, 0.85);
+      color: #18181b;
       border-radius: 999px;
       padding: 7px 12px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -52,6 +59,10 @@
       line-height: 1.35;
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+    .dark .value-chip {
+      background: rgba(39, 39, 42, 0.62);
+      color: #f4f4f5;
     }
     .field-label {
       display: block;
@@ -85,6 +96,11 @@
       </nav>
     </div>
     <div class="flex items-center gap-3">
+      <button id="themeToggleBtn" type="button" title="切换亮/暗主题"
+        class="w-8 h-8 flex items-center justify-center rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition text-zinc-600 dark:text-zinc-300">
+        <svg id="themeIconMoon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 hidden"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg id="themeIconSun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+      </button>
       <span id="userEmail" class="text-sm text-zinc-500"></span>
       <button id="logoutBtn" class="px-3 py-1 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">
         退出登录
@@ -119,6 +135,42 @@
   </main>
 
 <script src="/web/auth-interceptor.js"></script>
+<script>
+// ===== 主题切换 =====
+(function () {
+  function currentTheme() {
+    return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+  }
+  function applyTheme(theme) {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('llm_theme', theme);
+    syncIcon(theme);
+  }
+  function syncIcon(theme) {
+    var sun = document.getElementById('themeIconSun');
+    var moon = document.getElementById('themeIconMoon');
+    if (!sun || !moon) return;
+    if (theme === 'dark') {
+      sun.classList.remove('hidden');
+      moon.classList.add('hidden');
+    } else {
+      sun.classList.add('hidden');
+      moon.classList.remove('hidden');
+    }
+  }
+  syncIcon(currentTheme());
+  var btn = document.getElementById('themeToggleBtn');
+  if (btn) {
+    btn.addEventListener('click', function () {
+      applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+    });
+  }
+})();
+</script>
 <script>
 const token = localStorage.getItem('llm_token');
 if (!token) {
@@ -158,8 +210,8 @@ function getTagLabel(tag) {
 
 function getTagClass(tag) {
   return tag === 'anthropic'
-    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/20'
-    : 'bg-sky-500/15 text-sky-300 border border-sky-500/20';
+    ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 dark:border-amber-500/20'
+    : 'bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30 dark:border-sky-500/20';
 }
 
 function badge(text, className) {
@@ -178,15 +230,15 @@ function renderValueChip(label, value) {
 function renderCopyMenu(modelName, proxyUrl) {
   return `
     <div class="copy-menu-wrap relative">
-      <button type="button" class="px-3 py-1.5 text-sm rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800 hover:border-zinc-600 transition">
+      <button type="button" class="px-3 py-1.5 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:border-zinc-400 dark:hover:border-zinc-600 transition">
         复制
       </button>
-      <div class="copy-menu absolute right-0 bottom-full z-20 mb-2 w-36 rounded-lg border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/30 overflow-hidden">
-        <button type="button" class="copy-btn flex w-full items-center justify-between px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 transition" data-copy-value="${escapeHtml(proxyUrl)}">
+      <div class="copy-menu absolute right-0 bottom-full z-20 mb-2 w-36 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 shadow-xl shadow-black/10 dark:shadow-black/30 overflow-hidden">
+        <button type="button" class="copy-btn flex w-full items-center justify-between px-3 py-2 text-sm text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" data-copy-value="${escapeHtml(proxyUrl)}">
           <span class="pointer-events-none">链接</span>
           <span class="pointer-events-none text-xs text-zinc-500">URL</span>
         </button>
-        <button type="button" class="copy-btn flex w-full items-center justify-between px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 transition" data-copy-value="${escapeHtml(modelName)}">
+        <button type="button" class="copy-btn flex w-full items-center justify-between px-3 py-2 text-sm text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" data-copy-value="${escapeHtml(modelName)}">
           <span class="pointer-events-none">模型</span>
           <span class="pointer-events-none text-xs text-zinc-500">model</span>
         </button>
@@ -201,12 +253,12 @@ function renderCard(model) {
   const tagBadge = badge(getTagLabel(tag), getTagClass(tag));
 
   return `
-    <article class="model-card border border-zinc-800 bg-zinc-900/70 p-5 flex flex-col gap-5 min-h-[210px] shadow-sm">
+    <article class="model-card border border-zinc-300 dark:border-zinc-800 bg-white dark:bg-zinc-900/70 p-5 flex flex-col gap-5 min-h-[210px] shadow-sm">
       <div class="flex-1 space-y-4">
         ${renderValueChip('模型名称', model.model_key)}
         ${renderValueChip('代理 URL', proxyUrl)}
       </div>
-      <div class="flex items-center justify-between gap-3 border-t border-zinc-800 pt-4">
+      <div class="flex items-center justify-between gap-3 border-t border-zinc-300 dark:border-zinc-800 pt-4">
         <div>${tagBadge}</div>
         ${renderCopyMenu(model.model_key, proxyUrl)}
       </div>

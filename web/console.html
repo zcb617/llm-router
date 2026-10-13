@@ -1,9 +1,16 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LLM Router - 控制台</title>
+  <script>
+    // 在渲染前根据用户偏好应用主题，避免闪烁
+    (function () {
+      var theme = localStorage.getItem('llm_theme') || 'dark';
+      if (theme === 'dark') document.documentElement.classList.add('dark');
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -91,6 +98,12 @@
       </nav>
     </div>
     <div class="flex items-center gap-3">
+      <button id="themeToggleBtn" type="button" title="切换亮/暗主题"
+        class="w-8 h-8 flex items-center justify-center rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition text-zinc-600 dark:text-zinc-300">
+        <!-- 亮色模式显示月亮（点击切到暗色），暗色模式显示太阳（点击切到亮色） -->
+        <svg id="themeIconMoon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 hidden"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg id="themeIconSun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+      </button>
       <span id="userEmail" class="text-sm text-zinc-500 cursor-pointer hover:text-zinc-700 dark:hover:text-zinc-200 hover:underline underline-offset-2" title="点击修改密码"></span>
       <button id="logoutBtn" class="px-3 py-1 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">
         退出登录
@@ -101,7 +114,7 @@
   <!-- Main Content -->
   <div class="flex flex-1 min-h-0">
     <!-- Sidebar -->
-    <aside class="w-52 bg-zinc-900 text-zinc-300 flex-shrink-0 flex flex-col">
+    <aside class="w-52 bg-zinc-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 flex-shrink-0 flex flex-col border-r border-zinc-300 dark:border-zinc-800">
       <nav id="sidebarNav" class="py-4">
         <!-- 动态渲染菜单 -->
       </nav>
@@ -587,7 +600,7 @@
     <div class="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-300 dark:border-zinc-700 w-[90vw] max-w-4xl max-h-[85vh] overflow-y-auto shadow-2xl">
       <div class="flex items-center justify-between p-4 border-b border-zinc-300 dark:border-zinc-700">
         <h2 class="text-lg font-semibold">调用详情</h2>
-        <button id="closeDetailBtn" class="text-zinc-500 hover:text-zinc-300 text-2xl">&times;</button>
+        <button id="closeDetailBtn" class="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 text-2xl">&times;</button>
       </div>
       <div class="p-4 space-y-4">
         <div class="grid grid-cols-2 gap-4 text-sm">
@@ -900,6 +913,43 @@
 
 <script src="/web/auth-interceptor.js"></script>
 <script>
+// ===== 主题切换 =====
+(function () {
+  function currentTheme() {
+    return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+  }
+  function applyTheme(theme) {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('llm_theme', theme);
+    syncIcon(theme);
+  }
+  function syncIcon(theme) {
+    var sun = document.getElementById('themeIconSun');
+    var moon = document.getElementById('themeIconMoon');
+    if (!sun || !moon) return;
+    // 暗色模式 -> 显示太阳（点击切亮色）；亮色模式 -> 显示月亮
+    if (theme === 'dark') {
+      sun.classList.remove('hidden');
+      moon.classList.add('hidden');
+    } else {
+      sun.classList.add('hidden');
+      moon.classList.remove('hidden');
+    }
+  }
+  syncIcon(currentTheme());
+  var btn = document.getElementById('themeToggleBtn');
+  if (btn) {
+    btn.addEventListener('click', function () {
+      applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+    });
+  }
+})();
+</script>
+<script>
 // ============ 认证检查 ============
 const token = localStorage.getItem('llm_token');
 const userEmail = localStorage.getItem('llm_email');
@@ -1013,7 +1063,7 @@ function renderSidebar() {
     a.href = '#';
     a.dataset.page = menu.code;
     a.id = 'menu' + menu.code.charAt(0).toUpperCase() + menu.code.slice(1);
-    a.className = 'menu-item flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-800 transition text-sm' +
+    a.className = 'menu-item flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition text-sm' +
                   (menu.code === 'logs' ? ' active' : '');
     a.innerHTML = `<span class="text-lg">${menu.icon}</span><span>${menu.name}</span>`;
     a.addEventListener('click', (e) => { e.preventDefault(); switchPage(menu.code); });
