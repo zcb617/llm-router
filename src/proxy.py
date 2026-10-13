@@ -119,6 +119,7 @@ class LLMRouterAddon:
         # 模型配置缓存（从数据库加载）
         self._model_cache = {}  # model_key -> {target_base_url, api_key, forward_model}  or {multi_upstream: True, routes: [...]}
         self._default_model_key = None  # 默认模型的 key
+        self._upstream_health_lock = threading.RLock()  # 上游健康状态与模型缓存发布的并发保护锁
 
         # 延迟初始化组件
         self._capturer = None
@@ -685,8 +686,8 @@ class LLMRouterAddon:
         try:
             configs = self.storage.get_all_model_configs()
             routes = self.storage.get_all_model_routes()
-            self._model_cache = {}
-            self._default_model_key = None
+            model_cache = {}
+            default_model_key = None
 
             # 按 model_key 分组多上游路由
             routes_by_model = {}
@@ -723,7 +724,7 @@ class LLMRouterAddon:
 
                     if cfg.get("use_multi_upstream") and mk in routes_by_model:
                         # 多上游模式
-                        self._model_cache[mk] = {
+                        model_cache[mk] = {
                             "multi_upstream": True,
                             "routes": routes_by_model[mk],
                             "protocol_converter": cfg.get("protocol_converter") or None,
@@ -742,7 +743,7 @@ class LLMRouterAddon:
                         elif not target_base_url:
                             continue
 
-                        self._model_cache[mk] = {
+                        model_cache[mk] = {
                             "upstream_id": cfg.get("upstream_id"),
                             "target_base_url": target_base_url,
                             "api_key": api_key,
@@ -757,12 +758,14 @@ class LLMRouterAddon:
                         }
 
                     if cfg["is_default"]:
-                        self._default_model_key = mk
+                        default_model_key = mk
 
-            multi_count = sum(1 for v in self._model_cache.values() if v.get("multi_upstream"))
-            logger.info(f"Loaded {len(self._model_cache)} model configs from database ({multi_count} multi-upstream)")
-            if self._default_model_key:
-                logger.info(f"Default model: {self._default_model_key}")
+            self._model_cache = model_cache
+            self._default_model_key = default_model_key
+            multi_count = sum(1 for v in model_cache.values() if v.get("multi_upstream"))
+            logger.info(f"Loaded {len(model_cache)} model configs from database ({multi_count} multi-upstream)")
+            if default_model_key:
+                logger.info(f"Default model: {default_model_key}")
         except Exception as e:
             logger.error(f"Failed to load model configs from database: {e}")
             self._model_cache = {}
@@ -770,8 +773,9 @@ class LLMRouterAddon:
 
     def reload_model_configs(self):
         """重新加载模型配置（供 API 调用）"""
-        self._load_model_configs()
-        logger.info("Model configs reloaded from database")
+        with self._upstream_health_lock:
+            self._load_model_configs()
+            logger.info("Model configs reloaded from database")
 
     def _match_model(self, model_name: str) -> tuple[dict | None, bool]:
         """匹配模型名称到数据库缓存配置
@@ -2013,9 +2017,7 @@ class LLMRouterAddon:
 
                 if 200 <= status_code < 300:
                     logger.info(f"Multi-upstream success: upstream {upstream_id} returned {status_code}")
-                    self.storage.reset_upstream_health(upstream_id)
-                    if health == "unhealthy":
-                        self.reload_model_configs()
+                    self._record_upstream_success(upstream_id)
                     # 记录调用信息
                     captured_req.body = req_body
                     captured_req.original_model = model_name
@@ -2075,12 +2077,26 @@ class LLMRouterAddon:
 
     def _record_upstream_failure(self, upstream_id: int) -> None:
         """记录上游失败，并在达到阈值后立即同步内存路由状态。"""
-        reached_threshold = self.storage.increment_upstream_failures(upstream_id)
-        if not reached_threshold:
-            return
+        with self._upstream_health_lock:
+            reached_threshold = self.storage.increment_upstream_failures(upstream_id)
+            if not reached_threshold:
+                return
 
-        self.reload_model_configs()
-        logger.warning("Upstream %s reached failure threshold; reloaded cached routes", upstream_id)
+            self.reload_model_configs()
+            logger.warning("Upstream %s reached failure threshold; reloaded cached routes", upstream_id)
+
+    def _record_upstream_success(self, upstream_id: int) -> None:
+        """记录上游成功，并在当前缓存仍标记不健康时刷新路由状态。"""
+        with self._upstream_health_lock:
+            self.storage.reset_upstream_health(upstream_id)
+            cached_unhealthy = any(
+                route.get("health_status") == "unhealthy"
+                for model_info in self._model_cache.values()
+                for route in model_info.get("routes", [])
+                if route.get("upstream_id") == upstream_id
+            )
+            if cached_unhealthy:
+                self.reload_model_configs()
 
     def _apply_multi_upstream_route(self, flow, route, captured_req, model_name, path):
         """把当前 flow 改写到选中的多上游路由。"""
@@ -2277,9 +2293,10 @@ class LLMRouterAddon:
 
     @staticmethod
     def _join_api_path(target_base_url: str, endpoint_path: str) -> str:
-        """拼接 API 路径，并避免 base_url 已经包含 /v1 时重复。"""
+        """拼接 API 路径，并避免 base_url 已经包含版本路径时重复。"""
         base = target_base_url.rstrip("/")
-        if endpoint_path.startswith("/v1/") and base.lower().endswith("/v1"):
+        api_version = base.rsplit("/", 1)[-1].lower()
+        if endpoint_path.startswith("/v1/") and api_version.startswith("v") and api_version[1:].isdigit():
             endpoint_path = endpoint_path[len("/v1"):]
         return base + endpoint_path
 
@@ -2335,7 +2352,16 @@ class LLMRouterAddon:
         if use_anthropic:
             check_headers.setdefault("anthropic-version", "2023-06-01")
 
-        return [(check_url, check_body, check_headers)]
+        requests = [(check_url, check_body, check_headers)]
+        if not use_anthropic and not self._is_kimi_cli_auth(model_info):
+            requests.append(
+                (
+                    self._join_api_path(target_base_url, "/v1/embeddings"),
+                    json.dumps({"model": model, "input": "hello"}),
+                    dict(check_headers),
+                )
+            )
+        return requests
 
     def _get_claude_headers(self, flow):
         """获取 Claude Code 特征 headers（不修改 flow）"""
@@ -2823,8 +2849,7 @@ class LLMRouterAddon:
                     from src.codex_app_server import list_models_sync
 
                     list_models_sync(target_url, model_info.get("api_key") or "")
-                    self.storage.reset_upstream_health(upstream_id)
-                    self.reload_model_configs()
+                    self._record_upstream_success(upstream_id)
                     logger.info("Health check: Codex upstream %s recovered", upstream_name)
                 except Exception as exc:
                     logger.info("Health check: Codex upstream %s still unreachable: %s", upstream_name, exc)
@@ -2842,12 +2867,10 @@ class LLMRouterAddon:
                         timeout=30.0,
                     )
                     if 200 <= resp.status_code < 300:
-                        self.storage.reset_upstream_health(upstream_id)
+                        self._record_upstream_success(upstream_id)
                         logger.info(
                             f"Health check: upstream {upstream_name} recovered ({resp.status_code}) via {check_url}"
                         )
-                        # 重载模型缓存以更新路由健康状态
-                        self.reload_model_configs()
                         recovered = True
                         break
                     last_error = f"status {resp.status_code} via {check_url}"
@@ -4100,7 +4123,7 @@ class LLMRouterAddon:
             if selected_id is not None:
                 failure_recorded = flow.metadata.get("multi_upstream_failure_recorded")
                 if 200 <= status_code < 300 and not failure_recorded:
-                    self.storage.reset_upstream_health(selected_id)
+                    self._record_upstream_success(selected_id)
                 elif status_code < 200 or status_code >= 300:
                     if not failure_recorded:
                         self._record_upstream_failure(selected_id)
@@ -4114,7 +4137,7 @@ class LLMRouterAddon:
         if upstream_id is None:
             return
         if 200 <= status_code < 300:
-            self.storage.reset_upstream_health(upstream_id)
+            self._record_upstream_success(upstream_id)
         else:
             logger.warning(f"Multi-upstream native upstream {upstream_id} returned {status_code}")
             self._record_upstream_failure(upstream_id)

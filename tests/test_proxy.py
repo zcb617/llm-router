@@ -84,6 +84,8 @@ def _make_addon_for_route_tests():
     addon._codex_cli_auth = DummyCodexCliAuth()
     addon._storage = DummyStorage()
     addon._external_storage = DummyStorage()
+    addon._upstream_health_lock = threading.RLock()
+    addon._model_cache = {}
     return addon
 
 
@@ -1516,7 +1518,7 @@ def test_health_check_requests_use_only_anthropic_when_claude_features_enabled()
     assert '"model": "deepseek-v4-pro"' in candidates[0][1]
 
 
-def test_health_check_requests_use_only_openai_when_claude_features_disabled():
+def test_health_check_requests_try_openai_then_embeddings_when_claude_features_disabled():
     addon = _make_addon_for_route_tests()
 
     candidates = addon._build_health_check_requests(
@@ -1528,9 +1530,12 @@ def test_health_check_requests_use_only_openai_when_claude_features_disabled():
         }
     )
 
-    assert len(candidates) == 1
+    assert len(candidates) == 2
     assert candidates[0][0] == "https://api.example.com/anthropic/v1/chat/completions"
     assert "anthropic-version" not in candidates[0][2]
+    assert candidates[1][0] == "https://api.example.com/anthropic/v1/embeddings"
+    assert json.loads(candidates[1][1]) == {"model": "claude-opus", "input": "hello"}
+    assert "anthropic-version" not in candidates[1][2]
 
 
 def test_health_check_requests_skip_kimi_when_header_build_fails():
