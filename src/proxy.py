@@ -3684,6 +3684,13 @@ class LLMRouterAddon:
         """上游连接/传输错误时标记当前多上游路由失败。"""
         # 诊断日志：记录所有错误场景，无论是否多上游
         captured_req = self._pop_pending_request(flow)
+        if captured_req is not None:
+            selected_url = flow.metadata.get("multi_upstream_selected_url")
+            if selected_url:
+                captured_req.url = selected_url
+            selected_forward_model = flow.metadata.get("multi_upstream_selected_forward_model")
+            if selected_forward_model:
+                captured_req.overridden_model = selected_forward_model
         resp_status = getattr(flow.response, "status_code", None) if flow.response else None
         has_stream_chunks = bool(flow.metadata.get("streamed_response_chunks"))
         call_id = flow.metadata.get("call_id")

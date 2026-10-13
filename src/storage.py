@@ -145,15 +145,6 @@ class CallStorage:
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS full_context TEXT")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS outbound_diagnostics JSON")
                     cur.execute("ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS is_internal_relay INTEGER NOT NULL DEFAULT 0")
-                    cur.execute("""
-                        UPDATE llm_calls
-                        SET is_internal_relay = 1
-                        WHERE is_internal_relay = 0
-                          AND (
-                              url LIKE 'http://127.0.0.1:%/stream'
-                              OR url LIKE 'http://localhost:%/stream'
-                          )
-                    """)
                 else:
                     cur.execute("PRAGMA table_info(llm_calls)")
                     existing_columns = {row[1] for row in cur.fetchall()}
@@ -181,15 +172,6 @@ class CallStorage:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN outbound_diagnostics TEXT")
                     if "is_internal_relay" not in existing_columns:
                         cur.execute("ALTER TABLE llm_calls ADD COLUMN is_internal_relay INTEGER NOT NULL DEFAULT 0")
-                    cur.execute("""
-                        UPDATE llm_calls
-                        SET is_internal_relay = 1
-                        WHERE is_internal_relay = 0
-                          AND (
-                              url LIKE 'http://127.0.0.1:%/stream'
-                              OR url LIKE 'http://localhost:%/stream'
-                          )
-                    """)
 
                 conn.commit()
                 self._llm_calls_schema_ready = True
