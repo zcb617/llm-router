@@ -1180,6 +1180,10 @@ class CallStorage:
         outbound_diagnostics: Optional[dict] = None,
         is_internal_relay: int = 0,
         last_activity_at: Optional[str] = None,
+        transport_status: Optional[str] = None,
+        transport_error: Optional[str] = None,
+        business_status: Optional[str] = None,
+        business_error: Optional[str] = None,
     ):
         """保存调用记录（带用户和 API Key 关联）"""
         self._ensure_llm_calls_schema_extensions()
@@ -1200,6 +1204,7 @@ class CallStorage:
             if outbound_diagnostics is not None else None,
             is_internal_relay,
             last_activity_at,
+            transport_status, transport_error, business_status, business_error,
         )
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -1212,8 +1217,9 @@ class CallStorage:
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
-                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at,
+                        transport_status, transport_error, business_status, business_error
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -1228,8 +1234,9 @@ class CallStorage:
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
-                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at,
+                        transport_status, transport_error, business_status, business_error
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
@@ -1332,6 +1339,10 @@ class CallStorage:
         outbound_diagnostics: Optional[dict] = None,
         is_internal_relay: int = 0,
         last_activity_at: Optional[str] = None,
+        transport_status: Optional[str] = None,
+        transport_error: Optional[str] = None,
+        business_status: Optional[str] = None,
+        business_error: Optional[str] = None,
     ):
         """按 call_id 完成调用记录，开始记录不存在时回退插入最终记录。"""
         self._ensure_llm_calls_schema_extensions()
@@ -1347,7 +1358,9 @@ class CallStorage:
             previous_response_id, full_context,
             json.dumps(outbound_diagnostics, ensure_ascii=False)
             if outbound_diagnostics is not None else None,
-            is_internal_relay, last_activity_at, call_id,
+            is_internal_relay, last_activity_at,
+            transport_status, transport_error, business_status, business_error,
+            call_id,
         )
         updated = False
         if self.postgresql:
@@ -1362,7 +1375,9 @@ class CallStorage:
                         token_source = %s, stream_type = %s, first_token_ms = %s,
                         original_model = %s, overridden_model = %s, user_id = %s, api_key_id = %s,
                         previous_response_id = %s, full_context = %s, outbound_diagnostics = %s,
-                        is_internal_relay = %s, last_activity_at = %s
+                        is_internal_relay = %s, last_activity_at = %s,
+                        transport_status = %s, transport_error = %s,
+                        business_status = %s, business_error = %s
                     WHERE call_id = %s
                 """, args)
                 updated = cur.rowcount > 0
@@ -1380,7 +1395,9 @@ class CallStorage:
                         token_source = ?, stream_type = ?, first_token_ms = ?,
                         original_model = ?, overridden_model = ?, user_id = ?, api_key_id = ?,
                         previous_response_id = ?, full_context = ?, outbound_diagnostics = ?,
-                        is_internal_relay = ?, last_activity_at = ?
+                        is_internal_relay = ?, last_activity_at = ?,
+                        transport_status = ?, transport_error = ?,
+                        business_status = ?, business_error = ?
                     WHERE call_id = ?
                 """, args)
                 updated = cur.rowcount > 0
@@ -1417,6 +1434,10 @@ class CallStorage:
                 outbound_diagnostics=outbound_diagnostics,
                 is_internal_relay=is_internal_relay,
                 last_activity_at=last_activity_at,
+                transport_status=transport_status,
+                transport_error=transport_error,
+                business_status=business_status,
+                business_error=business_error,
             )
 
     def get_call_history(self, call_id: str, api_key_id: int) -> Optional[dict]:

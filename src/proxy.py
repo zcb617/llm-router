@@ -321,6 +321,67 @@ class LLMRouterAddon:
         return "success"
 
     @staticmethod
+    def _detect_business_protocol(flow) -> Optional[str]:
+        """识别业务协议类型：anthropic / responses / chat。
+
+        复用现有识别依据：codex_response_protocol、入口路径、protocol_converter。
+        """
+        proto = flow.metadata.get("codex_response_protocol")
+        if proto == "responses":
+            return "responses"
+        if proto == "chat_completions":
+            return "chat"
+        path = (
+            flow.metadata.get("multi_upstream_original_path")
+            or getattr(flow.request, "path", "")
+            or ""
+        )
+        path = path.split("?", 1)[0]
+        if path.endswith("/v1/messages") or path.endswith("/messages"):
+            return "anthropic"
+        if path.endswith("/v1/responses") or path.endswith("/responses"):
+            return "responses"
+        if path.endswith("/v1/chat/completions") or path.endswith("/chat/completions"):
+            return "chat"
+        return None
+
+    @staticmethod
+    def _judge_business(flow, body: Optional[str], stream_type: str) -> tuple[str, Optional[str]]:
+        """业务判断：拿完整数据包，按协议看整个数据包完不完整。
+
+        完整 → ("success", None)；不完整/无法识别 → ("failed", 原因)。
+        业务优先级高于网络：本函数只看数据包内容，不看网络状态。
+        """
+        if not body:
+            return "failed", "empty_body"
+        protocol = LLMRouterAddon._detect_business_protocol(flow)
+        if protocol == "anthropic":
+            # 流式看 message_stop 事件；非流式完整 JSON 看 stop_reason 字段
+            if '"message_stop"' in body or '"type":"message_stop"' in body:
+                return "success", None
+            if stream_type != "stream" and '"stop_reason"' in body:
+                return "success", None
+            return "failed", "missing_message_stop"
+        if protocol == "responses":
+            # 流式看 response.completed 事件；非流式完整 JSON 看 status=completed
+            if "response.completed" in body:
+                return "success", None
+            if stream_type != "stream" and '"status":"completed"' in body.replace(" ", ""):
+                return "success", None
+            return "failed", "missing_response_completed"
+        if protocol == "chat":
+            # 流式看 finish_reason + [DONE]；非流式完整 JSON 看 finish_reason 字段
+            if stream_type == "stream":
+                if '"finish_reason"' in body and "[DONE]" in body:
+                    return "success", None
+                return "failed", "missing_finish_reason_or_done"
+            if '"finish_reason"' in body:
+                return "success", None
+            return "failed", "missing_finish_reason"
+        # 未识别协议：无法按协议校验，回退到通用错误关键字判定
+        return LLMRouterAddon._infer_call_status(None, body), None
+
+    @staticmethod
     def _record_protocol_downstream_return(
         flow: http.HTTPFlow,
         event_payloads: list[str],
@@ -3658,6 +3719,10 @@ class LLMRouterAddon:
                 "token_source": token_source,
             }
 
+        # 业务层收尾判定（架构第6节）：response() 是网络正常走完，transport=success，
+        # 拿完整数据包 captured_resp.body 按协议判业务成败，call_status 由业务定（业务优先）。
+        resp_body_for_judge = captured_resp.body or ""
+        business_status, business_error = self._judge_business(flow, resp_body_for_judge, stream_type)
         call_save_payload = {
             "call_id": captured_req.call_id,
             "timestamp": captured_req.timestamp,
@@ -3668,7 +3733,11 @@ class LLMRouterAddon:
             "response_headers": captured_resp.headers,
             "response_body": captured_resp.body or "",
             "final_responses_body": final_responses_body,
-            "call_status": self._infer_call_status(captured_resp.status_code, captured_resp.body or ""),
+            "call_status": business_status,
+            "transport_status": "success",
+            "transport_error": None,
+            "business_status": business_status,
+            "business_error": business_error,
             "duration_ms": captured_resp.duration_ms,
             "tokens_input": tokens_input,
             "tokens_output": tokens_output,
@@ -3927,6 +3996,10 @@ class LLMRouterAddon:
                     "token_source": token_source,
                 }
 
+            # 业务层收尾判定（架构第6节）：error() 是网络层抛出的异常，transport=failed。
+            # 但业务优先于网络——拿已拼好的完整数据包 response_body 按协议判：
+            # 数据包完整（结束标记齐全）说明业务其实已完成，记 success；不完整才 failed。
+            business_status, business_error = self._judge_business(flow, response_body, stream_type)
             call_save_payload = {
                 "call_id": captured_req.call_id,
                 "timestamp": captured_req.timestamp,
@@ -3937,9 +4010,11 @@ class LLMRouterAddon:
                 "response_headers": response_headers,
                 "response_body": response_body,
                 "final_responses_body": None,
-                # 架构铁律：本分支在 error()（网络异常）内，网络失败一律记 failed，
-                # 不看 stream_completed，不用业务结束标记反推网络/业务成功。
-                "call_status": "failed",
+                "call_status": business_status,
+                "transport_status": "failed",
+                "transport_error": str(flow.error) if flow.error else None,
+                "business_status": business_status,
+                "business_error": business_error,
                 "duration_ms": duration_ms,
                 "tokens_input": tokens_input,
                 "tokens_output": tokens_output,
@@ -3988,7 +4063,12 @@ class LLMRouterAddon:
                 "response_headers": {},
                 "response_body": "",
                 "final_responses_body": None,
+                # 网络失败且无任何响应数据包，数据包不完整，业务 failed
                 "call_status": "failed",
+                "transport_status": "failed",
+                "transport_error": str(flow.error) if flow.error else None,
+                "business_status": "failed",
+                "business_error": "no_response",
                 "duration_ms": duration_ms,
                 "tokens_input": None,
                 "tokens_output": None,
