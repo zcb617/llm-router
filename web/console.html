@@ -1440,6 +1440,8 @@ function renderTable(data) {
         } else if (val === 'in_progress') {
           val = '进行中';
           td.classList.add('text-blue-600', 'dark:text-blue-400', 'font-semibold');
+        } else if (val === 'cancelled') {
+          val = '已取消';
         } else {
           val = '-';
         }
@@ -1518,7 +1520,7 @@ async function showDetail(row) {
     document.getElementById('dCallId').textContent = detail.call_id || 'N/A';
     document.getElementById('dTimestamp').textContent = detail.timestamp || '';
     document.getElementById('dMethod').textContent = detail.method || '';
-    document.getElementById('dStatus').textContent = detail.call_status === 'failed' ? '失败' : (detail.call_status === 'success' ? '成功' : (detail.call_status === 'in_progress' ? '进行中' : '-'));
+    document.getElementById('dStatus').textContent = detail.call_status === 'failed' ? '失败' : (detail.call_status === 'success' ? '成功' : (detail.call_status === 'in_progress' ? '进行中' : (detail.call_status === 'cancelled' ? '已取消' : '-')));
     document.getElementById('dUrl').textContent = detail.url || '';
     document.getElementById('dOriginalModel').textContent = detail.original_model || '-';
     document.getElementById('dOverriddenModel').textContent = detail.overridden_model || '-';
