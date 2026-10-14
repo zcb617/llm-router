@@ -49,6 +49,18 @@ from src.stream_relay import (
 logger = logging.getLogger(__name__)
 
 
+class NetworkException(Exception):
+    """网络异常父类，用于统一承载客户端断开和通用网络错误。"""
+
+
+class ClientDisconnectedException(NetworkException):
+    """客户端主动断开连接时使用的网络异常类型。"""
+
+
+class GeneralNetworkException(NetworkException):
+    """除客户端主动断开之外的通用网络异常类型。"""
+
+
 class LLMRouterAddon:
     """
     mitmproxy addon，实现LLM路由和记录
@@ -341,14 +353,20 @@ class LLMRouterAddon:
         return None
 
     @staticmethod
-    def _judge_business(flow, body: Optional[str], stream_type: str) -> tuple[str, Optional[str]]:
+    def _judge_business(
+        flow,
+        body: Optional[str],
+        stream_type: str,
+        *,
+        default_status: str = "failed",
+    ) -> tuple[str, Optional[str]]:
         """业务判断：拿完整数据包，按协议看整个数据包完不完整。
 
-        完整 → ("success", None)；不完整/无法识别 → ("failed", 原因)。
-        业务优先级高于网络：本函数只看数据包内容，不看网络状态。
+        完整 → ("success", None)；不完整 → (default_status, 原因)。
+        未识别协议按通用规则回退；业务完成标记优先于网络异常默认状态。
         """
         if not body:
-            return "failed", "empty_body"
+            return default_status, "empty_body"
         protocol = LLMRouterAddon._detect_business_protocol(flow)
         if protocol == "anthropic":
             # 流式看 message_stop 事件；非流式完整 JSON 看 stop_reason 字段
@@ -356,23 +374,23 @@ class LLMRouterAddon:
                 return "success", None
             if stream_type != "stream" and '"stop_reason"' in body:
                 return "success", None
-            return "failed", "missing_message_stop"
+            return default_status, "missing_message_stop"
         if protocol == "responses":
             # 流式看 response.completed 事件；非流式完整 JSON 看 status=completed
             if "response.completed" in body:
                 return "success", None
             if stream_type != "stream" and '"status":"completed"' in body.replace(" ", ""):
                 return "success", None
-            return "failed", "missing_response_completed"
+            return default_status, "missing_response_completed"
         if protocol == "chat":
             # 流式看 finish_reason + [DONE]；非流式完整 JSON 看 finish_reason 字段
             if stream_type == "stream":
                 if '"finish_reason"' in body and "[DONE]" in body:
                     return "success", None
-                return "failed", "missing_finish_reason_or_done"
+                return default_status, "missing_finish_reason_or_done"
             if '"finish_reason"' in body:
                 return "success", None
-            return "failed", "missing_finish_reason"
+            return default_status, "missing_finish_reason"
         # 未识别协议：无法按协议校验，回退到通用错误关键字判定
         return LLMRouterAddon._infer_call_status(None, body), None
 
@@ -3775,7 +3793,24 @@ class LLMRouterAddon:
         self._enqueue_call_save(call_save_payload)
 
     def error(self, flow: http.HTTPFlow):
-        """上游连接/传输错误时标记当前多上游路由失败。"""
+        """将 mitmproxy 网络错误转换为项目异常并交给统一保存流程处理。"""
+        try:
+            message = str(flow.error) if flow.error else ""
+            if message == "Client disconnected.":
+                raise ClientDisconnectedException(message)
+            raise GeneralNetworkException(message)
+        except NetworkException as exception:
+            return self._handle_network_exception(flow, exception)
+
+    def _handle_network_exception(
+        self,
+        flow: http.HTTPFlow,
+        exception: NetworkException,
+    ):
+        """按网络异常类型统一处理请求保存、业务状态和多上游健康状态。"""
+        is_client_disconnected = isinstance(exception, ClientDisconnectedException)
+        default_status = "cancelled" if is_client_disconnected else "failed"
+        transport_status = default_status
         # 诊断日志：记录所有错误场景，无论是否多上游
         captured_req = self._pop_pending_request(flow)
         if captured_req is not None:
@@ -3811,7 +3846,7 @@ class LLMRouterAddon:
             f"last_sequence={downstream.get('last_sequence_number')}, "
             f"tail={downstream.get('tail_events', [])}"
         )
-        # 网络异常分支：无论转换器是否曾收到业务结束标记，网络层一律记 failed。
+        # 网络异常分支：网络异常类型决定未完成数据的默认状态，业务完成标记仍优先。
         connection_timeline = self._stream_connection_timeline(flow)
 
         # 新增：记录 error() 触发时 flow.response 的完整状态，用于区分
@@ -3836,7 +3871,7 @@ class LLMRouterAddon:
             )
 
         logger.warning(
-            f"[ERROR_DIAG] status=failed, error={flow.error}, {stream_context}, "
+            f"[ERROR_DIAG] status={default_status}, error={exception}, {stream_context}, "
             f"connection_timeline={connection_timeline}"
         )
         logger.warning(
@@ -3851,9 +3886,8 @@ class LLMRouterAddon:
             f"flow_timestamp_created={flow.timestamp_created}"
         )
 
-        # 架构铁律：已进入 error() 说明网络层发生异常。
-        # 网络失败一律记失败，绝不用 stream_completed（业务结束标记）反推业务成功，
-        # 绝不用业务标记证明网络传输成功。
+        # 已进入 error() 说明网络层发生异常；未完成业务使用异常类型对应的默认状态，
+        # 业务完成标记仍可将业务状态判定为 success，网络传输状态保持异常状态。
 
         # 兜底保存：客户端断开但上游已正常响应时，优先使用累积的流式数据，
         # Codex CLI OAuth 没有流式分片时，使用 Rust 出站已写入 flow.response 的完整响应。
@@ -3991,11 +4025,6 @@ class LLMRouterAddon:
                 f"cached={cached_hit_tokens}, miss={cache_miss_tokens}, "
                 f"speed={tokens_per_second}"
             )
-            # 网络异常分支：一律记 failed，不用 stream_completed 反推成功
-            logger.warning(
-                f"[ERROR_SAVE] status=failed, error={flow.error}, {metrics_message}"
-            )
-
             outbound_diagnostics = flow.metadata.get("stream_relay_diagnostics") or flow.metadata.get("codex_outbound_diagnostics")
             if isinstance(outbound_diagnostics, dict):
                 outbound_diagnostics = dict(outbound_diagnostics)
@@ -4009,10 +4038,18 @@ class LLMRouterAddon:
                     "token_source": token_source,
                 }
 
-            # 业务层收尾判定（架构第6节）：error() 是网络层抛出的异常，transport=failed。
-            # 但业务优先于网络——拿已拼好的完整数据包 response_body 按协议判：
-            # 数据包完整（结束标记齐全）说明业务其实已完成，记 success；不完整才 failed。
-            business_status, business_error = self._judge_business(flow, response_body, stream_type)
+            # 业务层收尾判定：完成标记优先，未完成时使用网络异常对应的默认状态。
+            business_status, business_error = self._judge_business(
+                flow,
+                response_body,
+                stream_type,
+                default_status=default_status,
+            )
+            logger.warning(
+                f"[ERROR_SAVE] call_status={business_status}, "
+                f"business_status={business_status}, transport_status={transport_status}, "
+                f"error={exception}, {metrics_message}"
+            )
             call_save_payload = {
                 "call_id": captured_req.call_id,
                 "timestamp": captured_req.timestamp,
@@ -4024,8 +4061,8 @@ class LLMRouterAddon:
                 "response_body": response_body,
                 "final_responses_body": None,
                 "call_status": business_status,
-                "transport_status": "failed",
-                "transport_error": str(flow.error) if flow.error else None,
+                "transport_status": transport_status,
+                "transport_error": str(exception),
                 "business_status": business_status,
                 "business_error": business_error,
                 "duration_ms": duration_ms,
@@ -4076,11 +4113,11 @@ class LLMRouterAddon:
                 "response_headers": {},
                 "response_body": "",
                 "final_responses_body": None,
-                # 网络失败且无任何响应数据包，数据包不完整，业务 failed
-                "call_status": "failed",
-                "transport_status": "failed",
-                "transport_error": str(flow.error) if flow.error else None,
-                "business_status": "failed",
+                # 无响应数据时，客户端断开使用 cancelled，其他网络异常使用 failed。
+                "call_status": default_status,
+                "transport_status": transport_status,
+                "transport_error": str(exception),
+                "business_status": default_status,
                 "business_error": "no_response",
                 "duration_ms": duration_ms,
                 "tokens_input": None,
@@ -4110,7 +4147,7 @@ class LLMRouterAddon:
         upstream_id = flow.metadata.get("multi_upstream_id")
         if upstream_id is None:
             return
-        logger.warning(f"Multi-upstream native request failed for upstream {upstream_id}: {flow.error}")
+        logger.warning(f"Multi-upstream native request failed for upstream {upstream_id}: {exception}")
         if not flow.metadata.get("multi_upstream_stream_relay"):
             self._record_upstream_failure(upstream_id)
 
