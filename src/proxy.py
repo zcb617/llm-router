@@ -4087,7 +4087,8 @@ class LLMRouterAddon:
                 call_save_payload["_call_save_operation"] = "finalize"
                 call_save_payload["last_activity_at"] = datetime.now().isoformat()
             self._enqueue_call_save(call_save_payload)
-        elif captured_req and resp_status is None:
+        # 异常时没有可用于业务完成判断的响应体，统一按网络异常状态兜底保存。
+        elif captured_req:
             duration_ms = int((time.time() - captured_req.start_time) * 1000)
             stream_type = "non_stream"
             try:
@@ -4110,10 +4111,10 @@ class LLMRouterAddon:
                 "method": captured_req.method,
                 "request_headers": captured_req.headers,
                 "request_body": captured_req.body or "",
-                "response_headers": {},
+                "response_headers": dict(flow.response.headers) if flow.response else {},
                 "response_body": "",
                 "final_responses_body": None,
-                # 无响应数据时，客户端断开使用 cancelled，其他网络异常使用 failed。
+                # 异常时没有可用于业务完成判断的响应体，客户端断开使用 cancelled，其他网络异常使用 failed。
                 "call_status": default_status,
                 "transport_status": transport_status,
                 "transport_error": str(exception),
@@ -4206,6 +4207,33 @@ class LLMRouterAddon:
 
     def done(self):
         """mitmproxy addon 退出时释放资源。"""
+        with self._pending_requests_lock:
+            pending_requests = list(self._pending_requests.values())
+            self._pending_requests.clear()
+
+        if self._storage is not None:
+            shutdown_at = datetime.now().isoformat()
+            for captured_req in pending_requests:
+                if not self._is_stream_request(captured_req.body):
+                    continue
+                try:
+                    duration_ms = int((time.time() - captured_req.start_time) * 1000)
+                    self._storage.finalize_in_progress_call(
+                        call_id=captured_req.call_id,
+                        duration_ms=duration_ms,
+                        last_activity_at=shutdown_at,
+                        call_status="failed",
+                        transport_status="failed",
+                        transport_error="Service shutdown before call completion.",
+                        business_status="failed",
+                        business_error="service_shutdown_before_completion",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to finalize pending stream call during shutdown: call_id=%s",
+                        captured_req.call_id,
+                    )
+
         # 给落库队列一个短暂排空窗口，避免最后几条记录丢失。
         deadline = time.time() + 2.0
         while (

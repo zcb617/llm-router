@@ -1321,6 +1321,62 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur, commit=True)
 
+    def finalize_in_progress_call(
+        self,
+        call_id: str,
+        duration_ms: int,
+        last_activity_at: str,
+        call_status: str,
+        transport_status: str,
+        transport_error: str,
+        business_status: str,
+        business_error: str,
+    ) -> bool:
+        """将指定且仍在进行中的调用记录同步更新为最终状态。"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "UPDATE llm_calls SET duration_ms = %s, last_activity_at = %s, "
+                    "call_status = %s, transport_status = %s, transport_error = %s, "
+                    "business_status = %s, business_error = %s "
+                    "WHERE call_id = %s AND call_status = 'in_progress'",
+                    (
+                        duration_ms,
+                        last_activity_at,
+                        call_status,
+                        transport_status,
+                        transport_error,
+                        business_status,
+                        business_error,
+                        call_id,
+                    ),
+                )
+                return cur.rowcount > 0
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        conn, cur = self._sqlite_conn()
+        try:
+            cur.execute(
+                "UPDATE llm_calls SET duration_ms = ?, last_activity_at = ?, "
+                "call_status = ?, transport_status = ?, transport_error = ?, "
+                "business_status = ?, business_error = ? "
+                "WHERE call_id = ? AND call_status = 'in_progress'",
+                (
+                    duration_ms,
+                    last_activity_at,
+                    call_status,
+                    transport_status,
+                    transport_error,
+                    business_status,
+                    business_error,
+                    call_id,
+                ),
+            )
+            return cur.rowcount > 0
+        finally:
+            self._sqlite_close(conn, cur, commit=True)
+
     def finalize_call_with_user(
         self,
         call_id: str, timestamp: str, url: str, method: str,
