@@ -1092,6 +1092,59 @@ def test_load_model_configs_preserves_multi_upstream_protocol_converter():
     assert cached_model["routes"][0]["protocol_converter"] == "kimi3"
 
 
+def test_load_model_configs_filters_inactive_upstreams_with_real_sqlite_storage(tmp_path):
+    """真实 SQLite 存储加载时，停用上游模型和路由不进入代理缓存。"""
+    import sqlite3
+
+    from scripts.init_database import SQLITE_TABLES
+    from src.storage import CallStorage
+
+    db_path = tmp_path / "router.db"
+    conn = sqlite3.connect(db_path)
+    table_sql = dict(SQLITE_TABLES)
+    for table_name in ("upstreams", "model_configs", "model_upstream_routes"):
+        conn.execute(table_sql[table_name])
+
+    conn.executemany(
+        "INSERT INTO upstreams (id, name, target_base_url, api_key, is_active, health_status) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1, "disabled-upstream", "https://disabled.example", "disabled-key", 0, "healthy"),
+            (2, "active-upstream", "https://active.example", "active-key", 1, "healthy"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO model_configs (id, model_key, upstream_id, target_base_url, is_active, is_default, use_multi_upstream) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (1, "single-disabled", 1, None, 1, 0, 0),
+            (2, "single-active", 2, None, 1, 0, 0),
+            (3, "direct-model", None, "https://direct.example", 1, 0, 0),
+            (4, "multi-model", None, None, 1, 0, 1),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO model_upstream_routes (model_config_id, upstream_id, sort_order, is_active) VALUES (?, ?, ?, ?)",
+        [(4, 1, 0, 1), (4, 2, 1, 1)],
+    )
+    conn.commit()
+    conn.close()
+
+    storage = CallStorage(str(db_path))
+    addon = _make_addon_for_route_tests()
+    addon._external_storage = storage
+    addon._storage = None
+    addon._load_model_configs()
+
+    configs = storage.get_all_model_configs()
+    disabled_config = next(config for config in configs if config["model_key"] == "single-disabled")
+    assert disabled_config["upstream_is_active"] is False
+    assert "single-disabled" not in addon._model_cache
+    assert "single-active" in addon._model_cache
+    assert "direct-model" in addon._model_cache
+    assert "multi-model" in addon._model_cache
+    assert [route["upstream_id"] for route in addon._model_cache["multi-model"]["routes"]] == [2]
+    storage.close()
+
+
 def test_codex_route_rejects_non_chat_completions_path():
     addon = _make_addon_for_route_tests()
     addon._codex_bridge_url = "http://127.0.0.1:45678"

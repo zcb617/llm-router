@@ -142,6 +142,27 @@ def _get_upstream_for_validation(storage, upstream_id):
         return None
 
 
+def _validate_upstream_active(storage, upstream_id) -> Optional[str]:
+    """校验模型或路由引用的上游存在且处于启用状态。"""
+    if not upstream_id or not hasattr(storage, "get_upstream"):
+        return None
+    upstream = _get_upstream_for_validation(storage, upstream_id)
+    if not upstream:
+        return f"上游不存在: {upstream_id}"
+    if "is_active" in upstream and (upstream.get("is_active") is False or upstream.get("is_active") == 0):
+        return f"上游已停用: {upstream.get('name') or upstream_id}"
+    return None
+
+
+def _validate_active_routes(storage, routes: list) -> Optional[str]:
+    """按请求顺序校验多上游路由引用的上游均处于启用状态。"""
+    for route in routes or []:
+        error = _validate_upstream_active(storage, route.get("upstream_id"))
+        if error:
+            return error
+    return None
+
+
 def _validate_codex_forward_model(storage, upstream_id, forward_model: str) -> Optional[str]:
     """校验 Codex 转发模型确实存在于当前 App Server。"""
     upstream = _get_upstream_for_validation(storage, upstream_id)
@@ -1082,6 +1103,13 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         if use_multi_upstream and not routes:
             _json_response(flow, 400, {"error": "多上游模式至少需要一个路由"})
             return True
+        upstream_active_error = (
+            _validate_active_routes(storage, routes)
+            if use_multi_upstream else _validate_upstream_active(storage, upstream_id)
+        )
+        if upstream_active_error:
+            _json_response(flow, 400, {"error": upstream_active_error})
+            return True
         route_auth_error = _validate_no_codex_routes(storage, routes) if use_multi_upstream else None
         if route_auth_error:
             _json_response(flow, 400, {"error": route_auth_error})
@@ -1155,6 +1183,15 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             return True
         if use_multi_upstream and "routes" in body and not routes:
             _json_response(flow, 400, {"error": "多上游模式至少需要一个路由"})
+            return True
+        upstream_active_error = None
+        if use_multi_upstream:
+            if "routes" in body:
+                upstream_active_error = _validate_active_routes(storage, routes)
+        else:
+            upstream_active_error = _validate_upstream_active(storage, upstream_id)
+        if upstream_active_error:
+            _json_response(flow, 400, {"error": upstream_active_error})
             return True
         route_auth_error = _validate_no_codex_routes(storage, routes) if use_multi_upstream else None
         if route_auth_error:
@@ -1257,6 +1294,10 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "upstream_id 不能为空"})
             return True
 
+        upstream_active_error = _validate_upstream_active(storage, upstream_id)
+        if upstream_active_error:
+            _json_response(flow, 400, {"error": upstream_active_error})
+            return True
         upstream = _get_upstream_for_validation(storage, upstream_id)
         upstream_mode = (upstream.get("auth_mode") or "api_key") if upstream else "api_key"
         if upstream_mode == "codex":
@@ -1283,6 +1324,12 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
             _json_response(flow, 400, {"error": "请求体格式错误"})
             return True
 
+        upstream_active_error = None
+        if "upstream_id" in body and body.get("upstream_id"):
+            upstream_active_error = _validate_upstream_active(storage, body.get("upstream_id"))
+        if upstream_active_error:
+            _json_response(flow, 400, {"error": upstream_active_error})
+            return True
         upstream = _get_upstream_for_validation(storage, body.get("upstream_id"))
         upstream_mode = (upstream.get("auth_mode") or "api_key") if upstream else "api_key"
         if upstream_mode == "codex":

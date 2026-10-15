@@ -2228,6 +2228,8 @@ class CallStorage:
                     d["use_claude_features"] = bool(r[18])
                 if len(r) > 19 and r[19] is not None:
                     d["use_roo_features"] = bool(r[19])
+                if len(r) > 20 and r[20] is not None:
+                    d["upstream_is_active"] = bool(r[20])
                 return d
             else:
                 d = dict(r)
@@ -2238,6 +2240,8 @@ class CallStorage:
                     d["use_claude_features"] = bool(d["use_claude_features"])
                 if "use_roo_features" in d:
                     d["use_roo_features"] = bool(d["use_roo_features"])
+                if "upstream_is_active" in d and d["upstream_is_active"] is not None:
+                    d["upstream_is_active"] = bool(d["upstream_is_active"])
                 if d.get("protocol_converter") == "":
                     d["protocol_converter"] = None
                 if d.get("created_at") and not isinstance(d["created_at"], str):
@@ -2250,14 +2254,14 @@ class CallStorage:
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
-            "u.name as upstream_name, u.use_claude_features, u.use_roo_features "
+            "u.name as upstream_name, u.use_claude_features, u.use_roo_features, u.is_active as upstream_is_active "
             "FROM model_configs mc LEFT JOIN upstreams u ON mc.upstream_id = u.id "
             "ORDER BY mc.model_key"
         ) if self.postgresql else (
             "SELECT mc.id, mc.model_key, mc.upstream_id, "
             "u.target_base_url, u.api_key, u.auth_mode, u.oauth_key, u.oauth_host, u.oauth_home, "
             "mc.model_overrides, mc.forward_model, mc.is_active, mc.is_default, mc.use_multi_upstream, mc.protocol_converter, mc.created_at, mc.updated_at, "
-            "u.name as upstream_name, u.use_claude_features, u.use_roo_features FROM model_configs mc "
+            "u.name as upstream_name, u.use_claude_features, u.use_roo_features, u.is_active as upstream_is_active FROM model_configs mc "
             "LEFT JOIN upstreams u ON mc.upstream_id = u.id ORDER BY mc.model_key"
         )
         if self.postgresql:
@@ -2860,7 +2864,7 @@ class CallStorage:
             "FROM model_upstream_routes mur "
             "JOIN upstreams u ON mur.upstream_id = u.id "
             "JOIN model_configs mc ON mur.model_config_id = mc.id "
-            "WHERE mur.is_active = true AND mc.is_active = true AND mc.use_multi_upstream = true "
+            "WHERE u.is_active = true AND mur.is_active = true AND mc.is_active = true AND mc.use_multi_upstream = true "
             "ORDER BY mc.model_key, mur.sort_order"
         ) if self.postgresql else (
             "SELECT mur.model_config_id, mur.upstream_id, mur.forward_model, mur.protocol_converter, mur.sort_order, "
@@ -2869,7 +2873,7 @@ class CallStorage:
             "FROM model_upstream_routes mur "
             "JOIN upstreams u ON mur.upstream_id = u.id "
             "JOIN model_configs mc ON mur.model_config_id = mc.id "
-            "WHERE mur.is_active = 1 AND mc.is_active = 1 AND mc.use_multi_upstream = 1 "
+            "WHERE u.is_active = 1 AND mur.is_active = 1 AND mc.is_active = 1 AND mc.use_multi_upstream = 1 "
             "ORDER BY mc.model_key, mur.sort_order"
         )
         if self.postgresql:

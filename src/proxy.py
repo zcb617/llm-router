@@ -739,6 +739,13 @@ class LLMRouterAddon:
             for cfg in configs:
                 if cfg["is_active"]:
                     mk = cfg["model_key"]
+                    if cfg.get("upstream_id") is not None and cfg.get("upstream_is_active") is False:
+                        logger.info(
+                            "Skipping model %s because upstream %s is inactive",
+                            mk,
+                            cfg.get("upstream_id"),
+                        )
+                        continue
 
                     if cfg.get("use_multi_upstream") and mk in routes_by_model:
                         # 多上游模式

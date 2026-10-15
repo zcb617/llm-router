@@ -79,8 +79,24 @@ class DummyFlow:
 
 
 class DummyModelStorage:
-    def __init__(self):
-        self.updated = None
+    def __init__(self, upstream_overrides=None):
+        self.updated = None  # 记录模型配置更新参数，验证停用上游拒绝后未写库。
+        self.route_created = None  # 记录独立路由创建参数，验证停用上游拒绝后未创建。
+        self.route_updated = None  # 记录独立路由更新参数，验证排序更新正常执行。
+        self.upstream_calls = []  # 记录上游读取调用，验证未改上游时不触发启用校验。
+        self.upstream_overrides = upstream_overrides or {}  # 按测试场景覆盖上游启用状态。
+
+    def get_upstream(self, upstream_id):
+        """返回模型接口测试所需的启用或覆盖状态上游。"""
+        self.upstream_calls.append(upstream_id)
+        upstream = {
+            "id": upstream_id,
+            "name": f"upstream-{upstream_id}",
+            "auth_mode": "api_key",
+            "is_active": True,
+        }
+        upstream.update(self.upstream_overrides.get(upstream_id, {}))
+        return upstream
 
     def get_model_config_by_id(self, config_id):
         return {
@@ -97,6 +113,14 @@ class DummyModelStorage:
 
     def update_model_config_with_routes(self, **kwargs):
         self.updated = kwargs
+        return True
+
+    def create_model_route(self, *args):
+        self.route_created = args
+        return 1
+
+    def update_model_route(self, **kwargs):
+        self.route_updated = kwargs
         return True
 
 
@@ -147,6 +171,91 @@ def test_update_single_upstream_model_clears_direct_target_with_empty_strings():
     assert storage.updated["target_base_url"] == ""
     assert storage.updated["api_key"] == ""
     assert storage.updated["protocol_converter"] == "kimi2.6"
+
+
+def test_update_multi_upstream_model_rejects_inactive_route_upstream():
+    """更新多上游模型时，停用路由上游必须被后端拒绝。"""
+    body = {
+        "model_key": "claude-opus",
+        "use_multi_upstream": True,
+        "routes": [{"upstream_id": 2, "sort_order": 0}],
+    }
+    storage = DummyModelStorage({2: {"name": "停用上游", "is_active": False}})
+
+    flow = DummyFlow("PUT", body)
+    handled = handle_console_api(flow, storage, "/api/models/1")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert "上游已停用" in payload["error"]
+    assert storage.updated is None
+
+
+def test_update_single_upstream_model_rejects_inactive_upstream():
+    """更新单上游模型时，停用上游必须被后端拒绝。"""
+    body = {
+        "model_key": "gpt-5.5",
+        "upstream_id": 6,
+        "use_multi_upstream": False,
+    }
+    storage = DummyModelStorage({6: {"name": "停用上游", "is_active": 0}})
+    flow = DummyFlow("PUT", body)
+
+    handled = handle_console_api(flow, storage, "/api/models/12")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert "上游已停用" in payload["error"]
+    assert storage.updated is None
+
+
+def test_create_model_route_rejects_inactive_upstream():
+    """新增独立路由时，停用上游必须被后端拒绝。"""
+    storage = DummyModelStorage({3: {"name": "停用路由上游", "is_active": False}})
+    flow = DummyFlow("POST", {"upstream_id": 3, "sort_order": 0})
+
+    handled = handle_console_api(flow, storage, "/api/models/1/routes")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert "上游已停用" in payload["error"]
+    assert storage.route_created is None
+
+
+def test_update_model_route_without_upstream_keeps_sort_order_update():
+    """独立路由仅更新排序时，不应触发上游启用校验。"""
+    storage = DummyModelStorage()
+    flow = DummyFlow("PUT", {"sort_order": 3})
+
+    handled = handle_console_api(flow, storage, "/api/models/1/routes/2")
+
+    assert handled is True
+    assert flow.response["status"] == 200
+    assert storage.upstream_calls == []
+    assert storage.route_updated["route_id"] == 2
+    assert storage.route_updated["sort_order"] == 3
+
+
+def test_create_model_route_rejects_missing_upstream():
+    """新增独立路由时，不存在的上游必须返回明确错误。"""
+    class MissingUpstreamStorage(DummyModelStorage):
+        def get_upstream(self, upstream_id):
+            self.upstream_calls.append(upstream_id)
+            return None
+
+    storage = MissingUpstreamStorage()
+    flow = DummyFlow("POST", {"upstream_id": 999})
+
+    handled = handle_console_api(flow, storage, "/api/models/1/routes")
+    payload = json.loads(flow.response["content"].decode("utf-8"))
+
+    assert handled is True
+    assert flow.response["status"] == 400
+    assert "上游不存在" in payload["error"]
+    assert storage.route_created is None
 
 
 class DummyAvailableModelStorage:
