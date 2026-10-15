@@ -1117,7 +1117,6 @@ def test_load_model_configs_filters_inactive_upstreams_with_real_sqlite_storage(
         [
             (1, "single-disabled", 1, None, 1, 0, 0),
             (2, "single-active", 2, None, 1, 0, 0),
-            (3, "direct-model", None, "https://direct.example", 1, 0, 0),
             (4, "multi-model", None, None, 1, 0, 1),
         ],
     )
@@ -1139,10 +1138,39 @@ def test_load_model_configs_filters_inactive_upstreams_with_real_sqlite_storage(
     assert disabled_config["upstream_is_active"] is False
     assert "single-disabled" not in addon._model_cache
     assert "single-active" in addon._model_cache
-    assert "direct-model" in addon._model_cache
     assert "multi-model" in addon._model_cache
     assert [route["upstream_id"] for route in addon._model_cache["multi-model"]["routes"]] == [2]
     storage.close()
+
+
+def test_load_model_configs_keeps_direct_url_without_upstream_activation_state():
+    """直连模型缺少上游启用字段时，缓存加载仍保留目标 URL。"""
+    addon = _make_addon_for_route_tests()
+
+    class DirectUrlStorage:
+        def get_all_model_configs(self):
+            """返回不关联上游的启用直连模型配置。"""
+            return [{
+                "id": 1,
+                "model_key": "direct-model",
+                "upstream_id": None,
+                "target_base_url": "https://direct.example",
+                "api_key": "direct-key",
+                "is_active": True,
+                "is_default": False,
+                "use_multi_upstream": False,
+            }]
+
+        def get_all_model_routes(self):
+            """返回空路由集合，保持直连模型的单上游加载路径。"""
+            return []
+
+    addon._external_storage = DirectUrlStorage()
+    addon._storage = None
+    addon._load_model_configs()
+
+    assert "direct-model" in addon._model_cache
+    assert addon._model_cache["direct-model"]["target_base_url"] == "https://direct.example"
 
 
 def test_codex_route_rejects_non_chat_completions_path():
