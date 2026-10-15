@@ -2992,7 +2992,7 @@ class CallStorage:
 
     def get_unhealthy_upstreams(self) -> list:
         """获取所有被标记为 unhealthy 的上游"""
-        sql = "SELECT id, name, target_base_url FROM upstreams WHERE health_status = 'unhealthy'"
+        sql = "SELECT id, name, target_base_url FROM upstreams WHERE is_active = true AND health_status = 'unhealthy'"
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
