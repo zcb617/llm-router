@@ -2501,6 +2501,11 @@ let allModelConfigs = [];
 let editingRoutes = []; // 多上游路由临时列表
 let allUpstreamsCache = []; // 缓存上游列表供路由行使用
 
+// 获取当前可用于模型配置和多上游路由的启用上游列表
+function getActiveUpstreams() {
+  return allUpstreamsCache.filter(u => u.is_active === true || u.is_active === 1);
+}
+
 // 加载上游列表填充下拉框
 async function loadUpstreamOptions() {
   const select = document.getElementById('modelUpstreamSelect');
@@ -2511,7 +2516,7 @@ async function loadUpstreamOptions() {
     allUpstreamsCache = data.upstreams || [];
     // 填充表单下拉
     select.innerHTML = '<option value="">-- 不使用上游（手动填写 URL）--</option>';
-    allUpstreamsCache.forEach(u => {
+    getActiveUpstreams().forEach(u => {
       select.innerHTML += `<option value="${u.id}" data-url="${u.target_base_url}" data-key="${u.api_key || ''}">${u.name} (${u.target_base_url})</option>`;
     });
     // 填充筛选下拉
@@ -2604,7 +2609,7 @@ function renderRoutesList() {
       <span class="text-xs text-zinc-400 w-6">#${idx + 1}</span>
       <select class="route-upstream flex-1 px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800" data-idx="${idx}">
         <option value="">-- 选择上游 --</option>
-        ${allUpstreamsCache.map(u => makeUpstreamOption(u, r.upstream_id)).join('')}
+        ${getActiveUpstreams().map(u => makeUpstreamOption(u, r.upstream_id)).join('')}
       </select>
       <input type="text" class="route-fw px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-32" placeholder="转发模型名" value="${r.forward_model || ''}" data-idx="${idx}">
       <select class="route-converter px-2 py-1 text-sm rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-32" data-idx="${idx}">
@@ -2726,7 +2731,8 @@ function renderModels() {
           try {
             const res = await fetch(`/api/models/${cfg.id}/routes`, { headers: getAuthHeaders() });
             const data = await res.json();
-            editingRoutes = (data.routes || []).map(r => ({
+            const activeUpstreamIds = new Set(getActiveUpstreams().map(u => String(u.id)));
+            editingRoutes = (data.routes || []).filter(r => activeUpstreamIds.has(String(r.upstream_id))).map(r => ({
               id: r.id,
               upstream_id: r.upstream_id,
               forward_model: r.forward_model || '',
