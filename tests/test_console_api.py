@@ -859,7 +859,11 @@ def test_subscription_quotas_lists_one_card_per_auth_file(monkeypatch):
             ]
 
         def get_all_upstreams(self):
-            raise AssertionError("额度列表不应再扫描上游")
+            return [
+                {"auth_file_id": 1, "is_active": True},
+                {"auth_file_id": 1, "is_active": True},
+                {"auth_file_id": 2, "is_active": True},
+            ]
 
     inspect_homes = []
     fetch_homes = []
@@ -931,6 +935,12 @@ def test_subscription_quotas_two_auth_files_same_type_fetch_twice(monkeypatch):
                 {"id": 2, "name": "kimi-b", "path": "/home-b/.kimi-code", "auth_type": "kimi_cli_oauth"},
             ]
 
+        def get_all_upstreams(self):
+            return [
+                {"auth_file_id": 1, "is_active": True},
+                {"auth_file_id": 2, "is_active": True},
+            ]
+
     fetch_homes = []
 
     class FakeManager:
@@ -971,6 +981,9 @@ def test_refresh_subscription_quota_uses_auth_file(monkeypatch):
                 "path": "/home-a/.kimi-code",
                 "auth_type": "kimi_cli_oauth",
             }
+
+        def get_all_upstreams(self):
+            return [{"auth_file_id": 1, "is_active": True}]
 
     class FakeManager:
         def __init__(self, _project_root):

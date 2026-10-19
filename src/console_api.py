@@ -249,6 +249,15 @@ def _require_auth(flow) -> Optional[dict]:
     return payload
 
 
+def _get_active_subscription_auth_file_ids(storage):
+    """筛选绑定至少一个启用上游的订阅额度认证文件。"""
+    return {
+        item["auth_file_id"]
+        for item in storage.get_all_upstreams()
+        if _is_enabled(item.get("is_active")) and item.get("auth_file_id") is not None
+    }
+
+
 def _load_auth_file_quota(auth_file: dict) -> dict:
     """按认证文件读取一张订阅额度卡，不再按上游条数出卡。"""
     card_id = f"{_AUTH_FILE_QUOTA_PREFIX}{auth_file['id']}"
@@ -349,6 +358,8 @@ def _load_subscription_quota(subscription_id: str, storage=None) -> dict:
         auth_file = storage.get_auth_file(auth_file_id)
         if not auth_file:
             raise ValueError("未知订阅类型")
+        if auth_file_id not in _get_active_subscription_auth_file_ids(storage):
+            raise ValueError("该认证文件未关联启用的上游")
         return _load_auth_file_quota(auth_file)
     raise ValueError("未知订阅类型")
 
@@ -1515,7 +1526,12 @@ def handle_console_api(flow, storage, path: str, config=None, addon=None):
         payload = _require_auth(flow)
         if not payload:
             return True
-        subscriptions = [_load_auth_file_quota(item) for item in storage.get_all_auth_files()]
+        active_auth_file_ids = _get_active_subscription_auth_file_ids(storage)
+        subscriptions = [
+            _load_auth_file_quota(item)
+            for item in storage.get_all_auth_files()
+            if item["id"] in active_auth_file_ids
+        ]
         _json_response(flow, 200, {"subscriptions": subscriptions, "fetched_at": int(time.time())})
         return True
 
