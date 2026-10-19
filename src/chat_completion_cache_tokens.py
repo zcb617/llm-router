@@ -22,7 +22,10 @@ class ChatCompletionCacheTokensParser:
         if not isinstance(usage, dict):
             return None, None
 
-        prompt_tokens = self._as_int(usage.get("prompt_tokens"))
+        prompt_tokens_raw = usage.get("prompt_tokens")
+        if prompt_tokens_raw is None:
+            prompt_tokens_raw = usage.get("input_tokens")
+        prompt_tokens = self._as_int(prompt_tokens_raw)
         details = usage.get("prompt_tokens_details")
         cached_tokens = (
             self._as_int(details.get("cached_tokens"))
