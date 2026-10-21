@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.2.4"
+CURRENT_VERSION = "1.2.5"
 
 
 def get_pg_conn(config):
@@ -121,6 +121,7 @@ PG_TABLES = [
             cached_hit_tokens INTEGER,
             cache_miss_tokens INTEGER,
             tokens_per_second REAL,
+            upstream_request_size_mb REAL,
             token_source TEXT,
             stream_type TEXT,
             first_token_ms INTEGER,
@@ -290,6 +291,7 @@ SQLITE_TABLES = [
             cached_hit_tokens INTEGER,
             cache_miss_tokens INTEGER,
             tokens_per_second REAL,
+            upstream_request_size_mb REAL,
             token_source TEXT,
             stream_type TEXT,
             first_token_ms INTEGER,
@@ -1146,6 +1148,22 @@ def run_v124_sqlite(conn):
     _sqlite_add_column(conn, "llm_calls", "transport_type", "TEXT")
 
 
+def run_v125_pg(conn):
+    """执行 v1.2.5 升级：记录实际发往上游的请求体大小（PostgreSQL）。
+
+    只新增可空列，历史调用记录保持 NULL。
+    """
+    _pg_add_column(conn, "llm_calls", "upstream_request_size_mb", "REAL")
+
+
+def run_v125_sqlite(conn):
+    """执行 v1.2.5 升级：记录实际发往上游的请求体大小（SQLite）。
+
+    只新增可空列，历史调用记录保持 NULL。
+    """
+    _sqlite_add_column(conn, "llm_calls", "upstream_request_size_mb", "REAL")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -1176,7 +1194,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1", "1.2.2", "1.2.3"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1", "1.2.2", "1.2.3", "1.2.4"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -1288,6 +1306,12 @@ def main():
             run_v124_pg(conn)
         else:
             run_v124_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1", "1.2.2", "1.2.3", "1.2.4", CURRENT_VERSION):
+        print("\n[v1.2.5] 检查/补齐上游请求大小字段...")
+        if is_pg:
+            run_v125_pg(conn)
+        else:
+            run_v125_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

@@ -47,6 +47,7 @@ from src.stream_relay import (
     SELECTED_UPSTREAM_HEADER,
     SELECTED_URL_HEADER,
     SELECTED_FORWARD_MODEL_HEADER,
+    SELECTED_REQUEST_SIZE_HEADER,
     StreamRelayServer,
 )
 
@@ -2377,6 +2378,7 @@ class LLMRouterAddon:
                     self._record_upstream_success(upstream_id)
                     # 记录调用信息
                     captured_req.body = req_body
+                    captured_req.upstream_request_size_mb = self._request_body_size_mb(req_data)
                     captured_req.original_model = model_name
                     captured_req.overridden_model = forward_model or model_name
                     captured_req.url = full_url
@@ -2568,8 +2570,27 @@ class LLMRouterAddon:
             req_headers["Authorization"] = f"Bearer {api_key}"
         return req_headers
 
+    @staticmethod
+    def _request_body_size_mb(body) -> Optional[float]:
+        """计算最终发往上游的请求体或 WebSocket 数据帧大小，单位为十进制 MB。"""
+        if body is None:
+            return None
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        elif isinstance(body, bytearray):
+            body = bytes(body)
+        return len(body) / 1_000_000
+
     def _store_pending_request(self, flow, captured_req):
         """记录等待响应阶段补全的请求数据。"""
+        if (
+            captured_req.upstream_request_size_mb is None
+            and not flow.metadata.get("multi_upstream_stream_relay")
+        ):
+            outgoing_body = flow.request.content
+            if outgoing_body is None:
+                outgoing_body = captured_req.body
+            captured_req.upstream_request_size_mb = self._request_body_size_mb(outgoing_body)
         with self._pending_requests_lock:
             self._pending_requests[id(flow)] = captured_req
         if self._is_stream_request(captured_req.body):
@@ -2590,6 +2611,7 @@ class LLMRouterAddon:
                     previous_response_id=flow.metadata.get("previous_response_id"),
                     last_activity_at=last_activity_at,
                     is_internal_relay=int(bool(flow.metadata.get("is_internal_relay"))),
+                    upstream_request_size_mb=captured_req.upstream_request_size_mb,
                 )
                 flow.metadata["stream_call_started"] = True
                 flow.metadata["call_start_time"] = captured_req.start_time
@@ -3492,7 +3514,8 @@ class LLMRouterAddon:
                     "transport_type", "call_status", "url",
                     "original_model", "overridden_model", "duration_ms", "last_activity_at",
                     "first_token_ms", "stream_type", "tokens_input", "tokens_output",
-                    "cached_hit_tokens", "cache_miss_tokens", "tokens_per_second"
+                    "cached_hit_tokens", "cache_miss_tokens", "tokens_per_second",
+                    "upstream_request_size_mb"
                 ]
                 if columns_param is None:
                     requested_columns = list(lightweight_columns)
@@ -3896,6 +3919,7 @@ class LLMRouterAddon:
                 "original_model": flow.metadata.get("codex_ws_original_model", ""),
                 "overridden_model": flow.metadata.get("codex_ws_forward_model", ""),
                 "previous_response_id": previous_response_id,
+                "upstream_request_size_mb": self._request_body_size_mb(message_content),
             }
 
             try:
@@ -3916,6 +3940,7 @@ class LLMRouterAddon:
                     previous_response_id=previous_response_id,
                     last_activity_at=datetime.now().isoformat(),
                     is_internal_relay=0,
+                    upstream_request_size_mb=call_state["upstream_request_size_mb"],
                 )
             except Exception:
                 logger.warning(
@@ -3955,6 +3980,19 @@ class LLMRouterAddon:
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8")
+
+            call_state["upstream_request_size_mb"] = self._request_body_size_mb(message.content)
+            try:
+                self.storage.update_call_request_size(
+                    call_id,
+                    call_state["upstream_request_size_mb"],
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to update Codex WebSocket outgoing request size: call_id=%s",
+                    call_id,
+                    exc_info=True,
+                )
 
             websocket_calls.append(call_state)
             logger.info(
@@ -4086,6 +4124,7 @@ class LLMRouterAddon:
                 "cached_hit_tokens": cached_hit_tokens,
                 "cache_miss_tokens": cache_miss_tokens,
                 "tokens_per_second": tokens_per_second,
+                "upstream_request_size_mb": call_state["upstream_request_size_mb"],
                 "token_source": "api" if tokens_input is not None or tokens_output is not None else None,
                 "stream_type": "stream",
                 "first_token_ms": first_token_ms,
@@ -4192,6 +4231,7 @@ class LLMRouterAddon:
                 "cached_hit_tokens": None,
                 "cache_miss_tokens": None,
                 "tokens_per_second": None,
+                "upstream_request_size_mb": call_state["upstream_request_size_mb"],
                 "token_source": None,
                 "stream_type": "stream",
                 "first_token_ms": call_state.get("first_token_ms"),
@@ -4512,6 +4552,11 @@ class LLMRouterAddon:
             "cached_hit_tokens": cached_hit_tokens,
             "cache_miss_tokens": cache_miss_tokens,
             "tokens_per_second": tokens_per_second,
+            "upstream_request_size_mb": (
+                flow.metadata.get("multi_upstream_request_size_mb")
+                if flow.metadata.get("multi_upstream_request_size_mb") is not None
+                else captured_req.upstream_request_size_mb
+            ),
             "token_source": token_source,
             "stream_type": stream_type,
             "first_token_ms": first_token_ms,
@@ -4869,6 +4914,11 @@ class LLMRouterAddon:
                 "cached_hit_tokens": cached_hit_tokens,
                 "cache_miss_tokens": cache_miss_tokens,
                 "tokens_per_second": tokens_per_second,
+                "upstream_request_size_mb": (
+                    flow.metadata.get("multi_upstream_request_size_mb")
+                    if flow.metadata.get("multi_upstream_request_size_mb") is not None
+                    else captured_req.upstream_request_size_mb
+                ),
                 "token_source": token_source,
                 "stream_type": stream_type,
                 "first_token_ms": first_token_ms,
@@ -4924,6 +4974,11 @@ class LLMRouterAddon:
                 "cached_hit_tokens": None,
                 "cache_miss_tokens": None,
                 "tokens_per_second": None,
+                "upstream_request_size_mb": (
+                    flow.metadata.get("multi_upstream_request_size_mb")
+                    if flow.metadata.get("multi_upstream_request_size_mb") is not None
+                    else captured_req.upstream_request_size_mb
+                ),
                 "token_source": None,
                 "stream_type": stream_type,
                 "first_token_ms": None,
@@ -4984,6 +5039,7 @@ class LLMRouterAddon:
         if not flow.metadata.get("multi_upstream_stream_relay") or not flow.response:
             return
 
+        flow.metadata["multi_upstream_request_size_mb"] = None
         headers = flow.response.headers
         flow.metadata["multi_upstream_failure_recorded"] = bool(
             headers.get(FAILURE_RECORDED_HEADER)
@@ -4991,7 +5047,17 @@ class LLMRouterAddon:
         selected_upstream_id = headers.pop(SELECTED_UPSTREAM_HEADER, None)
         selected_url = headers.pop(SELECTED_URL_HEADER, None)
         selected_forward_model = headers.pop(SELECTED_FORWARD_MODEL_HEADER, None)
+        selected_request_size = headers.pop(SELECTED_REQUEST_SIZE_HEADER, None)
         headers.pop(FAILURE_RECORDED_HEADER, None)
+        if selected_request_size:
+            try:
+                selected_request_size_bytes = int(selected_request_size)
+                if selected_request_size_bytes >= 0:
+                    flow.metadata["multi_upstream_request_size_mb"] = (
+                        selected_request_size_bytes / 1_000_000
+                    )
+            except (TypeError, ValueError):
+                logger.warning("Invalid selected stream upstream request size: %r", selected_request_size)
         if selected_upstream_id:
             try:
                 flow.metadata["multi_upstream_id"] = int(selected_upstream_id)

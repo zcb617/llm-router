@@ -20,6 +20,7 @@ class CapturedRequest:
     call_id: str = ""                 # 唯一调用ID (UUID)
     original_model: str = ""          # 原始模型
     overridden_model: str = ""        # 映射后的模型
+    upstream_request_size_mb: Optional[float] = None  # 最终发往上游请求体大小，单位 MB
 
 
 @dataclass

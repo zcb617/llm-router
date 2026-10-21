@@ -612,6 +612,8 @@ class CallStorage:
                         transport_type TEXT,
                         request_headers JSON,
                         request_body TEXT,
+                        -- 最终发往上游模型的请求体大小，使用十进制 MB。
+                        upstream_request_size_mb REAL,
                         response_headers JSON,
                         response_body TEXT,
                         final_responses_body TEXT,
@@ -664,6 +666,8 @@ class CallStorage:
                         transport_type TEXT,
                         request_headers TEXT,
                         request_body TEXT,
+                        -- 最终发往上游模型的请求体大小，使用十进制 MB。
+                        upstream_request_size_mb REAL,
                         response_headers TEXT,
                         response_body TEXT,
                         final_responses_body TEXT,
@@ -1181,6 +1185,7 @@ class CallStorage:
         cached_hit_tokens: Optional[int] = None,
         cache_miss_tokens: Optional[int] = None,
         tokens_per_second: Optional[float] = None,
+        upstream_request_size_mb: Optional[float] = None,
         outbound_diagnostics: Optional[dict] = None,
         is_internal_relay: int = 0,
         last_activity_at: Optional[str] = None,
@@ -1201,7 +1206,7 @@ class CallStorage:
             response_body,
             final_responses_body,
             call_status,
-            duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
+            duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, upstream_request_size_mb, token_source,
             stream_type, first_token_ms,
             original_model, overridden_model, user_id, api_key_id,
             previous_response_id, full_context,
@@ -1219,12 +1224,12 @@ class CallStorage:
                         call_id, timestamp, url, method, transport_type,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body, call_status,
-                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, upstream_request_size_mb, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at,
                         transport_status, transport_error, business_status, business_error
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -1236,12 +1241,12 @@ class CallStorage:
                         call_id, timestamp, url, method, transport_type,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body, call_status,
-                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
+                        duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, upstream_request_size_mb, token_source,
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at,
                         transport_status, transport_error, business_status, business_error
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
@@ -1255,6 +1260,7 @@ class CallStorage:
         previous_response_id: Optional[str], last_activity_at: Optional[str],
         is_internal_relay: int = 0,
         transport_type: str = "http",
+        upstream_request_size_mb: Optional[float] = None,
     ):
         """创建进行中调用记录，并保存请求的 HTTP 或 WebSocket 传输方式。"""
         self._ensure_llm_calls_schema_extensions()
@@ -1266,7 +1272,7 @@ class CallStorage:
             0, None, None, None, None, None, None,
             stream_type, None, original_model, overridden_model,
             user_id, api_key_id, previous_response_id, None, None,
-            is_internal_relay, last_activity_at,
+            is_internal_relay, last_activity_at, upstream_request_size_mb,
         )
         if self.postgresql:
             conn, cur = self._pg_conn()
@@ -1280,8 +1286,8 @@ class CallStorage:
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics,
-                        is_internal_relay, last_activity_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        is_internal_relay, last_activity_at, upstream_request_size_mb
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (call_id) DO NOTHING
                 """, args)
             finally:
@@ -1298,8 +1304,8 @@ class CallStorage:
                         stream_type, first_token_ms,
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics,
-                        is_internal_relay, last_activity_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_internal_relay, last_activity_at, upstream_request_size_mb
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
@@ -1323,6 +1329,27 @@ class CallStorage:
                     "UPDATE llm_calls SET duration_ms = ?, last_activity_at = ? "
                     "WHERE call_id = ? AND call_status = 'in_progress'",
                     (duration_ms, last_activity_at, call_id),
+                )
+            finally:
+                self._sqlite_close(conn, cur, commit=True)
+
+    def update_call_request_size(self, call_id: str, upstream_request_size_mb: Optional[float]):
+        """更新 WebSocket 调用最终发往上游的数据帧大小。"""
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "UPDATE llm_calls SET upstream_request_size_mb = %s WHERE call_id = %s",
+                    (upstream_request_size_mb, call_id),
+                )
+            finally:
+                self._pg_close(conn, cur, commit=True)
+        else:
+            conn, cur = self._sqlite_conn()
+            try:
+                cur.execute(
+                    "UPDATE llm_calls SET upstream_request_size_mb = ? WHERE call_id = ?",
+                    (upstream_request_size_mb, call_id),
                 )
             finally:
                 self._sqlite_close(conn, cur, commit=True)
@@ -1406,6 +1433,7 @@ class CallStorage:
         business_status: Optional[str] = None,
         business_error: Optional[str] = None,
         transport_type: Optional[str] = "http",
+        upstream_request_size_mb: Optional[float] = None,
     ):
         """按 call_id 完成调用记录并保存传输方式，开始记录不存在时回退插入最终记录。"""
         self._ensure_llm_calls_schema_extensions()
@@ -1423,7 +1451,7 @@ class CallStorage:
             if outbound_diagnostics is not None else None,
             is_internal_relay, last_activity_at,
             transport_status, transport_error, business_status, business_error,
-            transport_type,
+            transport_type, upstream_request_size_mb,
             call_id,
         )
         updated = False
@@ -1442,7 +1470,7 @@ class CallStorage:
                         is_internal_relay = %s, last_activity_at = %s,
                         transport_status = %s, transport_error = %s,
                         business_status = %s, business_error = %s,
-                        transport_type = %s
+                        transport_type = %s, upstream_request_size_mb = %s
                     WHERE call_id = %s
                 """, args)
                 updated = cur.rowcount > 0
@@ -1463,7 +1491,7 @@ class CallStorage:
                         is_internal_relay = ?, last_activity_at = ?,
                         transport_status = ?, transport_error = ?,
                         business_status = ?, business_error = ?,
-                        transport_type = ?
+                        transport_type = ?, upstream_request_size_mb = ?
                     WHERE call_id = ?
                 """, args)
                 updated = cur.rowcount > 0
@@ -1505,6 +1533,7 @@ class CallStorage:
                 business_status=business_status,
                 business_error=business_error,
                 transport_type=transport_type,
+                upstream_request_size_mb=upstream_request_size_mb,
             )
 
     def get_call_history(self, call_id: str, api_key_id: int) -> Optional[dict]:

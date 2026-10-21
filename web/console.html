@@ -619,6 +619,7 @@
           <div><span class="text-zinc-500">缓存命中Token:</span> <span id="dCached" class="ml-1"></span></div>
           <div><span class="text-zinc-500">缓存未命中Token:</span> <span id="dCacheMiss" class="ml-1"></span></div>
           <div><span class="text-zinc-500">生成速度:</span> <span id="dSpeed" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">上游请求大小:</span> <span id="dUpstreamRequestSize" class="ml-1"></span></div>
         </div>
         <div>
           <h3 class="font-semibold mb-1 text-sm">请求头</h3>
@@ -1124,6 +1125,7 @@ const COLUMNS = [
   { key: 'cached_hit_tokens', label: '缓存命中Token', default: true, minWidth: '120px' },
   { key: 'cache_miss_tokens', label: '缓存未命中Token', default: true, minWidth: '120px' },
   { key: 'tokens_per_second', label: '生成速度(t/s)', default: true, minWidth: '120px' },
+  { key: 'upstream_request_size_mb', label: '上游请求大小(MB)', default: true, minWidth: '150px' },
 ];
 const STORAGE_KEY = 'llm_router_columns';
 const PAGE_SIZE_STORAGE_KEY = 'llm_router_logs_page_size_console';
@@ -1415,6 +1417,11 @@ function renderTable(data) {
       td.style.minWidth = col.width;
       let val = row[col.key] ?? '';
       if (col.key === 'method' && row.transport_type === 'websocket') val = 'WS';
+      if (col.key === 'upstream_request_size_mb') {
+        val = row.upstream_request_size_mb == null || row.upstream_request_size_mb === ''
+          ? '-'
+          : Number(row.upstream_request_size_mb).toFixed(3) + ' MB';
+      }
       if ((col.key === 'timestamp' || col.key === 'last_activity_at') && val) {
         try {
           const d = new Date(val);
@@ -1540,6 +1547,7 @@ async function showDetail(row) {
     document.getElementById('dCached').textContent = detail.cached_hit_tokens != null ? detail.cached_hit_tokens : '-';
     document.getElementById('dCacheMiss').textContent = detail.cache_miss_tokens != null ? detail.cache_miss_tokens : '-';
     document.getElementById('dSpeed').textContent = detail.tokens_per_second != null ? detail.tokens_per_second + ' t/s' : '-';
+    document.getElementById('dUpstreamRequestSize').textContent = detail.upstream_request_size_mb == null || detail.upstream_request_size_mb === '' ? '-' : Number(detail.upstream_request_size_mb).toFixed(3) + ' MB';
     try { document.getElementById('dReqHeaders').textContent = JSON.stringify(JSON.parse(detail.request_headers || '{}'), null, 2); } catch { document.getElementById('dReqHeaders').textContent = detail.request_headers || ''; }
     try { document.getElementById('dReqBody').textContent = JSON.stringify(JSON.parse(detail.request_body || '{}'), null, 2); } catch { document.getElementById('dReqBody').textContent = detail.request_body || ''; }
     try { document.getElementById('dResHeaders').textContent = JSON.stringify(JSON.parse(detail.response_headers || '{}'), null, 2); } catch { document.getElementById('dResHeaders').textContent = detail.response_headers || ''; }

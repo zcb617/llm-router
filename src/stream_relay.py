@@ -18,6 +18,7 @@ RELAY_TOKEN_HEADER = "X-LLM-Router-Stream-Token"
 SELECTED_UPSTREAM_HEADER = "X-LLM-Router-Selected-Upstream"
 SELECTED_URL_HEADER = "X-LLM-Router-Selected-URL"
 SELECTED_FORWARD_MODEL_HEADER = "X-LLM-Router-Selected-Forward-Model"
+SELECTED_REQUEST_SIZE_HEADER = "X-LLM-Router-Selected-Request-Size"
 FAILURE_RECORDED_HEADER = "X-LLM-Router-Stream-Failure-Recorded"
 
 _HOP_BY_HOP_HEADERS = {
@@ -171,6 +172,7 @@ class StreamRelayServer:
         last_upstream_id = None
         last_url = ""
         last_forward_model = ""
+        last_request_size_bytes = None
 
         for attempt in attempts:
             upstream_id = attempt.get("upstream_id")
@@ -203,10 +205,18 @@ class StreamRelayServer:
                 return web.json_response({"error": "stream relay is not ready"}, status=503)
 
             try:
+                attempt_body = attempt.get("body", b"")
+                if attempt_body is None:
+                    attempt_body_bytes = b""
+                elif isinstance(attempt_body, str):
+                    attempt_body_bytes = attempt_body.encode("utf-8")
+                else:
+                    attempt_body_bytes = attempt_body
+                last_request_size_bytes = len(attempt_body_bytes)
                 async with client.stream(
                     request.method,
                     attempt["url"],
-                    content=attempt.get("body", b""),
+                    content=attempt_body,
                     headers=attempt.get("headers", {}),
                 ) as upstream:
                     last_status = upstream.status_code
@@ -264,6 +274,7 @@ class StreamRelayServer:
                     response_headers[SELECTED_FORWARD_MODEL_HEADER] = attempt.get(
                         "forward_model", ""
                     )
+                    response_headers[SELECTED_REQUEST_SIZE_HEADER] = str(last_request_size_bytes)
                     if first_chunk is None:
                         record["stage"] = "first_body"
                         record["outcome"] = "failed"
@@ -379,5 +390,7 @@ class StreamRelayServer:
         last_headers[SELECTED_UPSTREAM_HEADER] = str(last_upstream_id or "")
         last_headers[SELECTED_URL_HEADER] = last_url
         last_headers[SELECTED_FORWARD_MODEL_HEADER] = last_forward_model
+        if last_request_size_bytes is not None:
+            last_headers[SELECTED_REQUEST_SIZE_HEADER] = str(last_request_size_bytes)
         last_headers[FAILURE_RECORDED_HEADER] = "true"
         return web.Response(status=last_status, headers=last_headers, body=last_body)
