@@ -29,12 +29,28 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Debug, Deserialize)]
 struct OutboundRequest {
-    method: String,
-    url: String,
+    /// HTTP 出站请求方法；CONNECT 隧道模式不使用。
+    #[serde(default)]
+    method: Option<String>,
+    /// HTTP 出站请求 URL；CONNECT 隧道模式不使用。
+    #[serde(default)]
+    url: Option<String>,
+    /// 出站模式；缺省时保持既有 HTTP 请求行为。
+    #[serde(default)]
+    mode: Option<String>,
+    /// CONNECT 隧道唯一允许访问的上游主机。
+    #[serde(default)]
+    target_host: Option<String>,
+    /// CONNECT 隧道唯一允许访问的上游端口。
+    #[serde(default)]
+    target_port: Option<u16>,
     #[serde(default)]
     headers: Vec<(String, String)>,
     #[serde(default)]
@@ -130,6 +146,47 @@ async fn main() {
         }
     };
 
+    if req.mode.as_deref() == Some("connect_tunnel") {
+        let target_host = match req.target_host.as_deref() {
+            Some(host) if !host.trim().is_empty() => host,
+            _ => {
+                emit_connect_tunnel_startup_error("missing target_host");
+                std::process::exit(1);
+            }
+        };
+        let target_port = match req.target_port {
+            Some(port) if port > 0 => port,
+            _ => {
+                emit_connect_tunnel_startup_error("invalid target_port");
+                std::process::exit(1);
+            }
+        };
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(_) => {
+                emit_connect_tunnel_startup_error("failed to bind loopback listener");
+                std::process::exit(1);
+            }
+        };
+        let local_addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(_) => {
+                emit_connect_tunnel_startup_error("failed to read loopback listener address");
+                std::process::exit(1);
+            }
+        };
+        if emit_connect_tunnel_ready(local_addr).is_err() {
+            std::process::exit(1);
+        }
+        if run_connect_tunnel(listener, target_host, target_port)
+            .await
+            .is_err()
+        {
+            std::process::exit(1);
+        }
+        return;
+    }
+
     match run(&req).await {
         Ok(resp) => {
             emit(&resp);
@@ -153,9 +210,153 @@ async fn main() {
     }
 }
 
+/// 将 CONNECT 隧道监听地址作为单行 JSON 发布给本地 Python 调用方。
+fn emit_connect_tunnel_ready(local_addr: SocketAddr) -> io::Result<()> {
+    let payload = serde_json::json!({
+        "ok": true,
+        "host": local_addr.ip().to_string(),
+        "port": local_addr.port(),
+    });
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &payload)?;
+    stdout.write_all(b"\n")?;
+    stdout.flush()
+}
+
+/// 在隧道启动失败时向 Python 调用方发送不含认证信息的错误 JSON。
+fn emit_connect_tunnel_startup_error(error: &str) {
+    let payload = serde_json::json!({"ok": false, "error": error});
+    let mut stdout = io::stdout().lock();
+    let _ = serde_json::to_writer(&mut stdout, &payload);
+    let _ = stdout.write_all(b"\n");
+    let _ = stdout.flush();
+}
+
+/// 接受一条受目标限制的本地 CONNECT 请求并原样转发后续 TCP 字节。
+async fn run_connect_tunnel(
+    listener: TcpListener,
+    target_host: &str,
+    target_port: u16,
+) -> Result<(), String> {
+    const MAX_CONNECT_HEADER_BYTES: usize = 16 * 1024;
+
+    let (client, _) = listener
+        .accept()
+        .await
+        .map_err(|_| "failed to accept local CONNECT client".to_string())?;
+    drop(listener);
+    let mut client = BufReader::new(client);
+    let mut header = Vec::new();
+    let mut ending = [0_u8; 4];
+    loop {
+        if header.len() >= MAX_CONNECT_HEADER_BYTES {
+            send_connect_response(client.get_mut(), "400 Bad Request").await;
+            return Err("CONNECT request header too large".to_string());
+        }
+        let mut byte = [0_u8; 1];
+        if client.read_exact(&mut byte).await.is_err() {
+            send_connect_response(client.get_mut(), "400 Bad Request").await;
+            return Err("incomplete CONNECT request header".to_string());
+        }
+        header.push(byte[0]);
+        ending.rotate_left(1);
+        ending[3] = byte[0];
+        if ending == *b"\r\n\r\n" {
+            break;
+        }
+    }
+
+    let request_header = match std::str::from_utf8(&header) {
+        Ok(value) => value,
+        Err(_) => {
+            send_connect_response(client.get_mut(), "400 Bad Request").await;
+            return Err("invalid CONNECT request encoding".to_string());
+        }
+    };
+    let request_line = match request_header.lines().next() {
+        Some(line) => line,
+        None => {
+            send_connect_response(client.get_mut(), "400 Bad Request").await;
+            return Err("missing CONNECT request line".to_string());
+        }
+    };
+    let request_parts: Vec<&str> = request_line.split_whitespace().collect();
+    if request_parts.len() != 3 || request_parts[0] != "CONNECT" {
+        send_connect_response(client.get_mut(), "400 Bad Request").await;
+        return Err("invalid CONNECT request line".to_string());
+    }
+    let (requested_host, requested_port) = match parse_connect_authority(request_parts[1]) {
+        Some(authority) => authority,
+        None => {
+            send_connect_response(client.get_mut(), "400 Bad Request").await;
+            return Err("invalid CONNECT authority".to_string());
+        }
+    };
+    if !requested_host.eq_ignore_ascii_case(target_host) || requested_port != target_port {
+        send_connect_response(client.get_mut(), "403 Forbidden").await;
+        return Err("CONNECT target does not match configured target".to_string());
+    }
+
+    let mut upstream = match tokio::time::timeout(
+        Duration::from_secs(30),
+        TcpStream::connect((target_host, target_port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        _ => {
+            send_connect_response(client.get_mut(), "502 Bad Gateway").await;
+            return Err("failed to connect to configured target".to_string());
+        }
+    };
+    client
+        .get_mut()
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await
+        .map_err(|_| "failed to acknowledge CONNECT request".to_string())?;
+    tokio::io::copy_bidirectional(&mut client, &mut upstream)
+        .await
+        .map_err(|_| "CONNECT tunnel byte forwarding failed".to_string())?;
+    Ok(())
+}
+
+/// 解析 CONNECT authority，并要求它显式携带有效端口。
+fn parse_connect_authority(authority: &str) -> Option<(String, u16)> {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let closing_bracket = bracketed.find(']')?;
+        let host = &bracketed[..closing_bracket];
+        let port = bracketed[closing_bracket + 1..].strip_prefix(':')?;
+        (host, port)
+    } else {
+        let (host, port) = authority.rsplit_once(':')?;
+        if host.is_empty() || host.contains(':') {
+            return None;
+        }
+        (host, port)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port.parse::<u16>().ok()?))
+}
+
+/// 向本地 mitmproxy 客户端返回 CONNECT 状态行并结束响应头。
+async fn send_connect_response(client: &mut TcpStream, status: &str) {
+    let response = format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n");
+    let _ = client.write_all(response.as_bytes()).await;
+}
+
 async fn run(req: &OutboundRequest) -> Result<OutboundResponse, String> {
-    let method = Method::from_bytes(req.method.as_bytes())
-        .map_err(|e| format!("invalid method {}: {e}", req.method))?;
+    let method_value = req
+        .method
+        .as_deref()
+        .ok_or_else(|| "missing method".to_string())?;
+    let url = req
+        .url
+        .as_deref()
+        .ok_or_else(|| "missing url".to_string())?;
+    let method = Method::from_bytes(method_value.as_bytes())
+        .map_err(|e| format!("invalid method {}: {e}", method_value))?;
 
     let mut header_map = HeaderMap::new();
     for (name, value) in &req.headers {
@@ -186,7 +387,7 @@ async fn run(req: &OutboundRequest) -> Result<OutboundResponse, String> {
         .build()
         .map_err(|e| format!("client build failed: {e}"))?;
 
-    let mut builder = client.request(method, &req.url).headers(header_map);
+    let mut builder = client.request(method, url).headers(header_map);
     if !body_bytes.is_empty() {
         builder = builder.body(body_bytes);
     }

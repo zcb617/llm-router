@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
 import logging
@@ -144,6 +145,103 @@ def resolve_codex_outbound_bin() -> Path:
         "codex_outbound binary not found. Build with: "
         "cargo build --release --manifest-path codex_outbound/Cargo.toml"
     )
+
+
+async def _terminate_and_reap_codex_connect_tunnel(
+    process: asyncio.subprocess.Process,
+) -> None:
+    """在启动流程失败或取消时终止并回收 Rust CONNECT 隧道进程。"""
+    if process.returncode is None:
+        try:
+            process.terminate()
+        except (ProcessLookupError, OSError):
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=1)
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        await process.wait()
+
+
+async def start_codex_connect_tunnel(
+    target_host: str, target_port: int
+) -> tuple[asyncio.subprocess.Process, str, int]:
+    """启动只允许连接指定目标的 Rust 本机 CONNECT TCP 隧道。"""
+    binary = resolve_codex_outbound_bin()
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            str(binary),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        request_payload = json.dumps(
+            {
+                "mode": "connect_tunnel",
+                "target_host": target_host,
+                "target_port": target_port,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        process.stdin.write(request_payload + b"\n")
+        await process.stdin.drain()
+        process.stdin.close()
+        await process.stdin.wait_closed()
+
+        ready_line = await asyncio.wait_for(process.stdout.readline(), timeout=10)
+        if not ready_line or process.returncode is not None:
+            raise CodexOutboundError(
+                "codex_outbound CONNECT tunnel exited before becoming ready"
+            )
+        try:
+            ready = json.loads(ready_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CodexOutboundError(
+                "codex_outbound CONNECT tunnel returned invalid ready JSON"
+            ) from exc
+        if (
+            not isinstance(ready, dict)
+            or ready.get("ok") is not True
+            or not isinstance(ready.get("host"), str)
+            or not ready["host"]
+            or not isinstance(ready.get("port"), int)
+            or isinstance(ready["port"], bool)
+            or not 1 <= ready["port"] <= 65535
+        ):
+            raise CodexOutboundError(
+                "codex_outbound CONNECT tunnel failed to become ready"
+            )
+        return process, ready["host"], ready["port"]
+    except asyncio.CancelledError:
+        if process is not None:
+            await _terminate_and_reap_codex_connect_tunnel(process)
+        raise
+    except Exception as exc:
+        if process is not None:
+            await _terminate_and_reap_codex_connect_tunnel(process)
+        if isinstance(exc, CodexOutboundError):
+            raise
+        if isinstance(exc, asyncio.TimeoutError):
+            raise CodexOutboundError(
+                "timed out waiting for codex_outbound CONNECT tunnel readiness"
+            ) from exc
+        raise CodexOutboundError(
+            "failed to start codex_outbound CONNECT tunnel"
+        ) from exc
+
+
+def stop_codex_connect_tunnel(process: asyncio.subprocess.Process) -> None:
+    """幂等终止此前启动的 Rust CONNECT 隧道进程。"""
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+    except (ProcessLookupError, OSError):
+        return
 
 
 def send_via_codex_outbound(

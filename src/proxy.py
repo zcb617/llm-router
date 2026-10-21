@@ -3,6 +3,7 @@
 """
 from mitmproxy import http
 from mitmproxy.addonmanager import Loader
+from mitmproxy.net.server_spec import parse as parse_server_spec
 
 import logging
 import json
@@ -39,6 +40,8 @@ from src.codex_outbound_client import (
     CodexOutboundError,
     build_outbound_diagnostics,
     send_via_codex_outbound,
+    start_codex_connect_tunnel,
+    stop_codex_connect_tunnel,
 )
 from src.responses_cache_tokens import responses_cache_tokens_parser
 from src.stream_relay import (
@@ -1384,13 +1387,90 @@ class LLMRouterAddon:
                 del flow.request.headers["chatgpt-account-id"]
             if not snapshot.is_fedramp_account and "x-openai-fedramp" in flow.request.headers:
                 del flow.request.headers["x-openai-fedramp"]
-            flow.request.url = target_url
-            flow.request.scheme = urlparse(target_url).scheme
-            flow.metadata["codex_ws_oauth_account_id"] = snapshot.account_id or ""
-            flow.metadata["codex_ws_session_id"] = session_id
-            flow.metadata["codex_ws_thread_id"] = thread_id
+            parsed_target = urlparse(target_url)
+            if parsed_target.scheme.lower() != "https":
+                flow.response = http.Response.make(
+                    502,
+                    json.dumps(
+                        {"error": "Codex Responses WebSocket requires an HTTPS upstream"},
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                    {"Content-Type": "application/json; charset=utf-8"},
+                )
+                flow.metadata["local_response"] = True
+                logger.error(
+                    "[CODEX_WS_EGRESS] egress=rust_connect status=unsupported_scheme model=%s target=%s",
+                    handshake_model,
+                    target_url,
+                )
+                return
+            try:
+                tunnel_host = parsed_target.hostname
+                tunnel_port = parsed_target.port or 443
+            except ValueError:
+                tunnel_host = None
+                tunnel_port = None
+            if not tunnel_host or not tunnel_port:
+                flow.response = http.Response.make(
+                    502,
+                    json.dumps(
+                        {"error": "Invalid Codex Responses WebSocket upstream URL"},
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                    {"Content-Type": "application/json; charset=utf-8"},
+                )
+                flow.metadata["local_response"] = True
+                logger.error(
+                    "[CODEX_WS_EGRESS] egress=rust_connect status=invalid_target model=%s target=%s",
+                    handshake_model,
+                    target_url,
+                )
+                return
+            try:
+                tunnel_process, local_host, local_port = await start_codex_connect_tunnel(
+                    tunnel_host, tunnel_port
+                )
+            except CodexOutboundError as exc:
+                flow.response = http.Response.make(
+                    502,
+                    json.dumps(
+                        {"error": "Codex Responses WebSocket outbound tunnel unavailable"},
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                    {"Content-Type": "application/json; charset=utf-8"},
+                )
+                flow.metadata["local_response"] = True
+                logger.error(
+                    "[CODEX_WS_EGRESS] egress=rust_connect status=start_failed model=%s target=%s error=%s",
+                    handshake_model,
+                    target_url,
+                    exc,
+                )
+                return
+            flow.metadata["codex_ws_outbound_process"] = tunnel_process
+            try:
+                flow.request.url = target_url
+                flow.request.scheme = urlparse(target_url).scheme
+                flow.request.headers["Host"] = target_host
+                flow.server_conn.via = parse_server_spec(
+                    f"http://{local_host}:{local_port}", "http"
+                )
+                flow.metadata["codex_ws_oauth_account_id"] = snapshot.account_id or ""
+                flow.metadata["codex_ws_session_id"] = session_id
+                flow.metadata["codex_ws_thread_id"] = thread_id
+            except Exception as exc:
+                self._stop_codex_ws_outbound_process(flow)
+                logger.error(
+                    "[CODEX_WS_EGRESS] egress=rust_connect status=route_config_failed model=%s target=%s error_type=%s",
+                    handshake_model,
+                    target_url,
+                    type(exc).__name__,
+                )
+                raise CodexOutboundError(
+                    "failed to configure Codex Responses WebSocket Rust CONNECT route"
+                ) from exc
             logger.info(
-                "[CODEX_WS_ROUTE] OAuth handshake model=%s target=%s",
+                "[CODEX_WS_ROUTE] OAuth handshake egress=rust_connect model=%s target=%s",
                 handshake_model,
                 target_url,
             )
@@ -4146,8 +4226,15 @@ class LLMRouterAddon:
             )
             websocket_calls.remove(call_state)
 
+    def _stop_codex_ws_outbound_process(self, flow):
+        """从 WebSocket 请求元数据取出并幂等停止 Rust CONNECT 隧道。"""
+        process = flow.metadata.pop("codex_ws_outbound_process", None)
+        if process is not None:
+            stop_codex_connect_tunnel(process)
+
     def websocket_end(self, flow):
         """结束 Codex Responses WebSocket 并保存尚未完成调用的传输状态。"""
+        self._stop_codex_ws_outbound_process(flow)
         if not flow.metadata.get("codex_responses_websocket"):
             return
         if flow.metadata.get("codex_ws_end_recorded"):
@@ -4256,6 +4343,8 @@ class LLMRouterAddon:
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
         if flow.metadata.get("codex_responses_websocket"):
+            if flow.response is None or flow.response.status_code != 101:
+                self._stop_codex_ws_outbound_process(flow)
             return
         from src.tokenizer import (
             calculate_tokens,
@@ -4576,6 +4665,7 @@ class LLMRouterAddon:
 
     def error(self, flow: http.HTTPFlow):
         """将客户端断开或一般网络错误交给共享网络异常处理流程。"""
+        self._stop_codex_ws_outbound_process(flow)
         raw_flow_error = flow.error
         raw_flow_error_message = (
             getattr(raw_flow_error, "msg", None)
