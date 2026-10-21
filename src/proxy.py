@@ -1058,32 +1058,17 @@ class LLMRouterAddon:
             ),
             "",
         )
-        if (
+        is_codex_responses_websocket = (
             flow.request.method == "GET"
             and request_path == "/v1/responses"
-            and flow.request.headers.get("chatgpt-account-id")
             and flow.request.headers.get("sec-websocket-key")
+            and flow.request.headers.get("upgrade", "").lower() == "websocket"
             and handshake_model.lower().startswith("gpt")
-        ):
-            logger.info(
-                "[CODEX_HTTP_FALLBACK] WebSocket handshake rejected with 426: model=%s path=%s",
-                handshake_model,
-                request_path,
-            )
-            flow.response = http.Response.make(
-                426,
-                json.dumps(
-                    {"error": "WebSocket transport is not supported by llm-router; use HTTP."},
-                    ensure_ascii=False,
-                ).encode("utf-8"),
-                {"Content-Type": "application/json; charset=utf-8"},
-            )
-            flow.metadata["local_response"] = True
-            return
+        )
 
         # === LLM 转发请求：验证 API Key ===
         request_body = (flow.request.content or b"").decode("utf-8", errors="replace")
-        request_model = self._extract_model(request_body)
+        request_model = handshake_model if is_codex_responses_websocket else self._extract_model(request_body)
         codex_passthrough = (
             bool(flow.request.headers.get("chatgpt-account-id"))
             and isinstance(request_model, str)
@@ -1119,6 +1104,119 @@ class LLMRouterAddon:
             # 存储用户信息到 flow.metadata，供 response() 使用
             flow.metadata["user_id"] = key_info["user_id"]
             flow.metadata["api_key_id"] = key_info["id"]
+
+        if is_codex_responses_websocket:
+            mapping, is_default = self._match_model(handshake_model)
+            if mapping is None:
+                flow.response = http.Response.make(
+                    404,
+                    json.dumps({"error": f"No model mapping for '{handshake_model}'"}, ensure_ascii=False).encode("utf-8"),
+                    {"Content-Type": "application/json; charset=utf-8"},
+                )
+                flow.metadata["local_response"] = True
+                return
+            if not codex_passthrough and not self._is_codex_cli_oauth(mapping):
+                flow.response = http.Response.make(
+                    501,
+                    json.dumps({"error": "Codex Responses WebSocket requires a Codex CLI OAuth model route"}, ensure_ascii=False).encode("utf-8"),
+                    {"Content-Type": "application/json; charset=utf-8"},
+                )
+                flow.metadata["local_response"] = True
+                return
+
+            if is_default:
+                logger.info(
+                    "No exact match for Codex WebSocket model '%s', using default model: %s",
+                    handshake_model,
+                    self.config.proxy.default_model,
+                )
+            target_url = resolve_codex_outbound_url(self._resolve_target_base_url(mapping))
+            target_host = host_from_url(target_url)
+            flow.metadata["codex_responses_websocket"] = True
+            flow.metadata["codex_ws_route"] = "passthrough" if codex_passthrough else "oauth"
+            flow.metadata["codex_ws_target_url"] = target_url
+            flow.metadata["codex_ws_original_model"] = handshake_model
+            flow.metadata["codex_ws_forward_model"] = (mapping.get("forward_model") or handshake_model).strip()
+            flow.metadata["codex_response_protocol"] = "responses"
+            flow.metadata["codex_cli_oauth"] = True
+            flow.metadata["model_mapping"] = mapping
+            flow.metadata["original_model"] = handshake_model
+            flow.metadata["overridden_model"] = mapping.get("forward_model", "") or handshake_model
+            flow.metadata["codex_ws_client_headers"] = dict(flow.request.headers)
+            flow.metadata["codex_ws_response_headers"] = {}
+            flow.metadata["codex_ws_calls"] = []
+
+            if codex_passthrough:
+                flow.request.url = target_url
+                flow.request.scheme = urlparse(target_url).scheme
+                flow.request.headers["Host"] = target_host
+                logger.info(
+                    "[CODEX_WS_ROUTE] passthrough handshake model=%s target=%s",
+                    handshake_model,
+                    target_url,
+                )
+                return
+
+            snapshot = await asyncio.to_thread(
+                self._codex_cli_auth.resolve_snapshot,
+                refresh_if_needed=True,
+                oauth_home=mapping.get("oauth_home") or None,
+            )
+            if not snapshot or not snapshot.access_token:
+                flow.response = http.Response.make(
+                    502,
+                    json.dumps({"error": "No Codex CLI OAuth token available"}, ensure_ascii=False).encode("utf-8"),
+                    {"Content-Type": "application/json; charset=utf-8"},
+                )
+                flow.metadata["local_response"] = True
+                return
+
+            session_id = flow.request.headers.get("session-id", "")
+            thread_id = flow.request.headers.get("thread-id", "")
+            request_id = flow.request.headers.get("x-client-request-id") or str(uuid.uuid4())
+            oauth_headers = self._codex_cli_auth.build_full_headers(
+                host=target_host,
+                access_token=snapshot.access_token,
+                account_id=snapshot.account_id or "",
+                is_fedramp_account=snapshot.is_fedramp_account,
+                session_id=session_id,
+                thread_id=thread_id,
+                request_id=request_id,
+                stream=True,
+            )
+            oauth_header_names = {
+                "host",
+                "authorization",
+                "chatgpt-account-id",
+                "x-openai-fedramp",
+                "originator",
+                "user-agent",
+                "version",
+                "session-id",
+                "thread-id",
+                "x-client-request-id",
+            }
+            for header_name, header_value in oauth_headers:
+                if header_name.lower() in oauth_header_names:
+                    flow.request.headers[header_name] = header_value
+            for client_auth_header in ("x-api-key", "proxy-authorization", "cookie"):
+                if client_auth_header in flow.request.headers:
+                    del flow.request.headers[client_auth_header]
+            if not snapshot.account_id and "chatgpt-account-id" in flow.request.headers:
+                del flow.request.headers["chatgpt-account-id"]
+            if not snapshot.is_fedramp_account and "x-openai-fedramp" in flow.request.headers:
+                del flow.request.headers["x-openai-fedramp"]
+            flow.request.url = target_url
+            flow.request.scheme = urlparse(target_url).scheme
+            flow.metadata["codex_ws_oauth_account_id"] = snapshot.account_id or ""
+            flow.metadata["codex_ws_session_id"] = session_id
+            flow.metadata["codex_ws_thread_id"] = thread_id
+            logger.info(
+                "[CODEX_WS_ROUTE] OAuth handshake model=%s target=%s",
+                handshake_model,
+                target_url,
+            )
+            return
 
         # 捕获请求数据
         captured_req = self.capturer.capture_request(flow)
@@ -3367,6 +3465,8 @@ class LLMRouterAddon:
 
     def responseheaders(self, flow: http.HTTPFlow):
         """响应头到达时触发（用于计算首字耗时）"""
+        if flow.metadata.get("codex_responses_websocket"):
+            return
         # 记录响应头到达时间，跳过本地请求
         if flow.metadata.get("local_response"):
             return
@@ -3528,8 +3628,317 @@ class LLMRouterAddon:
             return None
         return int((first_token_time - captured_req.start_time) * 1000)
 
+    def websocket_start(self, flow):
+        """记录 Codex Responses WebSocket 上游握手响应，供调用日志关联使用。"""
+        if not flow.metadata.get("codex_responses_websocket"):
+            return
+        flow.metadata["codex_ws_response_headers"] = (
+            dict(flow.response.headers) if flow.response is not None else {}
+        )
+        logger.info(
+            "[CODEX_WS_CONNECTED] route=%s model=%s target=%s",
+            flow.metadata.get("codex_ws_route"),
+            flow.metadata.get("codex_ws_original_model"),
+            flow.metadata.get("codex_ws_target_url"),
+        )
+
+    def websocket_message(self, flow):
+        """记录 Codex Responses WebSocket 原始调用帧并透传上下行消息。"""
+        if not flow.metadata.get("codex_responses_websocket") or not flow.websocket:
+            return
+        if not flow.websocket.messages:
+            return
+
+        message = flow.websocket.messages[-1]
+        message_content = message.content
+        try:
+            message_text = (
+                message_content.decode("utf-8")
+                if isinstance(message_content, (bytes, bytearray))
+                else str(message_content)
+            )
+        except UnicodeDecodeError:
+            return
+
+        try:
+            event = json.loads(message_text)
+        except (TypeError, ValueError):
+            event = None
+
+        websocket_calls = flow.metadata.setdefault("codex_ws_calls", [])
+        if message.from_client:
+            if not isinstance(event, dict) or event.get("type") != "response.create":
+                return
+
+            call_id = str(uuid.uuid4())
+            now = time.time()
+            request_payload = dict(event)
+            previous_response_id = request_payload.get("previous_response_id")
+            prompt_cache_key = request_payload.get("prompt_cache_key")
+            if not isinstance(prompt_cache_key, str) or not prompt_cache_key:
+                prompt_cache_key = None
+
+            call_state = {
+                "call_id": call_id,
+                "timestamp": datetime.now().isoformat(),
+                "start_time": now,
+                "request_body": message_text,
+                "request_headers": flow.metadata.get("codex_ws_client_headers", {}),
+                "response_headers": flow.metadata.get("codex_ws_response_headers", {}),
+                "response_frames": [],
+                "response_id": None,
+                "first_token_ms": None,
+                "original_model": flow.metadata.get("codex_ws_original_model", ""),
+                "overridden_model": flow.metadata.get("codex_ws_forward_model", ""),
+                "previous_response_id": previous_response_id,
+            }
+
+            if flow.metadata.get("codex_ws_route") == "oauth":
+                account_id = flow.metadata.get("codex_ws_oauth_account_id", "")
+                session_id, thread_id = self._codex_cli_auth.get_or_create_session_thread(
+                    account_id=account_id,
+                    prompt_cache_key=prompt_cache_key,
+                )
+                if not prompt_cache_key:
+                    session_id = flow.metadata.get("codex_ws_session_id") or session_id
+                    thread_id = flow.metadata.get("codex_ws_thread_id") or thread_id
+                incoming_metadata = request_payload.get("client_metadata")
+                client_metadata = self._codex_cli_auth.build_client_metadata(
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    incoming_client_metadata=(
+                        incoming_metadata if isinstance(incoming_metadata, dict) else None
+                    ),
+                    fallback_turn_id=call_id,
+                )
+                request_payload["model"] = call_state["overridden_model"]
+                request_payload["client_metadata"] = client_metadata
+                message.content = json.dumps(
+                    request_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+
+            websocket_calls.append(call_state)
+            logger.info(
+                "[CODEX_WS_CALL_STARTED] call_id=%s model=%s previous_response_id=%s request_bytes=%s",
+                call_id,
+                call_state["original_model"],
+                previous_response_id or "-",
+                len(message_text.encode("utf-8")),
+            )
+            return
+
+        if not websocket_calls:
+            return
+
+        response_obj = event.get("response") if isinstance(event, dict) else None
+        response_id = None
+        event_type = event.get("type") if isinstance(event, dict) else None
+        if isinstance(response_obj, dict):
+            response_id = response_obj.get("id")
+        if not response_id and isinstance(event, dict):
+            response_id = event.get("response_id")
+
+        call_state = None
+        if response_id:
+            call_state = next(
+                (item for item in websocket_calls if item.get("response_id") == response_id),
+                None,
+            )
+            if call_state is None and (
+                event_type == "response.created"
+                or event_type in {"response.completed", "response.failed", "response.incomplete"}
+            ):
+                call_state = next(
+                    (item for item in websocket_calls if not item.get("response_id")),
+                    None,
+                )
+            if call_state is not None:
+                call_state["response_id"] = response_id
+        else:
+            call_state = websocket_calls[0]
+
+        if call_state is None:
+            return
+        if call_state["first_token_ms"] is None and (
+            not isinstance(event_type, str)
+            or event_type.endswith(".delta")
+            or event_type in {
+                "response.completed",
+                "response.failed",
+                "response.incomplete",
+            }
+        ):
+            call_state["first_token_ms"] = int((time.time() - call_state["start_time"]) * 1000)
+        call_state["response_frames"].append(message_text)
+
+        if event_type in {
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+            "error",
+        }:
+            response_body = "\n".join(call_state.get("response_frames", []))
+            duration_ms = int((time.time() - call_state["start_time"]) * 1000)
+            business_status, business_error = self._judge_business(
+                flow,
+                response_body,
+                "stream",
+                default_status="failed",
+            )
+            tokens_input = None
+            tokens_output = None
+            cached_hit_tokens = None
+            cache_miss_tokens = None
+            for response_frame in call_state.get("response_frames", []):
+                frame_input_tokens = responses_cache_tokens_parser.get_input_tokens(response_frame)
+                frame_output_tokens = responses_cache_tokens_parser.get_output_tokens(response_frame)
+                frame_cached_tokens, frame_miss_tokens = responses_cache_tokens_parser.get_cache_tokens(response_frame)
+                if frame_input_tokens is not None:
+                    tokens_input = frame_input_tokens
+                if frame_output_tokens is not None:
+                    tokens_output = frame_output_tokens
+                if frame_cached_tokens is not None:
+                    cached_hit_tokens = frame_cached_tokens
+                if frame_miss_tokens is not None:
+                    cache_miss_tokens = frame_miss_tokens
+            first_token_ms = call_state.get("first_token_ms")
+            tokens_per_second = None
+            if (
+                tokens_output is not None
+                and isinstance(first_token_ms, int)
+                and duration_ms > first_token_ms
+            ):
+                tokens_per_second = round(
+                    tokens_output / ((duration_ms - first_token_ms) / 1000),
+                    2,
+                )
+            self._enqueue_call_save({
+                "call_id": call_state["call_id"],
+                "timestamp": call_state["timestamp"],
+                "url": flow.metadata.get("codex_ws_target_url", ""),
+                "method": "GET",
+                "request_headers": call_state["request_headers"],
+                "request_body": call_state["request_body"],
+                "response_headers": call_state["response_headers"],
+                "response_body": response_body,
+                "final_responses_body": None,
+                "call_status": business_status,
+                "transport_status": "success",
+                "transport_error": None,
+                "business_status": business_status,
+                "business_error": business_error,
+                "duration_ms": duration_ms,
+                "tokens_input": tokens_input,
+                "tokens_output": tokens_output,
+                "cached_hit_tokens": cached_hit_tokens,
+                "cache_miss_tokens": cache_miss_tokens,
+                "tokens_per_second": tokens_per_second,
+                "token_source": "api" if tokens_input is not None or tokens_output is not None else None,
+                "stream_type": "stream",
+                "first_token_ms": first_token_ms,
+                "original_model": call_state["original_model"],
+                "overridden_model": call_state["overridden_model"],
+                "is_internal_relay": 0,
+                "user_id": flow.metadata.get("user_id"),
+                "api_key_id": flow.metadata.get("api_key_id"),
+                "previous_response_id": call_state.get("previous_response_id"),
+                "full_context": None,
+            })
+            logger.info(
+                "[CODEX_WS_CALL_FINISHED] call_id=%s transport=success business=%s duration_ms=%s",
+                call_state["call_id"],
+                business_status,
+                duration_ms,
+            )
+            websocket_calls.remove(call_state)
+
+    def websocket_end(self, flow):
+        """结束 Codex Responses WebSocket 并保存尚未完成调用的传输状态。"""
+        if not flow.metadata.get("codex_responses_websocket"):
+            return
+        if flow.metadata.get("codex_ws_end_recorded"):
+            return
+        websocket_calls = flow.metadata.get("codex_ws_calls", [])
+        interrupted_calls = len(websocket_calls)
+        close_code = getattr(flow.websocket, "close_code", None) if flow.websocket else None
+        transport_status = "cancelled" if close_code in (1000, 1001) else "failed"
+        transport_error = flow.metadata.get("codex_ws_transport_error")
+        if not transport_error:
+            transport_error = (
+                f"websocket_closed_before_response_completed (close_code={close_code})"
+            )
+        self._record_codex_websocket_transport_failures(
+            flow,
+            websocket_calls,
+            transport_status,
+            transport_error,
+        )
+        flow.metadata.pop("codex_ws_calls", None)
+        flow.metadata["codex_ws_end_recorded"] = True
+        logger.info(
+            "[CODEX_WS_DISCONNECTED] route=%s close_code=%s active_calls=%s",
+            flow.metadata.get("codex_ws_route"),
+            close_code,
+            interrupted_calls,
+        )
+
+    def _record_codex_websocket_transport_failures(
+        self,
+        flow,
+        websocket_calls: list[dict],
+        transport_status: str,
+        transport_error: str,
+    ):
+        """仅按 WebSocket 传输失败或取消状态保存未完成的 Codex 调用。"""
+        for call_state in list(websocket_calls):
+            response_body = "\n".join(call_state.get("response_frames", []))
+            duration_ms = int((time.time() - call_state["start_time"]) * 1000)
+            self._enqueue_call_save({
+                "call_id": call_state["call_id"],
+                "timestamp": call_state["timestamp"],
+                "url": flow.metadata.get("codex_ws_target_url", ""),
+                "method": "GET",
+                "request_headers": call_state["request_headers"],
+                "request_body": call_state["request_body"],
+                "response_headers": call_state["response_headers"],
+                "response_body": response_body,
+                "final_responses_body": None,
+                "call_status": transport_status,
+                "transport_status": transport_status,
+                "transport_error": transport_error,
+                "business_status": None,
+                "business_error": None,
+                "duration_ms": duration_ms,
+                "tokens_input": None,
+                "tokens_output": None,
+                "cached_hit_tokens": None,
+                "cache_miss_tokens": None,
+                "tokens_per_second": None,
+                "token_source": None,
+                "stream_type": "stream",
+                "first_token_ms": call_state.get("first_token_ms"),
+                "original_model": call_state["original_model"],
+                "overridden_model": call_state["overridden_model"],
+                "is_internal_relay": 0,
+                "user_id": flow.metadata.get("user_id"),
+                "api_key_id": flow.metadata.get("api_key_id"),
+                "previous_response_id": call_state.get("previous_response_id"),
+                "full_context": None,
+            })
+            websocket_calls.remove(call_state)
+            logger.info(
+                "[CODEX_WS_CALL_TRANSPORT_END] call_id=%s transport=%s duration_ms=%s",
+                call_state["call_id"],
+                transport_status,
+                duration_ms,
+            )
+
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
+        if flow.metadata.get("codex_responses_websocket"):
+            return
         from src.tokenizer import (
             calculate_tokens,
             extract_cache_miss_tokens,
@@ -3843,7 +4252,23 @@ class LLMRouterAddon:
         self._enqueue_call_save(call_save_payload)
 
     def error(self, flow: http.HTTPFlow):
-        """将 mitmproxy 网络错误转换为项目异常并交给统一保存流程处理。"""
+        """清理 Codex WebSocket 传输失败状态，其他网络错误交给既有统一流程。"""
+        if flow.metadata.get("codex_responses_websocket"):
+            if flow.metadata.get("codex_ws_end_recorded"):
+                return
+            message = str(flow.error) if flow.error else "WebSocket transport failed"
+            transport_status = "cancelled" if message == "Client disconnected." else "failed"
+            websocket_calls = flow.metadata.get("codex_ws_calls", [])
+            self._record_codex_websocket_transport_failures(
+                flow,
+                websocket_calls,
+                transport_status,
+                message,
+            )
+            flow.metadata.pop("codex_ws_calls", None)
+            flow.metadata["codex_ws_transport_error"] = message
+            flow.metadata["codex_ws_end_recorded"] = True
+            return
         try:
             message = str(flow.error) if flow.error else ""
             if message == "Client disconnected.":
