@@ -4082,6 +4082,8 @@ class LLMRouterAddon:
         websocket_calls = flow.metadata.get("codex_ws_calls", [])
         interrupted_calls = len(websocket_calls)
         close_code = getattr(flow.websocket, "close_code", None) if flow.websocket else None
+        closed_by_client = getattr(flow.websocket, "closed_by_client", None) if flow.websocket else None
+        close_reason = getattr(flow.websocket, "close_reason", None) if flow.websocket else None
         transport_status = "cancelled" if close_code in (1000, 1001) else "failed"
         transport_error = flow.metadata.get("codex_ws_transport_error")
         if not transport_error:
@@ -4096,10 +4098,14 @@ class LLMRouterAddon:
         )
         flow.metadata.pop("codex_ws_calls", None)
         flow.metadata["codex_ws_end_recorded"] = True
-        logger.info(
-            "[CODEX_WS_DISCONNECTED] route=%s close_code=%s active_calls=%s",
+        log_method = logger.error if transport_status == "failed" else logger.info
+        log_method(
+            "[CODEX_WS_DISCONNECTED] route=%s close_code=%s closed_by_client=%s close_reason=%s transport_error=%s active_calls=%s",
             flow.metadata.get("codex_ws_route"),
             close_code,
+            closed_by_client,
+            close_reason,
+            transport_error,
             interrupted_calls,
         )
 
@@ -4491,15 +4497,58 @@ class LLMRouterAddon:
 
     def error(self, flow: http.HTTPFlow):
         """将客户端断开或一般网络错误交给共享网络异常处理流程。"""
-        if flow.metadata.get("codex_responses_websocket"):
-            if flow.metadata.get("codex_ws_end_recorded"):
-                return
-        message = str(flow.error) if flow.error else ""
+        raw_flow_error = flow.error
+        raw_flow_error_message = (
+            getattr(raw_flow_error, "msg", None)
+            if raw_flow_error is not None
+            else None
+        )
+        if raw_flow_error_message is None and raw_flow_error is not None:
+            raw_flow_error_message = str(raw_flow_error)
+        raw_flow_error_fields = (
+            vars(raw_flow_error)
+            if raw_flow_error is not None and hasattr(raw_flow_error, "__dict__")
+            else None
+        )
+        logger.error(
+            "[NETWORK_ERROR_RAW] flow_error_type=%s flow_error_message=%s flow_error=%r flow_error_fields=%r",
+            (
+                f"{type(raw_flow_error).__module__}.{type(raw_flow_error).__qualname__}"
+                if raw_flow_error is not None
+                else None
+            ),
+            raw_flow_error_message,
+            raw_flow_error,
+            raw_flow_error_fields,
+        )
+        if (
+            isinstance(raw_flow_error, BaseException)
+            and raw_flow_error.__traceback__ is not None
+        ):
+            logger.error(
+                "[NETWORK_ERROR_RAW_TRACEBACK]",
+                exc_info=(
+                    type(raw_flow_error),
+                    raw_flow_error,
+                    raw_flow_error.__traceback__,
+                ),
+            )
+        if (
+            flow.metadata.get("codex_responses_websocket")
+            and flow.metadata.get("codex_ws_end_recorded")
+        ):
+            return
+        message = raw_flow_error_message or ""
         try:
             if message == "Client disconnected.":
                 raise ClientDisconnectedException(message)
             raise GeneralNetworkException(message)
         except NetworkException as exception:
+            logger.error(
+                "[NETWORK_EXCEPTION_CLASSIFIED] exception_type=%s exception=%s",
+                type(exception).__name__,
+                exception,
+            )
             return self._handle_network_exception(flow, exception)
 
     def _handle_network_exception(
