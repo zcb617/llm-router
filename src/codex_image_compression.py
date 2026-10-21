@@ -18,15 +18,46 @@ _SUPPORTED_DATA_URI_PREFIXES = (
 )
 
 
-def _rewrite_payload_value(value, route, stats):
+def _new_compression_stats(parse_failed=False):
+    """初始化单次 Codex 请求的图片压缩计数和字节统计。"""
+    return {
+        "detected_data_uri_count": 0,  # 检测到的受支持 PNG/JPEG data URI 数。
+        "compressed_count": 0,  # 成功转换为 JPEG 的图片张数。
+        "skipped_count": 0,  # 原始二进制不超过大小上限而跳过的图片张数。
+        "failed_count": 0,  # 解码或压缩失败并保留原值的图片张数。
+        "original_bytes": 0,  # 成功解码的原始 PNG/JPEG 图片字节总数。
+        "jpeg_bytes": 0,  # 成功转换后的 JPEG 二进制字节总数。
+        "parse_failed": parse_failed,  # JSON body 是否因解析失败而原样透传。
+    }
+
+
+def _log_compression_summary(call_id, route, stats):
+    """按调用 ID 输出一次不含图片内容的 Codex 图片压缩结果摘要。"""
+    logger.info(
+        "Codex image compression summary call_id=%s route=%s detected_data_uri_count=%d compressed_count=%d skipped_under_limit_count=%d failed_count=%d parse_failed=%s original_bytes=%d jpeg_bytes=%d",
+        call_id,
+        route,
+        stats["detected_data_uri_count"],
+        stats["compressed_count"],
+        stats["skipped_count"],
+        stats["failed_count"],
+        stats["parse_failed"],
+        stats["original_bytes"],
+        stats["jpeg_bytes"],
+    )
+
+
+def _rewrite_payload_value(value, route, call_id, stats):
     """递归复制 Codex JSON 值，并压缩超过上限的内联 PNG/JPEG 图片。"""
     if isinstance(value, dict):
         return {
-            key: _rewrite_payload_value(item, route, stats)
+            key: _rewrite_payload_value(item, route, call_id, stats)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_rewrite_payload_value(item, route, stats) for item in value]
+        return [
+            _rewrite_payload_value(item, route, call_id, stats) for item in value
+        ]
     if not isinstance(value, str):
         return value
 
@@ -38,9 +69,12 @@ def _rewrite_payload_value(value, route, stats):
     if matched_prefix is None:
         return value
 
+    stats["detected_data_uri_count"] += 1
     try:
         original_bytes = base64.b64decode(value[len(matched_prefix):], validate=True)
+        stats["original_bytes"] += len(original_bytes)
         if len(original_bytes) <= _MAX_IMAGE_BYTES:
+            stats["skipped_count"] += 1
             return value
 
         with Image.open(io.BytesIO(original_bytes)) as source_image:
@@ -76,7 +110,6 @@ def _rewrite_payload_value(value, route, stats):
                     jpeg_bytes = jpeg_buffer.getvalue()
                     if len(jpeg_bytes) <= _MAX_IMAGE_BYTES:
                         stats["compressed_count"] += 1
-                        stats["original_bytes"] += len(original_bytes)
                         stats["jpeg_bytes"] += len(jpeg_bytes)
                         return "data:image/jpeg;base64," + base64.b64encode(
                             jpeg_bytes
@@ -90,55 +123,45 @@ def _rewrite_payload_value(value, route, stats):
                     (resized_width, resized_height), Image.Resampling.LANCZOS
                 )
     except Exception:
+        stats["failed_count"] += 1
         logger.exception(
-            "Codex inline image compression failed; preserving original image (route=%s)",
+            "Codex inline image compression failed; preserving original image (call_id=%s route=%s)",
+            call_id,
             route,
         )
         return value
 
 
-def compress_codex_image_data_uris(payload, route="codex"):
+def compress_codex_image_data_uris(payload, route="codex", call_id=None):
     """压缩 Codex JSON 结构中超过 250000 字节的内联 PNG/JPEG 图片。"""
-    stats = {
-        "compressed_count": 0,  # 成功转换为 JPEG 的图片张数。
-        "original_bytes": 0,  # 成功转换图片的原始二进制总字节数。
-        "jpeg_bytes": 0,  # 成功转换后 JPEG 二进制总字节数。
-    }
-    updated_payload = _rewrite_payload_value(payload, route, stats)
-    if stats["compressed_count"]:
-        logger.info(
-            "Codex inline image compression completed route=%s images=%d original_bytes=%d jpeg_bytes=%d",
-            route,
-            stats["compressed_count"],
-            stats["original_bytes"],
-            stats["jpeg_bytes"],
-        )
+    stats = _new_compression_stats()
+    updated_payload = _rewrite_payload_value(payload, route, call_id, stats)
+    _log_compression_summary(call_id, route, stats)
     return updated_payload, stats
 
 
-def compress_codex_image_json_body(body, route="codex"):
+def compress_codex_image_json_body(body, route="codex", call_id=None):
     """压缩 Codex JSON HTTP body 中的内联图片，并在无转换时原样返回 body。"""
     if not isinstance(body, (str, bytes)):
-        return body, {
-            "compressed_count": 0,  # 成功转换为 JPEG 的图片张数。
-            "original_bytes": 0,  # 成功转换图片的原始二进制总字节数。
-            "jpeg_bytes": 0,  # 成功转换后 JPEG 二进制总字节数。
-        }
+        stats = _new_compression_stats()
+        _log_compression_summary(call_id, route, stats)
+        return body, stats
 
     try:
         payload = json.loads(body)
     except (TypeError, ValueError):
         logger.exception(
-            "Codex JSON body parsing failed; preserving original request body (route=%s)",
+            "Codex JSON body parsing failed; preserving original request body (call_id=%s route=%s)",
+            call_id,
             route,
         )
-        return body, {
-            "compressed_count": 0,  # 成功转换为 JPEG 的图片张数。
-            "original_bytes": 0,  # 成功转换图片的原始二进制总字节数。
-            "jpeg_bytes": 0,  # 成功转换后 JPEG 二进制总字节数。
-        }
+        stats = _new_compression_stats(parse_failed=True)
+        _log_compression_summary(call_id, route, stats)
+        return body, stats
 
-    updated_payload, stats = compress_codex_image_data_uris(payload, route=route)
+    updated_payload, stats = compress_codex_image_data_uris(
+        payload, route=route, call_id=call_id
+    )
     if not stats["compressed_count"]:
         return body, stats
 

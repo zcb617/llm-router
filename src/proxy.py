@@ -1971,10 +1971,12 @@ class LLMRouterAddon:
             flow.request.scheme = urlparse(full_url).scheme
             flow.request.headers["Host"] = host_from_url(full_url)
 
+            captured_req.call_id = str(uuid.uuid4())
             if selected_path == "/v1/responses":
                 compressed_body, compression_stats = compress_codex_image_json_body(
                     flow.request.content or b"",
                     route="codex-http-passthrough",
+                    call_id=captured_req.call_id,
                 )
                 if compression_stats["compressed_count"]:
                     flow.request.content = compressed_body
@@ -2003,7 +2005,6 @@ class LLMRouterAddon:
             captured_req.original_model = model_name
             captured_req.overridden_model = mapping.get("forward_model") or model_name
             captured_req.url = full_url
-            captured_req.call_id = str(uuid.uuid4())
             flow.metadata["call_id"] = captured_req.call_id
             client_request_id = flow.request.headers.get("x-client-request-id") or "-"
             flow.request.headers["X-Llm-Router-Call-Id"] = captured_req.call_id
@@ -2075,6 +2076,7 @@ class LLMRouterAddon:
             compressed_body, _ = compress_codex_image_json_body(
                 captured_req.body,
                 route="codex-http-oauth",
+                call_id=captured_req.call_id,
             )
             prepared = prepare_codex_responses_body(
                 compressed_body,
@@ -3872,6 +3874,7 @@ class LLMRouterAddon:
                 compress_codex_image_data_uris,
                 request_payload,
                 route=compression_route,
+                call_id=call_id,
             )
             previous_response_id = request_payload.get("previous_response_id")
             prompt_cache_key = request_payload.get("prompt_cache_key")
