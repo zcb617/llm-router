@@ -31,6 +31,10 @@ from src.codex_cli_auth import (
     resolve_codex_base_url,
     resolve_codex_outbound_url,
 )
+from src.codex_image_compression import (
+    compress_codex_image_data_uris,
+    compress_codex_image_json_body,
+)
 from src.codex_outbound_client import (
     CodexOutboundError,
     build_outbound_diagnostics,
@@ -1967,6 +1971,14 @@ class LLMRouterAddon:
             flow.request.scheme = urlparse(full_url).scheme
             flow.request.headers["Host"] = host_from_url(full_url)
 
+            if selected_path == "/v1/responses":
+                compressed_body, compression_stats = compress_codex_image_json_body(
+                    flow.request.content or b"",
+                    route="codex-http-passthrough",
+                )
+                if compression_stats["compressed_count"]:
+                    flow.request.content = compressed_body
+
             try:
                 outbound_raw_body = flow.request.raw_content or b""
                 outbound_decoded_body = flow.request.content or b""
@@ -2060,8 +2072,12 @@ class LLMRouterAddon:
                 if legacy_chat
                 else "codex_cli_oauth:responses"
             )
-            prepared = prepare_codex_responses_body(
+            compressed_body, _ = compress_codex_image_json_body(
                 captured_req.body,
+                route="codex-http-oauth",
+            )
+            prepared = prepare_codex_responses_body(
+                compressed_body,
                 forward_model=forward_model,
                 session_id=session_id,
                 thread_id=thread_id,
@@ -3817,7 +3833,7 @@ class LLMRouterAddon:
             flow.metadata.get("codex_ws_target_url"),
         )
 
-    def websocket_message(self, flow):
+    async def websocket_message(self, flow):
         """记录 Codex Responses WebSocket 原始调用帧并透传上下行消息。"""
         if not flow.metadata.get("codex_responses_websocket") or not flow.websocket:
             return
@@ -3848,6 +3864,15 @@ class LLMRouterAddon:
             call_id = str(uuid.uuid4())
             now = time.time()
             request_payload = dict(event)
+            ws_route = flow.metadata.get("codex_ws_route")
+            compression_route = (
+                "codex-ws-oauth" if ws_route == "oauth" else "codex-ws-passthrough"
+            )
+            request_payload, compression_stats = await asyncio.to_thread(
+                compress_codex_image_data_uris,
+                request_payload,
+                route=compression_route,
+            )
             previous_response_id = request_payload.get("previous_response_id")
             prompt_cache_key = request_payload.get("prompt_cache_key")
             if not isinstance(prompt_cache_key, str) or not prompt_cache_key:
@@ -3916,6 +3941,12 @@ class LLMRouterAddon:
                 )
                 request_payload["model"] = call_state["overridden_model"]
                 request_payload["client_metadata"] = client_metadata
+                message.content = json.dumps(
+                    request_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            elif compression_stats["compressed_count"]:
                 message.content = json.dumps(
                     request_payload,
                     ensure_ascii=False,
