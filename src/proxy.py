@@ -49,8 +49,20 @@ from src.stream_relay import (
 logger = logging.getLogger(__name__)
 
 
-class NetworkException(Exception):
+class LLMRouterException(Exception):
+    """路由调用异常共同根类，用于区分网络异常与业务异常。"""
+
+
+class NetworkException(LLMRouterException):
     """网络异常父类，用于统一承载客户端断开和通用网络错误。"""
+
+
+class BusinessException(LLMRouterException):
+    """业务处理异常父类，用于统一判断协议业务状态。"""
+
+
+class ResponseInterruptedException(BusinessException):
+    """Codex Responses 明确报告调用被中断时使用的业务异常类型。"""
 
 
 class ClientDisconnectedException(NetworkException):
@@ -422,6 +434,58 @@ class LLMRouterAddon:
             return default_status, "missing_finish_reason"
         # 未识别协议：无法按协议校验，回退到通用错误关键字判定
         return LLMRouterAddon._infer_call_status(None, body), None
+
+    @staticmethod
+    def _raise_if_codex_websocket_response_interrupted(response_frame: str):
+        """识别 Codex WS 的 interrupted incomplete 事件并转换为业务取消异常。"""
+        try:
+            event = json.loads(response_frame)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(event, dict) or event.get("type") != "response.incomplete":
+            return
+
+        response = event.get("response")
+        if isinstance(response, dict):
+            incomplete_details = response.get("incomplete_details")
+        else:
+            incomplete_details = event.get("incomplete_details")
+        if (
+            isinstance(incomplete_details, dict)
+            and incomplete_details.get("reason") == "interrupted"
+        ):
+            raise ResponseInterruptedException("response_interrupted")
+
+    def _judge_codex_websocket_business(
+        self,
+        flow,
+        response_frames: list[str],
+        *,
+        default_status: str,
+    ) -> tuple[str, Optional[str]]:
+        """按 Codex WS 协议标记判断业务状态，并将业务异常映射为调用状态。"""
+        response_body = "\n".join(response_frames)
+        if not response_body:
+            return default_status, "no_response"
+
+        business_status, business_error = self._judge_business(
+            flow,
+            response_body,
+            "stream",
+            default_status=default_status,
+        )
+        if business_status == "success":
+            return business_status, business_error
+
+        try:
+            for response_frame in response_frames:
+                self._raise_if_codex_websocket_response_interrupted(response_frame)
+        except BusinessException as exception:
+            if isinstance(exception, ResponseInterruptedException):
+                return "cancelled", "response_interrupted"
+            return "failed", str(exception) or "business_error"
+
+        return business_status, business_error
 
     @staticmethod
     def _record_protocol_downstream_return(
@@ -3789,6 +3853,8 @@ class LLMRouterAddon:
                 "call_id": call_id,
                 "timestamp": datetime.now().isoformat(),
                 "start_time": now,
+                # 记录最近一次写入活动状态的时间，供 WebSocket 流活动节流使用。
+                "last_activity_persisted_at": now,
                 "request_body": message_text,
                 "request_headers": flow.metadata.get("codex_ws_client_headers", {}),
                 "response_headers": flow.metadata.get("codex_ws_response_headers", {}),
@@ -3799,6 +3865,30 @@ class LLMRouterAddon:
                 "overridden_model": flow.metadata.get("codex_ws_forward_model", ""),
                 "previous_response_id": previous_response_id,
             }
+
+            try:
+                self.storage.start_call_with_user(
+                    call_id=call_id,
+                    timestamp=call_state["timestamp"],
+                    url=flow.metadata.get("codex_ws_target_url", ""),
+                    method="GET",
+                    request_headers=call_state["request_headers"],
+                    request_body=message_text,
+                    stream_type="stream",
+                    original_model=call_state["original_model"],
+                    overridden_model=call_state["overridden_model"],
+                    user_id=flow.metadata.get("user_id"),
+                    api_key_id=flow.metadata.get("api_key_id"),
+                    previous_response_id=previous_response_id,
+                    last_activity_at=datetime.now().isoformat(),
+                    is_internal_relay=0,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to create in-progress Codex WebSocket call record: call_id=%s",
+                    call_id,
+                    exc_info=True,
+                )
 
             if flow.metadata.get("codex_ws_route") == "oauth":
                 account_id = flow.metadata.get("codex_ws_oauth_account_id", "")
@@ -3868,6 +3958,19 @@ class LLMRouterAddon:
 
         if call_state is None:
             return
+        current_time = time.time()
+        last_persisted_at = call_state.get("last_activity_persisted_at")
+        if (
+            last_persisted_at is not None
+            and current_time - last_persisted_at >= 10
+        ):
+            call_state["last_activity_persisted_at"] = current_time
+            self._enqueue_call_save({
+                "_call_save_operation": "activity",
+                "call_id": call_state["call_id"],
+                "duration_ms": int((current_time - call_state["start_time"]) * 1000),
+                "last_activity_at": datetime.now().isoformat(),
+            })
         if call_state["first_token_ms"] is None and (
             not isinstance(event_type, str)
             or event_type.endswith(".delta")
@@ -3888,10 +3991,9 @@ class LLMRouterAddon:
         }:
             response_body = "\n".join(call_state.get("response_frames", []))
             duration_ms = int((time.time() - call_state["start_time"]) * 1000)
-            business_status, business_error = self._judge_business(
+            business_status, business_error = self._judge_codex_websocket_business(
                 flow,
-                response_body,
-                "stream",
+                call_state.get("response_frames", []),
                 default_status="failed",
             )
             tokens_input = None
@@ -3952,6 +4054,8 @@ class LLMRouterAddon:
                 "api_key_id": flow.metadata.get("api_key_id"),
                 "previous_response_id": call_state.get("previous_response_id"),
                 "full_context": None,
+                "_call_save_operation": "finalize",
+                "last_activity_at": datetime.now().isoformat(),
             })
             logger.info(
                 "[CODEX_WS_CALL_FINISHED] call_id=%s transport=success business=%s duration_ms=%s",
@@ -3997,11 +4101,26 @@ class LLMRouterAddon:
         websocket_calls: list[dict],
         transport_status: str,
         transport_error: str,
+        *,
+        business_default_status: Optional[str] = None,
     ):
         """仅按 WebSocket 传输失败或取消状态保存未完成的 Codex 调用。"""
         for call_state in list(websocket_calls):
-            response_body = "\n".join(call_state.get("response_frames", []))
+            response_frames = call_state.get("response_frames", [])
+            response_body = "\n".join(response_frames)
             duration_ms = int((time.time() - call_state["start_time"]) * 1000)
+            if business_default_status is None:
+                call_status = transport_status
+                business_status = None
+                business_error = None
+            else:
+                business_status, business_error = self._judge_codex_websocket_business(
+                    flow,
+                    response_frames,
+                    default_status=business_default_status,
+                )
+                call_status = business_status
+            last_activity_at = datetime.now().isoformat()
             self._enqueue_call_save({
                 "call_id": call_state["call_id"],
                 "timestamp": call_state["timestamp"],
@@ -4012,11 +4131,11 @@ class LLMRouterAddon:
                 "response_headers": call_state["response_headers"],
                 "response_body": response_body,
                 "final_responses_body": None,
-                "call_status": transport_status,
+                "call_status": call_status,
                 "transport_status": transport_status,
                 "transport_error": transport_error,
-                "business_status": None,
-                "business_error": None,
+                "business_status": business_status,
+                "business_error": business_error,
                 "duration_ms": duration_ms,
                 "tokens_input": None,
                 "tokens_output": None,
@@ -4033,6 +4152,8 @@ class LLMRouterAddon:
                 "api_key_id": flow.metadata.get("api_key_id"),
                 "previous_response_id": call_state.get("previous_response_id"),
                 "full_context": None,
+                "_call_save_operation": "finalize",
+                "last_activity_at": last_activity_at,
             })
             websocket_calls.remove(call_state)
             logger.info(
@@ -4359,25 +4480,12 @@ class LLMRouterAddon:
         self._enqueue_call_save(call_save_payload)
 
     def error(self, flow: http.HTTPFlow):
-        """清理 Codex WebSocket 传输失败状态，其他网络错误交给既有统一流程。"""
+        """将客户端断开或一般网络错误交给共享网络异常处理流程。"""
         if flow.metadata.get("codex_responses_websocket"):
             if flow.metadata.get("codex_ws_end_recorded"):
                 return
-            message = str(flow.error) if flow.error else "WebSocket transport failed"
-            transport_status = "cancelled" if message == "Client disconnected." else "failed"
-            websocket_calls = flow.metadata.get("codex_ws_calls", [])
-            self._record_codex_websocket_transport_failures(
-                flow,
-                websocket_calls,
-                transport_status,
-                message,
-            )
-            flow.metadata.pop("codex_ws_calls", None)
-            flow.metadata["codex_ws_transport_error"] = message
-            flow.metadata["codex_ws_end_recorded"] = True
-            return
+        message = str(flow.error) if flow.error else ""
         try:
-            message = str(flow.error) if flow.error else ""
             if message == "Client disconnected.":
                 raise ClientDisconnectedException(message)
             raise GeneralNetworkException(message)
@@ -4393,6 +4501,21 @@ class LLMRouterAddon:
         is_client_disconnected = isinstance(exception, ClientDisconnectedException)
         default_status = "cancelled" if is_client_disconnected else "failed"
         transport_status = default_status
+        if flow.metadata.get("codex_responses_websocket"):
+            if flow.metadata.get("codex_ws_end_recorded"):
+                return
+            websocket_calls = flow.metadata.get("codex_ws_calls", [])
+            self._record_codex_websocket_transport_failures(
+                flow,
+                websocket_calls,
+                transport_status,
+                str(exception),
+                business_default_status=default_status,
+            )
+            flow.metadata.pop("codex_ws_calls", None)
+            flow.metadata["codex_ws_transport_error"] = str(exception)
+            flow.metadata["codex_ws_end_recorded"] = True
+            return
         # 诊断日志：记录所有错误场景，无论是否多上游
         captured_req = self._pop_pending_request(flow)
         if captured_req is not None:

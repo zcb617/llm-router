@@ -864,6 +864,191 @@ def test_record_protocol_downstream_return_does_not_count_empty_eof_as_chunk():
     assert diagnostics["returned_bytes"] == 0
 
 
+def _make_codex_websocket_test_context():
+    """构造可捕获 Codex WS 起始记录和异步终态 payload 的测试上下文。"""
+    addon = _make_addon_for_route_tests()
+    started_calls = []
+    saved_payloads = []
+    addon._storage = SimpleNamespace(
+        start_call_with_user=lambda **payload: started_calls.append(payload)
+    )
+    addon._enqueue_call_save = saved_payloads.append
+    flow = SimpleNamespace(
+        metadata={
+            "codex_responses_websocket": True,
+            "codex_response_protocol": "responses",
+            "codex_ws_route": "passthrough",
+            "codex_ws_target_url": "wss://codex.example/v1/responses",
+            "codex_ws_client_headers": {"Authorization": "Bearer test"},
+            "codex_ws_response_headers": {"Upgrade": "websocket"},
+            "codex_ws_original_model": "gpt-test",
+            "codex_ws_forward_model": "gpt-test-forward",
+            "user_id": 9,
+            "api_key_id": 12,
+            "codex_ws_calls": [],
+        },
+        error=None,
+        websocket=SimpleNamespace(messages=[]),
+    )
+    return addon, flow, started_calls, saved_payloads
+
+
+def _send_codex_websocket_test_frame(addon, flow, payload, *, from_client):
+    """将一帧 Codex WS 测试消息交给代理现有 WebSocket 处理入口。"""
+    content = payload if isinstance(payload, str) else json.dumps(payload)
+    flow.websocket.messages = [
+        SimpleNamespace(content=content.encode("utf-8"), from_client=from_client)
+    ]
+    addon.websocket_message(flow)
+
+
+def test_codex_websocket_interrupted_incomplete_finalizes_as_cancelled():
+    """验证 interrupted incomplete 保持传输成功并将业务调用标记为取消。"""
+    addon, flow, started_calls, saved_payloads = _make_codex_websocket_test_context()
+    request_frame = {
+        "type": "response.create",
+        "model": "gpt-test",
+        "previous_response_id": "resp_previous",
+    }
+    _send_codex_websocket_test_frame(addon, flow, request_frame, from_client=True)
+    _send_codex_websocket_test_frame(
+        addon,
+        flow,
+        {
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_current",
+                "incomplete_details": {"reason": "interrupted"},
+            },
+        },
+        from_client=False,
+    )
+
+    assert started_calls[0]["request_body"] == json.dumps(request_frame)
+    assert started_calls[0]["last_activity_at"]
+    assert saved_payloads[0]["call_status"] == "cancelled"
+    assert saved_payloads[0]["business_status"] == "cancelled"
+    assert saved_payloads[0]["business_error"] == "response_interrupted"
+    assert saved_payloads[0]["transport_status"] == "success"
+    assert saved_payloads[0]["_call_save_operation"] == "finalize"
+    assert saved_payloads[0]["last_activity_at"]
+
+
+@pytest.mark.parametrize(
+    ("terminal_event", "expected_status"),
+    [
+        (
+            {
+                "type": "response.incomplete",
+                "response": {"id": "resp_current", "incomplete_details": {"reason": "max_output_tokens"}},
+            },
+            "failed",
+        ),
+        ({"type": "response.failed", "response": {"id": "resp_current"}}, "failed"),
+        ({"type": "error", "error": {"message": "upstream rejected request"}}, "failed"),
+        ({"type": "response.completed", "response": {"id": "resp_current"}}, "success"),
+    ],
+)
+def test_codex_websocket_terminal_events_keep_existing_business_status(
+    terminal_event,
+    expected_status,
+):
+    """验证非 interrupted incomplete、failed、error 和 completed 保持既有判定。"""
+    addon, flow, _started_calls, saved_payloads = _make_codex_websocket_test_context()
+    _send_codex_websocket_test_frame(
+        addon,
+        flow,
+        {"type": "response.create", "model": "gpt-test"},
+        from_client=True,
+    )
+    _send_codex_websocket_test_frame(
+        addon,
+        flow,
+        terminal_event,
+        from_client=False,
+    )
+
+    assert saved_payloads[0]["call_status"] == expected_status
+    assert saved_payloads[0]["business_status"] == expected_status
+    assert saved_payloads[0]["transport_status"] == "success"
+    assert saved_payloads[0]["_call_save_operation"] == "finalize"
+
+
+def test_codex_websocket_activity_is_persisted_after_ten_seconds():
+    """验证 response.create 建立进行中记录，后续服务端帧按十秒节流更新活动。"""
+    addon, flow, started_calls, saved_payloads = _make_codex_websocket_test_context()
+    _send_codex_websocket_test_frame(
+        addon,
+        flow,
+        {"type": "response.create", "model": "gpt-test"},
+        from_client=True,
+    )
+    call_state = flow.metadata["codex_ws_calls"][0]
+    call_state["last_activity_persisted_at"] = time.time() - 10
+
+    _send_codex_websocket_test_frame(
+        addon,
+        flow,
+        {"type": "response.created", "response": {"id": "resp_current"}},
+        from_client=False,
+    )
+
+    assert started_calls[0]["last_activity_at"]
+    assert saved_payloads[0]["_call_save_operation"] == "activity"
+    assert saved_payloads[0]["call_id"] == call_state["call_id"]
+    assert saved_payloads[0]["last_activity_at"]
+
+
+@pytest.mark.parametrize(
+    ("error_message", "expected_status"),
+    [("Client disconnected.", "cancelled"), ("upstream reset", "failed")],
+)
+def test_codex_websocket_error_uses_shared_network_statuses(error_message, expected_status):
+    """验证 WS 客户端断开和一般网络错误经共享处理器记录正确状态。"""
+    addon, flow, _started_calls, saved_payloads = _make_codex_websocket_test_context()
+    _send_codex_websocket_test_frame(
+        addon,
+        flow,
+        {"type": "response.create", "model": "gpt-test"},
+        from_client=True,
+    )
+    flow.error = error_message
+
+    addon.error(flow)
+
+    assert saved_payloads[0]["call_status"] == expected_status
+    assert saved_payloads[0]["business_status"] == expected_status
+    assert saved_payloads[0]["business_error"] == "no_response"
+    assert saved_payloads[0]["transport_status"] == expected_status
+    assert saved_payloads[0]["transport_error"] == error_message
+    assert saved_payloads[0]["_call_save_operation"] == "finalize"
+    assert saved_payloads[0]["last_activity_at"]
+    assert flow.metadata["codex_ws_end_recorded"] is True
+
+
+def test_codex_websocket_network_error_preserves_completed_business_status():
+    """验证网络终态保留异常传输状态，同时 completed 业务标记优先成功。"""
+    addon, flow, _started_calls, saved_payloads = _make_codex_websocket_test_context()
+    _send_codex_websocket_test_frame(
+        addon,
+        flow,
+        {"type": "response.create", "model": "gpt-test"},
+        from_client=True,
+    )
+    flow.metadata["codex_ws_calls"][0]["response_frames"].append(
+        json.dumps({"type": "response.completed", "response": {"id": "resp_current"}})
+    )
+    flow.error = "upstream reset"
+
+    addon.error(flow)
+
+    assert saved_payloads[0]["call_status"] == "success"
+    assert saved_payloads[0]["business_status"] == "success"
+    assert saved_payloads[0]["business_error"] is None
+    assert saved_payloads[0]["transport_status"] == "failed"
+    assert saved_payloads[0]["_call_save_operation"] == "finalize"
+
+
 def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():
     addon = _make_addon_for_route_tests()
     addon._codex_bridge_url = "http://127.0.0.1:45678"
