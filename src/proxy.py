@@ -938,6 +938,80 @@ class LLMRouterAddon:
         request.url = parsed._replace(path=remaining).geturl()
         return candidate
 
+    def _record_codex_ws_ingress_fallback(
+        self, flow: http.HTTPFlow, model: str, missing_headers: list[str]
+    ) -> bytes:
+        """记录入口握手头缺失导致的 Codex WebSocket 本地 426 回退调用。"""
+        call_id = str(uuid.uuid4())
+        timestamp = datetime.now().isoformat()
+        missing_header_text = ",".join(missing_headers)
+        error_message = (
+            "Codex Responses WebSocket ingress header stripped; "
+            "upstream not attempted. Missing headers: "
+            f"{missing_header_text}"
+        )
+        response_body = json.dumps(
+            {
+                "error": error_message,
+                "status": 426,
+                "missing_headers": missing_headers,
+            },
+            ensure_ascii=False,
+        )
+        flow.metadata["call_id"] = call_id
+
+        logger.warning(
+            "[CODEX_WS_INGRESS_FALLBACK] call_id=%s model=%s missing_headers=%s "
+            "status=426 upstream_attempted=false",
+            call_id,
+            model,
+            missing_header_text,
+        )
+        self._enqueue_call_save(
+            {
+                "call_id": call_id,
+                "timestamp": timestamp,
+                "url": "/v1/responses",
+                "method": "GET",
+                "request_headers": {},
+                "request_body": "",
+                "response_headers": {
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                "response_body": response_body,
+                "final_responses_body": None,
+                "call_status": "failed",
+                "transport_status": "failed",
+                "transport_error": error_message,
+                "business_status": "failed",
+                "business_error": error_message,
+                "duration_ms": 0,
+                "tokens_input": 0,
+                "tokens_output": 0,
+                "cached_hit_tokens": 0,
+                "cache_miss_tokens": 0,
+                "tokens_per_second": None,
+                "token_source": None,
+                "stream_type": "non_stream",
+                "first_token_ms": None,
+                "original_model": model,
+                "overridden_model": model,
+                "is_internal_relay": 0,
+                "user_id": flow.metadata.get("user_id"),
+                "api_key_id": flow.metadata.get("api_key_id"),
+                "previous_response_id": None,
+                "full_context": None,
+                "outbound_diagnostics": {
+                    "transport": "responses_websocket",
+                    "phase": "ingress",
+                    "missing_headers": missing_headers,
+                    "response_status": 426,
+                    "upstream_attempted": False,
+                },
+            }
+        )
+        return response_body.encode("utf-8")
+
     async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
         url_api_key = self._extract_url_api_key(flow.request)
@@ -1058,17 +1132,35 @@ class LLMRouterAddon:
             ),
             "",
         )
-        is_codex_responses_websocket = (
+        has_codex_responses_websocket_intent = (
             flow.request.method == "GET"
             and request_path == "/v1/responses"
-            and flow.request.headers.get("sec-websocket-key")
-            and flow.request.headers.get("upgrade", "").lower() == "websocket"
             and handshake_model.lower().startswith("gpt")
+        )
+        connection_tokens = {
+            token.strip().lower()
+            for token in flow.request.headers.get("connection", "").split(",")
+            if token.strip()
+        }
+        missing_websocket_headers = []
+        if has_codex_responses_websocket_intent:
+            if not str(flow.request.headers.get("sec-websocket-key", "")).strip():
+                missing_websocket_headers.append("Sec-WebSocket-Key")
+            if flow.request.headers.get("upgrade", "").strip().lower() != "websocket":
+                missing_websocket_headers.append("Upgrade")
+            if "upgrade" not in connection_tokens:
+                missing_websocket_headers.append("Connection")
+        is_codex_responses_websocket = (
+            has_codex_responses_websocket_intent and not missing_websocket_headers
         )
 
         # === LLM 转发请求：验证 API Key ===
         request_body = (flow.request.content or b"").decode("utf-8", errors="replace")
-        request_model = handshake_model if is_codex_responses_websocket else self._extract_model(request_body)
+        request_model = (
+            handshake_model
+            if has_codex_responses_websocket_intent
+            else self._extract_model(request_body)
+        )
         codex_passthrough = (
             bool(flow.request.headers.get("chatgpt-account-id"))
             and isinstance(request_model, str)
@@ -1104,6 +1196,21 @@ class LLMRouterAddon:
             # 存储用户信息到 flow.metadata，供 response() 使用
             flow.metadata["user_id"] = key_info["user_id"]
             flow.metadata["api_key_id"] = key_info["id"]
+
+        if has_codex_responses_websocket_intent and missing_websocket_headers:
+            response_body = self._record_codex_ws_ingress_fallback(
+                flow, handshake_model, missing_websocket_headers
+            )
+            flow.response = http.Response.make(
+                426,
+                response_body,
+                {
+                    # 向 Codex 声明本地回退响应采用 JSON 格式。
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+            )
+            flow.metadata["local_response"] = True
+            return
 
         if is_codex_responses_websocket:
             mapping, is_default = self._match_model(handshake_model)
