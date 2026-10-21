@@ -1898,12 +1898,17 @@ def resolve_codex_outbound_url(
     base_url: str | None = None,
     path: str = "/v1/responses",
 ) -> str:
-    """Resolve the codex-cli oauth URL; its downstream protocol is Responses."""
+    """解析 Codex OAuth 上游 URL，并按业务路径转发图片或 Responses 请求。"""
     base = (base_url or resolve_codex_base_url()).rstrip("/")
     for known_endpoint in ("/chat/completions", "/responses"):
         if base.endswith(known_endpoint):
             base = base[: -len(known_endpoint)]
             break
+    normalized_path = urlparse(path or "").path.rstrip("/").lower()
+    if normalized_path in ("/images/generations", "/v1/images/generations"):
+        return f"{base}/images/generations"
+    if normalized_path in ("/images/edits", "/v1/images/edits"):
+        return f"{base}/images/edits"
     return f"{base}/responses"
 
 

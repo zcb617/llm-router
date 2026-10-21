@@ -1584,9 +1584,18 @@ class LLMRouterAddon:
             flow.metadata["local_response"] = True
 
     def _forward_codex_passthrough(self, flow, mapping, captured_req, model_name):
-        """处理带 chatgpt-account-id 的 Codex 直连请求，保留入站 Responses 请求原文。"""
+        """处理带 chatgpt-account-id 的 Codex 直连请求，并按入站路径转发 Responses 或图片请求。"""
         try:
-            full_url = resolve_codex_outbound_url(self._resolve_target_base_url(mapping))
+            inbound_path = urlparse(captured_req.url or "").path.rstrip("/").lower()
+            if inbound_path in ("/v1/images/generations", "/images/generations"):
+                selected_path = "/images/generations"
+            elif inbound_path in ("/v1/images/edits", "/images/edits"):
+                selected_path = "/images/edits"
+            else:
+                selected_path = "/v1/responses"
+            full_url = resolve_codex_outbound_url(
+                self._resolve_target_base_url(mapping), selected_path
+            )
 
             def build_packet_diagnostic(label, method, url, headers, raw_body, decoded_body):
                 """构造 Codex 直连请求的脱敏包特征，供入站和出站日志对比使用。"""
