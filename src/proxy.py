@@ -367,6 +367,35 @@ class LLMRouterAddon:
         """
         if not body:
             return default_status, "empty_body"
+        if flow.metadata.get("codex_endpoint_kind") == "image":
+            response = getattr(flow, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code is None:
+                return default_status, "missing_http_status"
+            if not 200 <= status_code < 300:
+                return default_status, "upstream_http_error"
+            try:
+                image_response = json.loads(body)
+            except (TypeError, ValueError):
+                return default_status, "invalid_image_response_json"
+            if not isinstance(image_response, dict):
+                return default_status, "missing_image_data"
+            if image_response.get("error") is not None:
+                return default_status, "upstream_error"
+            image_items = image_response.get("data")
+            if not isinstance(image_items, list) or not image_items:
+                return default_status, "missing_image_data"
+            has_image_result = any(
+                isinstance(item, dict)
+                and any(
+                    isinstance(item.get(field), str) and item[field].strip()
+                    for field in ("b64_json", "url")
+                )
+                for item in image_items
+            )
+            if not has_image_result:
+                return default_status, "missing_image_data"
+            return "success", None
         protocol = LLMRouterAddon._detect_business_protocol(flow)
         if protocol == "anthropic":
             # 流式看 message_stop 事件；非流式完整 JSON 看 stop_reason 字段
@@ -1593,6 +1622,11 @@ class LLMRouterAddon:
                 selected_path = "/images/edits"
             else:
                 selected_path = "/v1/responses"
+            flow.metadata["codex_endpoint_kind"] = (
+                "image"
+                if selected_path in ("/images/generations", "/images/edits")
+                else "responses"
+            )
             full_url = resolve_codex_outbound_url(
                 self._resolve_target_base_url(mapping), selected_path
             )
