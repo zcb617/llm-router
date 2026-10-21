@@ -606,6 +606,7 @@
         <div class="grid grid-cols-2 gap-4 text-sm">
           <div><span class="text-zinc-500">调用ID:</span> <code id="dCallId" class="ml-1 font-mono"></code></div>
           <div><span class="text-zinc-500">时间:</span> <span id="dTimestamp" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">传输:</span> <span id="dTransport" class="ml-1"></span></div>
           <div><span class="text-zinc-500">方法:</span> <span id="dMethod" class="ml-1"></span></div>
           <div><span class="text-zinc-500">状态:</span> <span id="dStatus" class="ml-1"></span></div>
           <div><span class="text-zinc-500">URL:</span> <span id="dUrl" class="ml-1 break-all"></span></div>
@@ -1109,7 +1110,7 @@ function switchPage(page) {
 const COLUMNS = [
   { key: 'call_id', label: '调用ID', default: true, minWidth: '180px' },
   { key: 'timestamp', label: '时间', default: true, minWidth: '165px' },
-  { key: 'method', label: '方法', default: true, minWidth: '60px', width: '60px' },
+  { key: 'method', label: '方法/传输', default: true, minWidth: '80px', width: '80px' },
   { key: 'call_status', label: '状态', default: true, minWidth: '80px', width: '80px' },
   { key: 'url', label: 'URL', default: true, minWidth: '200px' },
   { key: 'original_model', label: '原始模型', default: true, minWidth: '140px' },
@@ -1398,6 +1399,7 @@ function renderHeader() {
   });
 }
 
+// 按调用记录字段渲染日志列表，并将 WebSocket 传输显示为 WS。
 function renderTable(data) {
   const tbody = document.getElementById('tableBody');
   tbody.innerHTML = '';
@@ -1412,6 +1414,7 @@ function renderTable(data) {
       td.style.width = col.width;
       td.style.minWidth = col.width;
       let val = row[col.key] ?? '';
+      if (col.key === 'method' && row.transport_type === 'websocket') val = 'WS';
       if ((col.key === 'timestamp' || col.key === 'last_activity_at') && val) {
         try {
           const d = new Date(val);
@@ -1507,7 +1510,7 @@ async function loadLogsData(paginationMode = 'offset', cursorDirection = '', cur
   }
 }
 
-// 按数据库记录 ID 加载调用日志完整详情并展示请求与响应内容
+// 按数据库记录 ID 加载调用详情并展示传输类型、真实方法和请求响应内容。
 async function showDetail(row) {
   try {
     if (!row || row.id == null || row.id === '') throw new Error('缺少调用 ID');
@@ -1519,6 +1522,7 @@ async function showDetail(row) {
     const detail = data;
     document.getElementById('dCallId').textContent = detail.call_id || 'N/A';
     document.getElementById('dTimestamp').textContent = detail.timestamp || '';
+    document.getElementById('dTransport').textContent = detail.transport_type === 'websocket' ? 'WebSocket' : (detail.transport_type === 'http' ? 'HTTP' : '-');
     document.getElementById('dMethod').textContent = detail.method || '';
     document.getElementById('dStatus').textContent = detail.call_status === 'failed' ? '失败' : (detail.call_status === 'success' ? '成功' : (detail.call_status === 'in_progress' ? '进行中' : (detail.call_status === 'cancelled' ? '已取消' : '-')));
     document.getElementById('dUrl').textContent = detail.url || '';

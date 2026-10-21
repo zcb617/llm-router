@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CURRENT_VERSION = "1.2.3"
+CURRENT_VERSION = "1.2.4"
 
 
 def get_pg_conn(config):
@@ -106,6 +106,8 @@ PG_TABLES = [
             url TEXT NOT NULL,
             is_internal_relay INTEGER NOT NULL DEFAULT 0,
             method TEXT,
+            -- 业务传输类型区分 HTTP 与 WebSocket。
+            transport_type TEXT,
             request_headers JSON,
             request_body TEXT,
             response_headers JSON,
@@ -273,6 +275,8 @@ SQLITE_TABLES = [
             url TEXT NOT NULL,
             is_internal_relay INTEGER NOT NULL DEFAULT 0,
             method TEXT,
+            -- 业务传输类型区分 HTTP 与 WebSocket。
+            transport_type TEXT,
             request_headers TEXT,
             request_body TEXT,
             response_headers TEXT,
@@ -1126,6 +1130,22 @@ def run_v123_sqlite(conn):
     _sqlite_add_column(conn, "llm_calls", "business_error", "TEXT")
 
 
+def run_v124_pg(conn):
+    """执行 v1.2.4 升级：为调用记录增加 HTTP/WebSocket 传输类型（PostgreSQL）。
+
+    只加列且保持历史记录为 NULL，不回填历史数据。
+    """
+    _pg_add_column(conn, "llm_calls", "transport_type", "TEXT")
+
+
+def run_v124_sqlite(conn):
+    """执行 v1.2.4 升级：为调用记录增加 HTTP/WebSocket 传输类型（SQLite）。
+
+    只加列且保持历史记录为 NULL，不回填历史数据。
+    """
+    _sqlite_add_column(conn, "llm_calls", "transport_type", "TEXT")
+
+
 def main():
     print("=" * 60)
     print("LLM Router — Database Initialization")
@@ -1156,7 +1176,7 @@ def main():
         print(f"\n[v{CURRENT_VERSION}] 空库，执行完整初始化...")
     elif version == CURRENT_VERSION:
         print(f"\n[v{CURRENT_VERSION}] 数据库版本已是最新，检查当前分支新增字段...")
-    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1"):
+    elif version in ("1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1", "1.2.2", "1.2.3"):
         print(f"\n[v{CURRENT_VERSION}] 版本 {version} -> {CURRENT_VERSION}，执行升级...")
     else:
         conn.close()
@@ -1262,6 +1282,12 @@ def main():
             run_v123_pg(conn)
         else:
             run_v123_sqlite(conn)
+    if version in (None, "1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6", "1.1.7", "1.1.8", "1.1.9", "1.2.0", "1.2.1", "1.2.2", "1.2.3", CURRENT_VERSION):
+        print("\n[v1.2.4] 检查/补齐调用记录传输类型...")
+        if is_pg:
+            run_v124_pg(conn)
+        else:
+            run_v124_sqlite(conn)
     # 写入版本
     if is_pg:
         set_version_pg(conn, CURRENT_VERSION)

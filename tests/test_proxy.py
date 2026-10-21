@@ -925,7 +925,11 @@ def test_codex_websocket_interrupted_incomplete_finalizes_as_cancelled():
     )
 
     assert started_calls[0]["request_body"] == json.dumps(request_frame)
+    assert started_calls[0]["method"] == "GET"
+    assert started_calls[0]["transport_type"] == "websocket"
     assert started_calls[0]["last_activity_at"]
+    assert saved_payloads[0]["method"] == "GET"
+    assert saved_payloads[0]["transport_type"] == "websocket"
     assert saved_payloads[0]["call_status"] == "cancelled"
     assert saved_payloads[0]["business_status"] == "cancelled"
     assert saved_payloads[0]["business_error"] == "response_interrupted"
@@ -969,6 +973,8 @@ def test_codex_websocket_terminal_events_keep_existing_business_status(
     )
 
     assert saved_payloads[0]["call_status"] == expected_status
+    assert saved_payloads[0]["method"] == "GET"
+    assert saved_payloads[0]["transport_type"] == "websocket"
     assert saved_payloads[0]["business_status"] == expected_status
     assert saved_payloads[0]["transport_status"] == "success"
     assert saved_payloads[0]["_call_save_operation"] == "finalize"
@@ -1017,6 +1023,8 @@ def test_codex_websocket_error_uses_shared_network_statuses(error_message, expec
     addon.error(flow)
 
     assert saved_payloads[0]["call_status"] == expected_status
+    assert saved_payloads[0]["method"] == "GET"
+    assert saved_payloads[0]["transport_type"] == "websocket"
     assert saved_payloads[0]["business_status"] == expected_status
     assert saved_payloads[0]["business_error"] == "no_response"
     assert saved_payloads[0]["transport_status"] == expected_status
@@ -1043,10 +1051,25 @@ def test_codex_websocket_network_error_preserves_completed_business_status():
     addon.error(flow)
 
     assert saved_payloads[0]["call_status"] == "success"
+    assert saved_payloads[0]["method"] == "GET"
+    assert saved_payloads[0]["transport_type"] == "websocket"
     assert saved_payloads[0]["business_status"] == "success"
     assert saved_payloads[0]["business_error"] is None
     assert saved_payloads[0]["transport_status"] == "failed"
     assert saved_payloads[0]["_call_save_operation"] == "finalize"
+
+
+def test_codex_websocket_ingress_fallback_records_transport_type():
+    """验证识别到 Codex WS 意图但握手头缺失时按 WebSocket 记录本地 426。"""
+    addon = _make_addon_for_route_tests()
+    saved_payloads = []
+    addon._enqueue_call_save = saved_payloads.append
+    flow = SimpleNamespace(metadata={})
+
+    addon._record_codex_ws_ingress_fallback(flow, "gpt-test", ["Upgrade"])
+
+    assert saved_payloads[0]["method"] == "GET"
+    assert saved_payloads[0]["transport_type"] == "websocket"
 
 
 def test_apply_codex_route_rewrites_to_loopback_bridge_without_leaking_token():
@@ -1325,6 +1348,171 @@ def test_load_model_configs_filters_inactive_upstreams_with_real_sqlite_storage(
     assert "single-active" in addon._model_cache
     assert "multi-model" in addon._model_cache
     assert [route["upstream_id"] for route in addon._model_cache["multi-model"]["routes"]] == [2]
+    storage.close()
+
+
+def test_sqlite_transport_type_migration_storage_and_calls_api(tmp_path, monkeypatch):
+    """验证旧 SQLite 调用表迁移、传输方式读写默认值和调用 API 返回字段。"""
+    import sqlite3
+
+    from scripts.init_database import SQLITE_TABLES, run_v124_sqlite
+    from src.storage import CallStorage
+
+    db_path = tmp_path / "router.db"
+    llm_calls_sql = dict(SQLITE_TABLES)["llm_calls"]
+    llm_calls_sql = llm_calls_sql.replace(
+        "            -- 业务传输类型区分 HTTP 与 WebSocket。\n", ""
+    ).replace("            transport_type TEXT,\n", "")
+    conn = sqlite3.connect(db_path)
+    conn.execute(llm_calls_sql)
+    conn.execute(
+        "INSERT INTO llm_calls (call_id, timestamp, url, method) VALUES (?, ?, ?, ?)",
+        ("legacy-call", "2026-10-21T00:00:00", "/v1/chat/completions", "POST"),
+    )
+    run_v124_sqlite(conn)
+    legacy_transport_type = conn.execute(
+        "SELECT transport_type FROM llm_calls WHERE call_id = ?", ("legacy-call",)
+    ).fetchone()[0]
+    conn.commit()
+    conn.close()
+    assert legacy_transport_type is None
+
+    storage = CallStorage(str(db_path))
+
+    storage.start_call_with_user(
+        call_id="websocket-call",
+        timestamp="2026-10-21T00:01:00",
+        url="wss://codex.example/v1/responses",
+        method="GET",
+        request_headers={},
+        request_body='{"type":"response.create"}',
+        stream_type="stream",
+        original_model="gpt-test",
+        overridden_model="gpt-test",
+        user_id=None,
+        api_key_id=None,
+        previous_response_id=None,
+        last_activity_at="2026-10-21T00:01:00",
+        transport_type="websocket",
+    )
+    storage.finalize_call_with_user(
+        call_id="websocket-call",
+        timestamp="2026-10-21T00:01:00",
+        url="wss://codex.example/v1/responses",
+        method="GET",
+        request_headers={},
+        request_body='{"type":"response.create"}',
+        response_headers={},
+        response_body='{"type":"response.completed"}',
+        duration_ms=100,
+        tokens_input=1,
+        tokens_output=2,
+        token_source="api",
+        stream_type="stream",
+        original_model="gpt-test",
+        overridden_model="gpt-test",
+        transport_type="websocket",
+    )
+    storage.save_call_with_user(
+        call_id="http-save-call",
+        timestamp="2026-10-21T00:02:00",
+        url="/v1/chat/completions",
+        method="POST",
+        request_headers={},
+        request_body="{}",
+        response_headers={},
+        response_body="{}",
+        duration_ms=5,
+        tokens_input=0,
+        tokens_output=0,
+        token_source="api",
+    )
+    storage.start_call_with_user(
+        call_id="http-start-call",
+        timestamp="2026-10-21T00:03:00",
+        url="/v1/chat/completions",
+        method="POST",
+        request_headers={},
+        request_body="{}",
+        stream_type="stream",
+        original_model="gpt-test",
+        overridden_model="gpt-test",
+        user_id=None,
+        api_key_id=None,
+        previous_response_id=None,
+        last_activity_at="2026-10-21T00:03:00",
+    )
+
+    conn = sqlite3.connect(db_path)
+    round_trip = conn.execute(
+        "SELECT method, transport_type FROM llm_calls WHERE call_id = ?",
+        ("websocket-call",),
+    ).fetchone()
+    default_types = conn.execute(
+        "SELECT call_id, method, transport_type FROM llm_calls WHERE call_id IN (?, ?) ORDER BY call_id",
+        ("http-save-call", "http-start-call"),
+    ).fetchall()
+    conn.close()
+    assert round_trip == ("GET", "websocket")
+    assert default_types == [
+        ("http-save-call", "POST", "http"),
+        ("http-start-call", "POST", "http"),
+    ]
+
+    addon = _make_addon_for_route_tests()
+    addon._storage = storage
+    addon._external_storage = None
+    addon.config = SimpleNamespace(
+        database=SimpleNamespace(postgresql=False, path=str(db_path))
+    )
+
+    def handle_unmatched_console_api(*_args, **_kwargs):
+        """将调用日志 API 请求交回代理本地 API 处理。"""
+        return False
+
+    def return_no_authenticated_user(_token):
+        """模拟无登录令牌的本地调用日志 API 请求。"""
+        return None
+
+    console_api_stub = types.ModuleType("src.console_api")
+    console_api_stub.handle_console_api = handle_unmatched_console_api
+    auth_stub = types.ModuleType("src.auth")
+    auth_stub.verify_jwt_token = return_no_authenticated_user
+    monkeypatch.setitem(sys.modules, "src.console_api", console_api_stub)
+    monkeypatch.setitem(sys.modules, "src.auth", auth_stub)
+    list_flow = SimpleNamespace(
+        metadata={},
+        request=SimpleNamespace(
+            path="/api/calls",
+            query={},
+            headers={"Authorization": ""},
+        ),
+    )
+    addon._handle_local_api(list_flow)
+    list_response = json.loads(list_flow.response["content"])
+    websocket_row = next(
+        row for row in list_response["calls"] if row["call_id"] == "websocket-call"
+    )
+    assert websocket_row["method"] == "GET"
+    assert websocket_row["transport_type"] == "websocket"
+    http_row = next(
+        row for row in list_response["calls"] if row["call_id"] == "http-save-call"
+    )
+    assert http_row["method"] == "POST"
+    assert http_row["transport_type"] == "http"
+
+    detail_flow = SimpleNamespace(
+        metadata={},
+        request=SimpleNamespace(
+            path=f"/api/calls/{websocket_row['id']}",
+            query={},
+            headers={"Authorization": ""},
+        ),
+    )
+    addon._handle_local_api(detail_flow)
+    detail_response = json.loads(detail_flow.response["content"])
+    assert detail_response["method"] == "GET"
+    assert detail_response["transport_type"] == "websocket"
     storage.close()
 
 

@@ -1037,6 +1037,8 @@ class LLMRouterAddon:
                 "timestamp": timestamp,
                 "url": "/v1/responses",
                 "method": "GET",
+                # 单独标记识别到的 WebSocket 握手意图，method 保留真实 GET。
+                "transport_type": "websocket",
                 "request_headers": {},
                 "request_body": "",
                 "response_headers": {
@@ -3467,7 +3469,9 @@ class LLMRouterAddon:
                 columns_param = params.get("columns")
                 # 调用日志列表允许返回的轻量展示字段白名单，避免查询和响应携带日志大字段
                 lightweight_columns = [
-                    "id", "call_id", "timestamp", "method", "call_status", "url",
+                    "id", "call_id", "timestamp", "method",
+                    # 供调用日志列表区分 WebSocket 与 HTTP 传输类型。
+                    "transport_type", "call_status", "url",
                     "original_model", "overridden_model", "duration_ms", "last_activity_at",
                     "first_token_ms", "stream_type", "tokens_input", "tokens_output",
                     "cached_hit_tokens", "cache_miss_tokens", "tokens_per_second"
@@ -3875,6 +3879,8 @@ class LLMRouterAddon:
                     request_headers=call_state["request_headers"],
                     request_body=message_text,
                     stream_type="stream",
+                    # 传输类型独立于实际握手方法 GET。
+                    transport_type="websocket",
                     original_model=call_state["original_model"],
                     overridden_model=call_state["overridden_model"],
                     user_id=flow.metadata.get("user_id"),
@@ -4028,6 +4034,8 @@ class LLMRouterAddon:
                 "timestamp": call_state["timestamp"],
                 "url": flow.metadata.get("codex_ws_target_url", ""),
                 "method": "GET",
+                # 终态仍按 WebSocket 传输记录，method 保持真实 GET。
+                "transport_type": "websocket",
                 "request_headers": call_state["request_headers"],
                 "request_body": call_state["request_body"],
                 "response_headers": call_state["response_headers"],
@@ -4126,6 +4134,8 @@ class LLMRouterAddon:
                 "timestamp": call_state["timestamp"],
                 "url": flow.metadata.get("codex_ws_target_url", ""),
                 "method": "GET",
+                # 错误与取消终态仍按 WebSocket 传输记录，method 保持真实 GET。
+                "transport_type": "websocket",
                 "request_headers": call_state["request_headers"],
                 "request_body": call_state["request_body"],
                 "response_headers": call_state["response_headers"],

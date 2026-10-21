@@ -608,6 +608,8 @@ class CallStorage:
                         url TEXT NOT NULL,
                         is_internal_relay INTEGER NOT NULL DEFAULT 0,
                         method TEXT,
+                        -- 业务传输类型区分 HTTP 与 WebSocket；历史记录迁移后保持 NULL。
+                        transport_type TEXT,
                         request_headers JSON,
                         request_body TEXT,
                         response_headers JSON,
@@ -658,6 +660,8 @@ class CallStorage:
                         url TEXT NOT NULL,
                         is_internal_relay INTEGER NOT NULL DEFAULT 0,
                         method TEXT,
+                        -- 业务传输类型区分 HTTP 与 WebSocket；历史记录迁移后保持 NULL。
+                        transport_type TEXT,
                         request_headers TEXT,
                         request_body TEXT,
                         response_headers TEXT,
@@ -1184,12 +1188,13 @@ class CallStorage:
         transport_error: Optional[str] = None,
         business_status: Optional[str] = None,
         business_error: Optional[str] = None,
+        transport_type: Optional[str] = "http",
     ):
-        """保存调用记录（带用户和 API Key 关联）"""
+        """保存带用户和 API Key 关联的调用记录，并记录 HTTP 或 WebSocket 传输方式。"""
         self._ensure_llm_calls_schema_extensions()
         self._ensure_hot_path_indexes()
         args = (
-            call_id, timestamp, url, method,
+            call_id, timestamp, url, method, transport_type,
             json.dumps(request_headers, ensure_ascii=False),
             request_body,
             json.dumps(response_headers, ensure_ascii=False),
@@ -1211,7 +1216,7 @@ class CallStorage:
             try:
                 cur.execute("""
                     INSERT INTO llm_calls (
-                        call_id, timestamp, url, method,
+                        call_id, timestamp, url, method, transport_type,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
@@ -1219,7 +1224,7 @@ class CallStorage:
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at,
                         transport_status, transport_error, business_status, business_error
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, args)
             finally:
                 self._pg_close(conn, cur, commit=True)
@@ -1228,7 +1233,7 @@ class CallStorage:
             try:
                 cur.execute("""
                     INSERT INTO llm_calls (
-                        call_id, timestamp, url, method,
+                        call_id, timestamp, url, method, transport_type,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
@@ -1236,7 +1241,7 @@ class CallStorage:
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics, is_internal_relay, last_activity_at,
                         transport_status, transport_error, business_status, business_error
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
@@ -1249,12 +1254,13 @@ class CallStorage:
         user_id: Optional[int], api_key_id: Optional[int],
         previous_response_id: Optional[str], last_activity_at: Optional[str],
         is_internal_relay: int = 0,
+        transport_type: str = "http",
     ):
-        """创建流式调用的进行中记录，供请求开始阶段立即展示调用状态。"""
+        """创建进行中调用记录，并保存请求的 HTTP 或 WebSocket 传输方式。"""
         self._ensure_llm_calls_schema_extensions()
         self._ensure_hot_path_indexes()
         args = (
-            call_id, timestamp, url, method,
+            call_id, timestamp, url, method, transport_type,
             json.dumps(request_headers, ensure_ascii=False), request_body,
             json.dumps({}, ensure_ascii=False), "", None, "in_progress",
             0, None, None, None, None, None, None,
@@ -1267,7 +1273,7 @@ class CallStorage:
             try:
                 cur.execute("""
                     INSERT INTO llm_calls (
-                        call_id, timestamp, url, method,
+                        call_id, timestamp, url, method, transport_type,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
@@ -1275,7 +1281,7 @@ class CallStorage:
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics,
                         is_internal_relay, last_activity_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (call_id) DO NOTHING
                 """, args)
             finally:
@@ -1285,7 +1291,7 @@ class CallStorage:
             try:
                 cur.execute("""
                     INSERT OR IGNORE INTO llm_calls (
-                        call_id, timestamp, url, method,
+                        call_id, timestamp, url, method, transport_type,
                         request_headers, request_body,
                         response_headers, response_body, final_responses_body, call_status,
                         duration_ms, tokens_input, tokens_output, cached_hit_tokens, cache_miss_tokens, tokens_per_second, token_source,
@@ -1293,7 +1299,7 @@ class CallStorage:
                         original_model, overridden_model, user_id, api_key_id,
                         previous_response_id, full_context, outbound_diagnostics,
                         is_internal_relay, last_activity_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, args)
             finally:
                 self._sqlite_close(conn, cur, commit=True)
@@ -1399,8 +1405,9 @@ class CallStorage:
         transport_error: Optional[str] = None,
         business_status: Optional[str] = None,
         business_error: Optional[str] = None,
+        transport_type: Optional[str] = "http",
     ):
-        """按 call_id 完成调用记录，开始记录不存在时回退插入最终记录。"""
+        """按 call_id 完成调用记录并保存传输方式，开始记录不存在时回退插入最终记录。"""
         self._ensure_llm_calls_schema_extensions()
         self._ensure_hot_path_indexes()
         args = (
@@ -1416,6 +1423,7 @@ class CallStorage:
             if outbound_diagnostics is not None else None,
             is_internal_relay, last_activity_at,
             transport_status, transport_error, business_status, business_error,
+            transport_type,
             call_id,
         )
         updated = False
@@ -1433,7 +1441,8 @@ class CallStorage:
                         previous_response_id = %s, full_context = %s, outbound_diagnostics = %s,
                         is_internal_relay = %s, last_activity_at = %s,
                         transport_status = %s, transport_error = %s,
-                        business_status = %s, business_error = %s
+                        business_status = %s, business_error = %s,
+                        transport_type = %s
                     WHERE call_id = %s
                 """, args)
                 updated = cur.rowcount > 0
@@ -1453,7 +1462,8 @@ class CallStorage:
                         previous_response_id = ?, full_context = ?, outbound_diagnostics = ?,
                         is_internal_relay = ?, last_activity_at = ?,
                         transport_status = ?, transport_error = ?,
-                        business_status = ?, business_error = ?
+                        business_status = ?, business_error = ?,
+                        transport_type = ?
                     WHERE call_id = ?
                 """, args)
                 updated = cur.rowcount > 0
@@ -1494,6 +1504,7 @@ class CallStorage:
                 transport_error=transport_error,
                 business_status=business_status,
                 business_error=business_error,
+                transport_type=transport_type,
             )
 
     def get_call_history(self, call_id: str, api_key_id: int) -> Optional[dict]:

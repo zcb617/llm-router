@@ -209,6 +209,7 @@
         <div class="grid grid-cols-2 gap-4 text-sm">
           <div><span class="text-zinc-500">调用ID:</span> <code id="dCallId" class="ml-1 font-mono"></code></div>
           <div><span class="text-zinc-500">时间:</span> <span id="dTimestamp" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">传输:</span> <span id="dTransport" class="ml-1"></span></div>
           <div><span class="text-zinc-500">方法:</span> <span id="dMethod" class="ml-1"></span></div>
           <div><span class="text-zinc-500">状态:</span> <span id="dStatus" class="ml-1"></span></div>
           <div><span class="text-zinc-500">URL:</span> <span id="dUrl" class="ml-1 break-all"></span></div>
@@ -243,7 +244,7 @@
 const COLUMNS = [
   { key: 'call_id', label: '调用ID', default: true, minWidth: '180px' },
   { key: 'timestamp', label: '时间', default: true, minWidth: '165px' },
-  { key: 'method', label: '方法', default: true, minWidth: '60px', width: '60px' },
+  { key: 'method', label: '方法/传输', default: true, minWidth: '80px', width: '80px' },
   { key: 'call_status', label: '状态', default: true, minWidth: '80px', width: '80px' },
   { key: 'url', label: 'URL', default: true, minWidth: '200px' },
   { key: 'original_model', label: '原始模型', default: true, minWidth: '140px' },
@@ -527,6 +528,7 @@ function renderHeader() {
   });
 }
 
+// 按调用记录字段渲染日志列表，并将 WebSocket 传输显示为 WS。
 function renderTable(data) {
   const tbody = document.getElementById('tableBody');
   tbody.innerHTML = '';
@@ -541,6 +543,9 @@ function renderTable(data) {
       td.style.width = col.width;
       td.style.minWidth = col.width;
       let val = row[col.key] ?? '';
+      if (col.key === 'method' && row.transport_type === 'websocket') {
+        val = 'WS';
+      }
       // 时间格式化：ISO 8601 -> yyyy-MM-dd HH:mm:ss
       if ((col.key === 'timestamp' || col.key === 'last_activity_at') && val) {
         try {
@@ -647,9 +652,11 @@ async function loadData() {
   }
 }
 
+// 展示调用详情中的传输类型、真实方法和请求响应内容。
 function showDetail(row) {
   document.getElementById('dCallId').textContent = row.call_id || 'N/A';
   document.getElementById('dTimestamp').textContent = row.timestamp || '';
+  document.getElementById('dTransport').textContent = row.transport_type === 'websocket' ? 'WebSocket' : (row.transport_type === 'http' ? 'HTTP' : '-');
   document.getElementById('dMethod').textContent = row.method || '';
   document.getElementById('dStatus').textContent = row.call_status === 'failed' ? '失败' : (row.call_status === 'success' ? '成功' : (row.call_status === 'in_progress' ? '进行中' : (row.call_status === 'cancelled' ? '已取消' : '-')));
   document.getElementById('dUrl').textContent = row.url || '';
