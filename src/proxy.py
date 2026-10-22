@@ -19,6 +19,7 @@ from typing import Optional
 from urllib.parse import unquote, urlparse
 
 from src.protocol_converter_registry import get_protocol_converter
+from src.final_response import build_final_response
 from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
@@ -721,6 +722,17 @@ class LLMRouterAddon:
             payload = self._save_queue.get()
             try:
                 operation = payload.pop("_call_save_operation", None)
+                if operation != "activity" and not payload.get("final_responses_body"):
+                    try:
+                        payload["final_responses_body"] = build_final_response(
+                            payload.get("response_body")
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to parse final response for call_id=%s",
+                            payload.get("call_id"),
+                            exc_info=True,
+                        )
                 retry_delays = (0.5, 1.0)
                 for attempt in range(3):
                     try:
