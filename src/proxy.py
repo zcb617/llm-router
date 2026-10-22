@@ -4080,6 +4080,15 @@ class LLMRouterAddon:
             now = time.time()
             request_payload = dict(event)
             ws_route = flow.metadata.get("codex_ws_route")
+            original_model = event.get("model")
+            if not isinstance(original_model, str) or not original_model:
+                original_model = flow.metadata.get("codex_ws_original_model", "")
+            overridden_model = original_model
+            if ws_route == "oauth":
+                model_mapping, _ = self._match_model(original_model)
+                overridden_model = (
+                    (model_mapping or {}).get("forward_model") or original_model
+                ).strip()
             compression_route = (
                 "codex-ws-oauth" if ws_route == "oauth" else "codex-ws-passthrough"
             )
@@ -4106,8 +4115,8 @@ class LLMRouterAddon:
                 "response_frames": [],
                 "response_id": None,
                 "first_token_ms": None,
-                "original_model": flow.metadata.get("codex_ws_original_model", ""),
-                "overridden_model": flow.metadata.get("codex_ws_forward_model", ""),
+                "original_model": original_model,
+                "overridden_model": overridden_model,
                 "previous_response_id": previous_response_id,
                 "upstream_request_size_mb": self._request_body_size_mb(message_content),
             }
