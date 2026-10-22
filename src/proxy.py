@@ -28,6 +28,7 @@ from src.codex_cli_auth import (
     ensure_usage_in_upstream_response,
     host_from_url,
     is_chat_completions_path,
+    is_codex_search_path,
     prepare_codex_responses_body,
     resolve_codex_base_url,
     resolve_codex_outbound_url,
@@ -387,6 +388,30 @@ class LLMRouterAddon:
         """
         if not body:
             return default_status, "empty_body"
+        if flow.metadata.get("codex_endpoint_kind") == "search":
+            response = getattr(flow, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code is None:
+                return default_status, "missing_http_status"
+            if not 200 <= status_code < 300:
+                return default_status, "upstream_http_error"
+            try:
+                search_response = json.loads(body)
+            except (TypeError, ValueError):
+                return default_status, "invalid_search_response_json"
+            if not isinstance(search_response, dict):
+                return default_status, "invalid_search_response_json"
+            if search_response.get("error") or search_response.get("detail"):
+                return default_status, "upstream_error"
+            if not isinstance(search_response.get("output"), str):
+                return default_status, "missing_search_output"
+            search_results = search_response.get("results")
+            if search_results is not None and not isinstance(search_results, list):
+                return default_status, "invalid_search_results"
+            encrypted_output = search_response.get("encrypted_output")
+            if encrypted_output is not None and not isinstance(encrypted_output, str):
+                return default_status, "invalid_search_encrypted_output"
+            return "success", None
         if flow.metadata.get("codex_endpoint_kind") == "image":
             response = getattr(flow, "response", None)
             status_code = getattr(response, "status_code", None)
@@ -1969,20 +1994,23 @@ class LLMRouterAddon:
             flow.metadata["local_response"] = True
 
     def _forward_codex_passthrough(self, flow, mapping, captured_req, model_name):
-        """处理带 chatgpt-account-id 的 Codex 直连请求，并按入站路径转发 Responses 或图片请求。"""
+        """处理带 chatgpt-account-id 的 Codex 直连请求，并按入站路径转发搜索、Responses 或图片请求。"""
         try:
             inbound_path = urlparse(captured_req.url or "").path.rstrip("/").lower()
-            if inbound_path in ("/v1/images/generations", "/images/generations"):
+            if is_codex_search_path(inbound_path):
+                selected_path = "/alpha/search"
+            elif inbound_path in ("/v1/images/generations", "/images/generations"):
                 selected_path = "/images/generations"
             elif inbound_path in ("/v1/images/edits", "/images/edits"):
                 selected_path = "/images/edits"
             else:
                 selected_path = "/v1/responses"
-            flow.metadata["codex_endpoint_kind"] = (
-                "image"
-                if selected_path in ("/images/generations", "/images/edits")
-                else "responses"
-            )
+            if selected_path == "/alpha/search":
+                flow.metadata["codex_endpoint_kind"] = "search"
+            elif selected_path in ("/images/generations", "/images/edits"):
+                flow.metadata["codex_endpoint_kind"] = "image"
+            else:
+                flow.metadata["codex_endpoint_kind"] = "responses"
             full_url = resolve_codex_outbound_url(
                 self._resolve_target_base_url(mapping), selected_path
             )
@@ -2096,7 +2124,9 @@ class LLMRouterAddon:
                 captured_req.call_id,
                 full_url,
             )
-            flow.metadata["codex_response_protocol"] = "responses"
+            flow.metadata["codex_response_protocol"] = (
+                "search" if selected_path == "/alpha/search" else "responses"
+            )
             flow.metadata["codex_cli_oauth"] = True
             flow.metadata["codex_cli_oauth_first_body_at_ms"] = None
             self._store_pending_request(flow, captured_req)
@@ -2148,30 +2178,46 @@ class LLMRouterAddon:
                 incoming_client_metadata=incoming_client_metadata,
                 fallback_turn_id=captured_req.call_id,
             )
+            search_request = is_codex_search_path(path)
+            if search_request:
+                flow.metadata["codex_endpoint_kind"] = "search"
+            prepared = None
             legacy_chat = is_chat_completions_path(path)
-            outbound_source = (
-                "codex_cli_oauth:chat_completions"
-                if legacy_chat
-                else "codex_cli_oauth:responses"
+            if search_request:
+                if not isinstance(request_payload, dict):
+                    raise ValueError("Codex search request body must be a JSON object")
+                request_payload = dict(json.loads(captured_req.body))
+                request_payload["model"] = forward_model
+                req_body = json.dumps(request_payload, ensure_ascii=False)
+                stream = False
+                outbound_source = "codex_cli_oauth:search"
+            else:
+                outbound_source = (
+                    "codex_cli_oauth:chat_completions"
+                    if legacy_chat
+                    else "codex_cli_oauth:responses"
+                )
+                compressed_body, _ = compress_codex_image_json_body(
+                    captured_req.body,
+                    route="codex-http-oauth",
+                    call_id=captured_req.call_id,
+                )
+                prepared = prepare_codex_responses_body(
+                    compressed_body,
+                    forward_model=forward_model,
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    client_metadata=client_metadata,
+                )
+                # Unmappable fields: structured report + decision B (warn, do not invent mapping).
+                for warning in prepared.warning_messages():
+                    logger.warning(warning)
+                stream = prepared.stream
+                req_body = prepared.body_json
+            full_url = resolve_codex_outbound_url(
+                self._resolve_target_base_url(mapping),
+                "/alpha/search" if search_request else "/v1/responses",
             )
-            compressed_body, _ = compress_codex_image_json_body(
-                captured_req.body,
-                route="codex-http-oauth",
-                call_id=captured_req.call_id,
-            )
-            prepared = prepare_codex_responses_body(
-                compressed_body,
-                forward_model=forward_model,
-                session_id=session_id,
-                thread_id=thread_id,
-                client_metadata=client_metadata,
-            )
-            # Unmappable fields: structured report + decision B (warn, do not invent mapping).
-            for warning in prepared.warning_messages():
-                logger.warning(warning)
-            stream = prepared.stream
-            req_body = prepared.body_json
-            full_url = resolve_codex_outbound_url(self._resolve_target_base_url(mapping))
             host = host_from_url(full_url)
             req_headers = self._codex_cli_auth.build_full_headers(
                 host=host,
@@ -2211,13 +2257,17 @@ class LLMRouterAddon:
                 first_body_at_ms=first_body_at_ms,
                 context={
                     "model": forward_model,
-                    "protocol": "chat_completions" if legacy_chat else "responses",
+                    "protocol": (
+                        "search"
+                        if search_request
+                        else "chat_completions" if legacy_chat else "responses"
+                    ),
                     "prompt_cache_key": prompt_cache_key,
                     "session_id": session_id,
                     "thread_id": thread_id,
                 },
             )
-            if self._is_invalid_encrypted_content_response(resp_body):
+            if not search_request and self._is_invalid_encrypted_content_response(resp_body):
                 status = 400
                 resp_body = json.dumps(
                     {
@@ -2246,15 +2296,16 @@ class LLMRouterAddon:
                     }
                 ]
                 resp_headers.append(("Content-Type", "application/json"))
-            # include_usage decision B: ensure response carries usage (Responses completed/body.usage).
-            resp_body, usage_warnings = ensure_usage_in_upstream_response(
-                resp_body,
-                include_usage=prepared.include_usage,
-                stream=stream,
-            )
-            for warning in usage_warnings:
-                logger.warning(warning)
-            if legacy_chat and 200 <= status < 300:
+            if not search_request:
+                # include_usage decision B: ensure response carries usage (Responses completed/body.usage).
+                resp_body, usage_warnings = ensure_usage_in_upstream_response(
+                    resp_body,
+                    include_usage=prepared.include_usage,
+                    stream=stream,
+                )
+                for warning in usage_warnings:
+                    logger.warning(warning)
+            if not search_request and legacy_chat and 200 <= status < 300:
                 resp_body = convert_codex_responses_to_chat(
                     resp_body,
                     stream=stream,
@@ -2292,16 +2343,20 @@ class LLMRouterAddon:
             flow.metadata["codex_cli_oauth"] = True
             flow.metadata["codex_cli_oauth_first_body_at_ms"] = first_body_at_ms
             flow.metadata["codex_response_protocol"] = (
-                "chat_completions" if legacy_chat else "responses"
+                "search"
+                if search_request
+                else "chat_completions" if legacy_chat else "responses"
             )
-            flow.metadata["codex_include_usage"] = prepared.include_usage
+            flow.metadata["codex_include_usage"] = (
+                prepared.include_usage if prepared else False
+            )
             flow.metadata["codex_unmappable"] = [
                 {
                     "field": u.field,
                     "decision": u.decision,
                     "reason": u.reason,
                 }
-                for u in prepared.unmappable
+                for u in (prepared.unmappable if prepared else [])
             ]
             self._store_pending_request(flow, captured_req)
         except CodexOutboundError as e:
@@ -4528,7 +4583,9 @@ class LLMRouterAddon:
         )
         claude_code_feature_request = bool(flow.metadata.get("claude_code_feature_request"))
 
-        if flow.metadata.get("codex_response_protocol") == "responses":
+        if flow.metadata.get("codex_endpoint_kind") == "search":
+            tokens_input, tokens_output, token_source = None, None, None
+        elif flow.metadata.get("codex_response_protocol") == "responses":
             tokens_input = responses_cache_tokens_parser.get_input_tokens(
                 captured_resp.body or ""
             )
@@ -4879,7 +4936,9 @@ class LLMRouterAddon:
                 use_headers_fallback=False,
             )
 
-            if flow.metadata.get("codex_response_protocol") == "responses":
+            if flow.metadata.get("codex_endpoint_kind") == "search":
+                tokens_input, tokens_output, token_source = None, None, None
+            elif flow.metadata.get("codex_response_protocol") == "responses":
                 tokens_input = responses_cache_tokens_parser.get_input_tokens(
                     response_body
                 )

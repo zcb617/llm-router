@@ -1894,17 +1894,29 @@ def is_chat_completions_path(path: str | None) -> bool:
     return normalized in ("/v1/chat/completions", "/chat/completions")
 
 
+def is_codex_search_path(path: str) -> bool:
+    """判断入站路径是否请求 Codex Alpha 搜索业务。"""
+    normalized_path = urlparse(path or "").path.rstrip("/").lower()
+    return normalized_path in (
+        "/alpha/search",
+        "/v1/alpha/search",
+        "/backend-api/codex/alpha/search",
+    )
+
+
 def resolve_codex_outbound_url(
     base_url: str | None = None,
     path: str = "/v1/responses",
 ) -> str:
-    """解析 Codex OAuth 上游 URL，并按业务路径转发图片或 Responses 请求。"""
+    """解析 Codex OAuth 上游 URL，并按业务路径转发搜索、图片或 Responses 请求。"""
     base = (base_url or resolve_codex_base_url()).rstrip("/")
-    for known_endpoint in ("/chat/completions", "/responses"):
+    for known_endpoint in ("/chat/completions", "/responses", "/alpha/search"):
         if base.endswith(known_endpoint):
             base = base[: -len(known_endpoint)]
             break
     normalized_path = urlparse(path or "").path.rstrip("/").lower()
+    if is_codex_search_path(path):
+        return f"{base}/alpha/search"
     if normalized_path in ("/images/generations", "/v1/images/generations"):
         return f"{base}/images/generations"
     if normalized_path in ("/images/edits", "/v1/images/edits"):
