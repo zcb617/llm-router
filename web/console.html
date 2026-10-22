@@ -1416,6 +1416,7 @@ function renderTable(data) {
       td.style.width = col.width;
       td.style.minWidth = col.width;
       let val = row[col.key] ?? '';
+      if (col.key === 'tokens_per_second' && row.tokens_per_second == null) val = '-';
       if (col.key === 'method' && row.transport_type === 'websocket') val = 'WS';
       if (col.key === 'upstream_request_size_mb') {
         val = row.upstream_request_size_mb == null || row.upstream_request_size_mb === ''

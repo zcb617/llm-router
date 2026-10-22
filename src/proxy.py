@@ -4127,6 +4127,8 @@ class LLMRouterAddon:
                 "response_frames": [],
                 "response_id": None,
                 "first_token_ms": None,
+                # 首尾有效内容增量的耗时，用于统计输出阶段速度。
+                "last_output_ms": None,
                 "original_model": original_model,
                 "overridden_model": overridden_model,
                 "previous_response_id": previous_response_id,
@@ -4260,16 +4262,11 @@ class LLMRouterAddon:
                 "duration_ms": int((current_time - call_state["start_time"]) * 1000),
                 "last_activity_at": datetime.now().isoformat(),
             })
-        if call_state["first_token_ms"] is None and (
-            not isinstance(event_type, str)
-            or event_type.endswith(".delta")
-            or event_type in {
-                "response.completed",
-                "response.failed",
-                "response.incomplete",
-            }
-        ):
-            call_state["first_token_ms"] = int((time.time() - call_state["start_time"]) * 1000)
+        if responses_cache_tokens_parser.is_content_delta(event):
+            output_ms = int((current_time - call_state["start_time"]) * 1000)
+            if call_state["first_token_ms"] is None:
+                call_state["first_token_ms"] = output_ms
+            call_state["last_output_ms"] = output_ms
         call_state["response_frames"].append(message_text)
 
         if event_type in {
@@ -4302,12 +4299,13 @@ class LLMRouterAddon:
                 if frame_miss_tokens is not None:
                     cache_miss_tokens = frame_miss_tokens
             first_token_ms = call_state.get("first_token_ms")
+            # 速度只统计首尾有效输出增量，不计完成事件的等待。
             tokens_per_second = responses_cache_tokens_parser.get_tokens_per_second(
                 "\n".join(
                     "data: " + frame
                     for frame in call_state.get("response_frames", [])
                 ),
-                duration_ms,
+                call_state.get("last_output_ms"),
                 first_token_ms,
             )
             self._enqueue_call_save({
