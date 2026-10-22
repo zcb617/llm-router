@@ -20,7 +20,8 @@
 //!
 //! Optional request correlation fields (`request_id`, `source`) are echoed in
 //! responses. Successful responses also include `first_body_at_ms`, the Unix
-//! millisecond timestamp of the first non-empty response body chunk.
+//! millisecond timestamp of the first non-empty response body chunk and
+//! `first_output_at_ms`, the first Responses content delta timestamp.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -80,7 +81,10 @@ struct OutboundResponse {
     headers: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body_b64: Option<String>,
+    /// 首个非空响应体 chunk 的 Unix 毫秒时间戳。
     first_body_at_ms: Option<u64>,
+    /// 首个 Responses 内容增量所在接收 chunk 的 Unix 毫秒时间戳。
+    first_output_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -99,6 +103,78 @@ fn record_first_body_at_ms(
 ) {
     if !chunk.is_empty() && first_body_at_ms.is_none() {
         *first_body_at_ms = observed_at_ms;
+    }
+}
+
+/// 判断 SSE 事件是否包含可计作首个输出的 Responses 内容增量。
+fn is_content_delta(event: &serde_json::Value) -> bool {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    let delta = event.get("delta").and_then(serde_json::Value::as_str);
+    matches!(
+        event_type,
+        Some(
+            "response.output_text.delta"
+                | "response.function_call_arguments.delta"
+                | "response.custom_tool_call_input.delta"
+                | "response.refusal.delta"
+        )
+    ) && delta.is_some_and(|value| !value.is_empty())
+}
+
+/// 解析完整 SSE data 行，并在首次内容增量时记录接收时间。
+fn record_sse_data_line(
+    line: &[u8],
+    first_output_at_ms: &mut Option<u64>,
+    observed_at_ms: Option<u64>,
+) {
+    if first_output_at_ms.is_some() {
+        return;
+    }
+    let Some(data) = line.strip_prefix(b"data:") else {
+        return;
+    };
+    let Ok(data) = std::str::from_utf8(data) else {
+        return;
+    };
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
+        return;
+    };
+    if is_content_delta(&event) {
+        *first_output_at_ms = observed_at_ms;
+    }
+}
+
+/// 增量处理跨 chunk 的 SSE 行，并在 EOF 时解析最后一条未换行事件。
+fn record_first_output_at_ms(
+    first_output_at_ms: &mut Option<u64>,
+    timing_buffer: &mut Vec<u8>,
+    chunk: &[u8],
+    observed_at_ms: Option<u64>,
+    eof: bool,
+) {
+    if first_output_at_ms.is_some() {
+        timing_buffer.clear();
+        return;
+    }
+    timing_buffer.extend_from_slice(chunk);
+    while let Some(line_end) = timing_buffer.iter().position(|byte| *byte == b'\n') {
+        let mut line: Vec<u8> = timing_buffer.drain(..=line_end).collect();
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        record_sse_data_line(&line, first_output_at_ms, observed_at_ms);
+        if first_output_at_ms.is_some() {
+            timing_buffer.clear();
+            return;
+        }
+    }
+    if eof && !timing_buffer.is_empty() {
+        let mut line = std::mem::take(timing_buffer);
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        record_sse_data_line(&line, first_output_at_ms, observed_at_ms);
     }
 }
 
@@ -124,6 +200,7 @@ async fn main() {
             headers: vec![],
             body_b64: None,
             first_body_at_ms: None,
+            first_output_at_ms: None,
             error: Some(format!("failed to read stdin: {err}")),
         });
         std::process::exit(2);
@@ -140,6 +217,7 @@ async fn main() {
                 headers: vec![],
                 body_b64: None,
                 first_body_at_ms: None,
+                first_output_at_ms: None,
                 error: Some(format!("invalid request json: {err}")),
             });
             std::process::exit(2);
@@ -203,6 +281,7 @@ async fn main() {
                 headers: vec![],
                 body_b64: None,
                 first_body_at_ms: None,
+                first_output_at_ms: None,
                 error: Some(err),
             });
             std::process::exit(1);
@@ -407,12 +486,29 @@ async fn run(req: &OutboundRequest) -> Result<OutboundResponse, String> {
 
     let mut body = Vec::new();
     let mut first_body_at_ms = None;
+    let mut first_output_at_ms = None;
+    let mut timing_buffer = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("read body failed: {e}"))?;
-        record_first_body_at_ms(&mut first_body_at_ms, &chunk, unix_time_ms());
+        let observed_at_ms = unix_time_ms();
+        record_first_body_at_ms(&mut first_body_at_ms, &chunk, observed_at_ms);
+        record_first_output_at_ms(
+            &mut first_output_at_ms,
+            &mut timing_buffer,
+            &chunk,
+            observed_at_ms,
+            false,
+        );
         body.extend_from_slice(&chunk);
     }
+    record_first_output_at_ms(
+        &mut first_output_at_ms,
+        &mut timing_buffer,
+        &[],
+        unix_time_ms(),
+        true,
+    );
 
     Ok(OutboundResponse {
         ok: true,
@@ -422,6 +518,7 @@ async fn run(req: &OutboundRequest) -> Result<OutboundResponse, String> {
         headers: out_headers,
         body_b64: Some(B64.encode(body)),
         first_body_at_ms,
+        first_output_at_ms,
         error: None,
     })
 }

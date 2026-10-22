@@ -2235,6 +2235,7 @@ class LLMRouterAddon:
             # Force method/path bookkeeping for capture; actual send is via Rust outbound.
             flow.request.method = "POST"
 
+            response_timing = {}
             status, resp_headers, resp_body, first_body_at_ms = send_via_codex_outbound(
                 method="POST",
                 url=full_url,
@@ -2243,6 +2244,7 @@ class LLMRouterAddon:
                 timeout_ms=600_000,
                 request_id=captured_req.call_id,
                 source=outbound_source,
+                response_timing=response_timing,
             )
             flow.metadata["codex_outbound_diagnostics"] = build_outbound_diagnostics(
                 method="POST",
@@ -2342,6 +2344,9 @@ class LLMRouterAddon:
             flow.metadata["call_id"] = captured_req.call_id
             flow.metadata["codex_cli_oauth"] = True
             flow.metadata["codex_cli_oauth_first_body_at_ms"] = first_body_at_ms
+            flow.metadata["codex_cli_oauth_first_output_at_ms"] = response_timing.get(
+                "first_output_at_ms"
+            )
             flow.metadata["codex_response_protocol"] = (
                 "search"
                 if search_request
@@ -2803,6 +2808,39 @@ class LLMRouterAddon:
                     "duration_ms": int((current_time - call_start_time) * 1000),
                     "last_activity_at": datetime.now().isoformat(),
                 })
+
+        if self._detect_business_protocol(flow) == "responses":
+            if flow.metadata.get("responses_first_output_time") is not None:
+                flow.metadata.pop("responses_timing_buffer", None)
+            else:
+                timing_buffer = flow.metadata.get("responses_timing_buffer", b"")
+                if not isinstance(timing_buffer, bytes):
+                    timing_buffer = b""
+                if chunk:
+                    timing_buffer += chunk
+                eof = not chunk
+                while b"\n" in timing_buffer or (eof and timing_buffer):
+                    if b"\n" in timing_buffer:
+                        line, timing_buffer = timing_buffer.split(b"\n", 1)
+                    else:
+                        line, timing_buffer = timing_buffer, b""
+                    line = line.rstrip(b"\r")
+                    if not line.startswith(b"data:"):
+                        continue
+                    try:
+                        event = json.loads(line[5:].strip().decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if responses_cache_tokens_parser.is_content_delta(event):
+                        flow.metadata["responses_first_output_time"] = time.time()
+                        timing_buffer = b""
+                        break
+                if flow.metadata.get("responses_first_output_time") is not None or eof:
+                    flow.metadata.pop("responses_timing_buffer", None)
+                elif timing_buffer:
+                    flow.metadata["responses_timing_buffer"] = timing_buffer
+                else:
+                    flow.metadata.pop("responses_timing_buffer", None)
         return chunk
 
     @staticmethod
@@ -3950,6 +3988,23 @@ class LLMRouterAddon:
         if stream_type != "stream":
             return None
 
+        if self._detect_business_protocol(flow) == "responses":
+            first_output_at_ms = flow.metadata.get(
+                "codex_cli_oauth_first_output_at_ms"
+            )
+            if type(first_output_at_ms) is int:
+                first_token_ms = int(
+                    first_output_at_ms - captured_req.start_time * 1000
+                )
+                return first_token_ms if first_token_ms >= 0 else None
+            first_output_time = flow.metadata.get("responses_first_output_time")
+            if first_output_time is not None:
+                first_token_ms = int(
+                    (first_output_time - captured_req.start_time) * 1000
+                )
+                return first_token_ms if first_token_ms >= 0 else None
+            return None
+
         if flow.metadata.get("codex_passthrough"):
             first_token_time = flow.metadata.get("first_token_time")
             if first_token_time is None:
@@ -4226,16 +4281,14 @@ class LLMRouterAddon:
                 if frame_miss_tokens is not None:
                     cache_miss_tokens = frame_miss_tokens
             first_token_ms = call_state.get("first_token_ms")
-            tokens_per_second = None
-            if (
-                tokens_output is not None
-                and isinstance(first_token_ms, int)
-                and duration_ms > first_token_ms
-            ):
-                tokens_per_second = round(
-                    tokens_output / ((duration_ms - first_token_ms) / 1000),
-                    2,
-                )
+            tokens_per_second = responses_cache_tokens_parser.get_tokens_per_second(
+                "\n".join(
+                    "data: " + frame
+                    for frame in call_state.get("response_frames", [])
+                ),
+                duration_ms,
+                first_token_ms,
+            )
             self._enqueue_call_save({
                 "call_id": call_state["call_id"],
                 "timestamp": call_state["timestamp"],

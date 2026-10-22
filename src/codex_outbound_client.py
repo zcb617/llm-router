@@ -254,11 +254,14 @@ def send_via_codex_outbound(
     bin_path: Optional[Path] = None,
     request_id: str | None = None,
     source: str | None = None,
+    response_timing: dict | None = None,
 ) -> tuple[int, list[tuple[str, str]], bytes, int | None]:
     """Send one HTTP request through the Rust outbound client.
 
     Returns (status_code, response_headers, body_bytes, first_body_at_ms).
     """
+    if response_timing is not None:
+        response_timing["first_output_at_ms"] = None
     binary = bin_path or resolve_codex_outbound_bin()
     if isinstance(body, str):
         body_bytes = body.encode("utf-8")
@@ -343,5 +346,14 @@ def send_via_codex_outbound(
     if source is not None and payload.get("source") != source:
         logger.warning("codex_outbound source mismatch; ignoring first_body_at_ms")
         first_body_at_ms = None
+
+    if response_timing is not None:
+        first_output_at_ms = payload.get("first_output_at_ms")
+        if (
+            type(first_output_at_ms) is int
+            and (request_id is None or payload.get("request_id") == request_id)
+            and (source is None or payload.get("source") == source)
+        ):
+            response_timing["first_output_at_ms"] = first_output_at_ms
 
     return status, resp_headers, resp_body, first_body_at_ms

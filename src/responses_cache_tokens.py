@@ -149,13 +149,82 @@ class ResponsesCacheTokensParser:
                 output_tokens = extracted
         return output_tokens
 
+    @staticmethod
+    def _extract_generation_output_tokens(data: Any) -> tuple[bool, Optional[int]]:
+        """从单个 Responses 事件的同一 usage 中提取可计速的生成 token。"""
+        if not isinstance(data, dict):
+            return False, None
+
+        usage = data.get("usage")
+        if not isinstance(usage, dict) or "output_tokens" not in usage:
+            response = data.get("response")
+            usage = response.get("usage") if isinstance(response, dict) else None
+        if not isinstance(usage, dict) or "output_tokens" not in usage:
+            return False, None
+
+        output_tokens = usage.get("output_tokens")
+        details = usage.get("output_tokens_details")
+        reasoning_tokens = (
+            details.get("reasoning_tokens", 0)
+            if isinstance(details, dict)
+            else 0
+        )
+        if (
+            type(output_tokens) is not int
+            or output_tokens < 0
+            or type(reasoning_tokens) is not int
+            or reasoning_tokens < 0
+            or reasoning_tokens > output_tokens
+        ):
+            return True, None
+        return True, output_tokens - reasoning_tokens
+
+    def get_generation_output_tokens(self, response_body: str) -> Optional[int]:
+        """提取扣除 reasoning 后用于生成速度统计的 Responses 输出 token。"""
+        try:
+            found_usage, output_tokens = self._extract_generation_output_tokens(
+                json.loads(response_body)
+            )
+            if found_usage:
+                return output_tokens
+        except (TypeError, json.JSONDecodeError):
+            pass
+
+        output_tokens: Optional[int] = None
+        for line in response_body.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                continue
+            found_usage, extracted = self._extract_generation_output_tokens(event)
+            if found_usage:
+                output_tokens = extracted
+        return output_tokens
+
+    @staticmethod
+    def is_content_delta(event: Any) -> bool:
+        """判断 Responses 事件是否包含实际输出内容增量。"""
+        if not isinstance(event, dict):
+            return False
+        if event.get("type") not in {
+            "response.output_text.delta",
+            "response.function_call_arguments.delta",
+            "response.custom_tool_call_input.delta",
+            "response.refusal.delta",
+        }:
+            return False
+        return isinstance(event.get("delta"), str) and bool(event.get("delta"))
+
     def get_tokens_per_second(
         self,
         response_body: str,
         duration_ms: Optional[int],
         first_token_ms: Optional[int],
     ) -> Optional[float]:
-        output_tokens = self.get_output_tokens(response_body)
+        output_tokens = self.get_generation_output_tokens(response_body)
         if output_tokens is None or output_tokens < 0:
             return None
         if type(duration_ms) is not int or type(first_token_ms) is not int:
