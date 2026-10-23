@@ -2278,7 +2278,6 @@ class LLMRouterAddon:
                 flow.metadata["call_id"] = captured_req.call_id
                 flow.metadata["codex_cli_oauth"] = True
                 flow.metadata["codex_cli_oauth_first_body_at_ms"] = None
-                flow.metadata["codex_cli_oauth_first_output_at_ms"] = None
                 flow.metadata["codex_response_protocol"] = protocol
                 flow.metadata["codex_include_usage"] = prepared.include_usage
                 flow.metadata["codex_unmappable"] = [
@@ -2300,7 +2299,6 @@ class LLMRouterAddon:
                 )
                 return
 
-            response_timing = {}
             status, resp_headers, resp_body, first_body_at_ms = send_via_codex_outbound(
                 method="POST",
                 url=full_url,
@@ -2309,7 +2307,6 @@ class LLMRouterAddon:
                 timeout_ms=600_000,
                 request_id=captured_req.call_id,
                 source=outbound_source,
-                response_timing=response_timing,
             )
             flow.metadata["codex_outbound_diagnostics"] = build_outbound_diagnostics(
                 method="POST",
@@ -2409,9 +2406,6 @@ class LLMRouterAddon:
             flow.metadata["call_id"] = captured_req.call_id
             flow.metadata["codex_cli_oauth"] = True
             flow.metadata["codex_cli_oauth_first_body_at_ms"] = first_body_at_ms
-            flow.metadata["codex_cli_oauth_first_output_at_ms"] = response_timing.get(
-                "first_output_at_ms"
-            )
             flow.metadata["codex_response_protocol"] = (
                 "search"
                 if search_request
@@ -2933,38 +2927,6 @@ class LLMRouterAddon:
                     "last_activity_at": datetime.now().isoformat(),
                 })
 
-        if self._detect_business_protocol(flow) == "responses":
-            if flow.metadata.get("responses_first_output_time") is not None:
-                flow.metadata.pop("responses_timing_buffer", None)
-            else:
-                timing_buffer = flow.metadata.get("responses_timing_buffer", b"")
-                if not isinstance(timing_buffer, bytes):
-                    timing_buffer = b""
-                if chunk:
-                    timing_buffer += chunk
-                eof = not chunk
-                while b"\n" in timing_buffer or (eof and timing_buffer):
-                    if b"\n" in timing_buffer:
-                        line, timing_buffer = timing_buffer.split(b"\n", 1)
-                    else:
-                        line, timing_buffer = timing_buffer, b""
-                    line = line.rstrip(b"\r")
-                    if not line.startswith(b"data:"):
-                        continue
-                    try:
-                        event = json.loads(line[5:].strip().decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if responses_cache_tokens_parser.is_content_delta(event):
-                        flow.metadata["responses_first_output_time"] = time.time()
-                        timing_buffer = b""
-                        break
-                if flow.metadata.get("responses_first_output_time") is not None or eof:
-                    flow.metadata.pop("responses_timing_buffer", None)
-                elif timing_buffer:
-                    flow.metadata["responses_timing_buffer"] = timing_buffer
-                else:
-                    flow.metadata.pop("responses_timing_buffer", None)
         return chunk
 
     @staticmethod
@@ -3992,28 +3954,6 @@ class LLMRouterAddon:
         else:
             converted = converter.feed(chunk) if converter is not None else b""
             if converted:
-                if flow.metadata.get("codex_cli_oauth_first_output_at_ms") is None:
-                    for line in converted.splitlines():
-                        if not line.startswith(b"data:"):
-                            continue
-                        try:
-                            event = json.loads(line[5:].strip().decode("utf-8"))
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            continue
-                        choices = event.get("choices") if isinstance(event, dict) else None
-                        for choice in choices or []:
-                            delta = choice.get("delta") if isinstance(choice, dict) else None
-                            if not isinstance(delta, dict):
-                                continue
-                            if (
-                                delta.get("content")
-                                or delta.get("reasoning_content")
-                                or delta.get("tool_calls")
-                            ):
-                                flow.metadata["codex_cli_oauth_first_output_at_ms"] = int(time.time() * 1000)
-                                break
-                        if flow.metadata.get("codex_cli_oauth_first_output_at_ms") is not None:
-                            break
                 result = self._record_stream_activity(flow, converted)
             elif chunk:
                 result = []
@@ -4237,42 +4177,27 @@ class LLMRouterAddon:
         if stream_type != "stream":
             return None
 
-        if self._detect_business_protocol(flow) == "responses":
-            first_output_at_ms = flow.metadata.get(
-                "codex_cli_oauth_first_output_at_ms"
-            )
-            if type(first_output_at_ms) is int:
-                first_token_ms = int(
-                    first_output_at_ms - captured_req.start_time * 1000
-                )
-                return first_token_ms if first_token_ms >= 0 else None
-            first_output_time = flow.metadata.get("responses_first_output_time")
-            if first_output_time is not None:
-                first_token_ms = int(
-                    (first_output_time - captured_req.start_time) * 1000
-                )
-                return first_token_ms if first_token_ms >= 0 else None
-            return None
-
-        if flow.metadata.get("codex_passthrough"):
-            first_token_time = flow.metadata.get("first_token_time")
-            if first_token_time is None:
-                first_token_time = flow.metadata.get("headers_time")
-            if first_token_time is None:
-                return None
-            first_token_ms = int(
-                (first_token_time - captured_req.start_time) * 1000
-            )
-            return first_token_ms if first_token_ms >= 0 else None
-
-        if flow.metadata.get("codex_cli_oauth"):
-            first_body_at_ms = flow.metadata.get(
-                "codex_cli_oauth_first_body_at_ms"
-            )
+        if (
+            flow.metadata.get("codex_cli_oauth")
+            and not flow.metadata.get("codex_passthrough")
+        ):
+            first_body_at_ms = flow.metadata.get("codex_cli_oauth_first_body_at_ms")
             if type(first_body_at_ms) is not int:
                 return None
             first_token_ms = int(
                 first_body_at_ms - captured_req.start_time * 1000
+            )
+            return first_token_ms if first_token_ms >= 0 else None
+
+        if (
+            flow.metadata.get("codex_passthrough")
+            or self._detect_business_protocol(flow) == "responses"
+        ):
+            first_token_time = flow.metadata.get("first_token_time")
+            if first_token_time is None:
+                return None
+            first_token_ms = int(
+                (first_token_time - captured_req.start_time) * 1000
             )
             return first_token_ms if first_token_ms >= 0 else None
 
@@ -4298,13 +4223,14 @@ class LLMRouterAddon:
         )
 
     async def websocket_message(self, flow):
-        """记录 Codex Responses WebSocket 原始调用帧并透传上下行消息。"""
+        """按每次调用的首次响应消息和完整结束消息记录 WebSocket 统计并透传帧。"""
         if not flow.metadata.get("codex_responses_websocket") or not flow.websocket:
             return
         if not flow.websocket.messages:
             return
 
         message = flow.websocket.messages[-1]
+        received_at = message.timestamp
         message_content = message.content
         try:
             message_text = (
@@ -4326,7 +4252,7 @@ class LLMRouterAddon:
                 return
 
             call_id = str(uuid.uuid4())
-            now = time.time()
+            now = received_at
             request_payload = dict(event)
             ws_route = flow.metadata.get("codex_ws_route")
             original_model = event.get("model")
@@ -4364,8 +4290,6 @@ class LLMRouterAddon:
                 "response_frames": [],
                 "response_id": None,
                 "first_token_ms": None,
-                # 首尾有效内容增量的耗时，用于统计输出阶段速度。
-                "last_output_ms": None,
                 "original_model": original_model,
                 "overridden_model": overridden_model,
                 "previous_response_id": previous_response_id,
@@ -4454,12 +4378,21 @@ class LLMRouterAddon:
             )
             return
 
+        event_type = event.get("type") if isinstance(event, dict) else None
+        if (
+            not isinstance(event, dict)
+            or not isinstance(event_type, str)
+            or not (
+                event_type.startswith("response.")
+                or event_type == "error"
+            )
+        ):
+            return
         if not websocket_calls:
             return
 
         response_obj = event.get("response") if isinstance(event, dict) else None
         response_id = None
-        event_type = event.get("type") if isinstance(event, dict) else None
         if isinstance(response_obj, dict):
             response_id = response_obj.get("id")
         if not response_id and isinstance(event, dict):
@@ -4486,7 +4419,11 @@ class LLMRouterAddon:
 
         if call_state is None:
             return
-        current_time = time.time()
+        current_time = received_at
+        if call_state["first_token_ms"] is None:
+            call_state["first_token_ms"] = int(
+                (current_time - call_state["start_time"]) * 1000
+            )
         last_persisted_at = call_state.get("last_activity_persisted_at")
         if (
             last_persisted_at is not None
@@ -4499,11 +4436,6 @@ class LLMRouterAddon:
                 "duration_ms": int((current_time - call_state["start_time"]) * 1000),
                 "last_activity_at": datetime.now().isoformat(),
             })
-        if responses_cache_tokens_parser.is_content_delta(event):
-            output_ms = int((current_time - call_state["start_time"]) * 1000)
-            if call_state["first_token_ms"] is None:
-                call_state["first_token_ms"] = output_ms
-            call_state["last_output_ms"] = output_ms
         call_state["response_frames"].append(message_text)
 
         if event_type in {
@@ -4513,7 +4445,7 @@ class LLMRouterAddon:
             "error",
         }:
             response_body = "\n".join(call_state.get("response_frames", []))
-            duration_ms = int((time.time() - call_state["start_time"]) * 1000)
+            duration_ms = int((current_time - call_state["start_time"]) * 1000)
             business_status, business_error = self._judge_codex_websocket_business(
                 flow,
                 call_state.get("response_frames", []),
@@ -4536,13 +4468,13 @@ class LLMRouterAddon:
                 if frame_miss_tokens is not None:
                     cache_miss_tokens = frame_miss_tokens
             first_token_ms = call_state.get("first_token_ms")
-            # 速度只统计首尾有效输出增量，不计完成事件的等待。
+            # 速度统计从首次响应消息到完整结束消息，首字耗时与计速共用首消息时间。
             tokens_per_second = responses_cache_tokens_parser.get_tokens_per_second(
                 "\n".join(
                     "data: " + frame
                     for frame in call_state.get("response_frames", [])
                 ),
-                call_state.get("last_output_ms"),
+                duration_ms,
                 first_token_ms,
             )
             self._enqueue_call_save({
@@ -4775,6 +4707,13 @@ class LLMRouterAddon:
                     f"[AUTO_RETRY] call_id={captured_req.call_id} retry failed: {e}",
                     exc_info=True
                 )
+        if (
+            flow.metadata.get("codex_response_protocol") == "responses"
+            and flow.response.timestamp_end is not None
+        ):
+            captured_resp.duration_ms = int(
+                (flow.response.timestamp_end - captured_req.start_time) * 1000
+            )
         final_responses_body = None
 
         # 协议转换：非流式响应
@@ -5226,6 +5165,13 @@ class LLMRouterAddon:
                     else str(buffered_response)
                 )
             duration_ms = int((time.time() - captured_req.start_time) * 1000)
+            if (
+                flow.metadata.get("codex_response_protocol") == "responses"
+                and response_timestamp_end is not None
+            ):
+                duration_ms = int(
+                    (response_timestamp_end - captured_req.start_time) * 1000
+                )
             response_headers = dict(flow.response.headers) if flow.response else {}
             stream_type = "non_stream"
             first_token_ms = None
