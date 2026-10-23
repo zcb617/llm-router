@@ -4213,9 +4213,36 @@ class LLMRouterAddon:
         """记录 Codex Responses WebSocket 上游握手响应，供调用日志关联使用。"""
         if not flow.metadata.get("codex_responses_websocket"):
             return
+        flow.metadata["codex_ws_diag"] = {
+            "started_at": time.time(),
+            "client_messages": 0,
+            "server_messages": 0,
+            "client_bytes": 0,
+            "server_bytes": 0,
+            "last_client_at": None,
+            "last_server_at": None,
+        }
+        client_conn = getattr(flow, "client_conn", None)
+        server_conn = getattr(flow, "server_conn", None)
+        nginx_request_id = flow.request.headers.get("X-Request-ID") or "-"
+        client_request_id = flow.request.headers.get("x-client-request-id") or "-"
+        client_peer = getattr(client_conn, "peername", None)
+        client_sock = getattr(client_conn, "sockname", None)
+        server_peer = getattr(server_conn, "peername", None)
+        server_sock = getattr(server_conn, "sockname", None)
         self._codex_ws_flows[flow.id] = flow
         flow.metadata["codex_ws_response_headers"] = (
             dict(flow.response.headers) if flow.response is not None else {}
+        )
+        logger.info(
+            "[CODEX_WS_CONNECTION] flow_id=%s nginx_request_id=%s client_request_id=%s client_peer=%s client_sock=%s server_peer=%s server_sock=%s",
+            flow.id,
+            nginx_request_id,
+            client_request_id,
+            client_peer,
+            client_sock,
+            server_peer,
+            server_sock,
         )
         logger.info(
             "[CODEX_WS_CONNECTED] route=%s model=%s target=%s",
@@ -4233,6 +4260,16 @@ class LLMRouterAddon:
 
         message = flow.websocket.messages[-1]
         received_at = message.timestamp
+        diag = flow.metadata.get("codex_ws_diag")
+        if isinstance(diag, dict):
+            if message.from_client:
+                diag["client_messages"] += 1
+                diag["client_bytes"] += len(message.content)
+                diag["last_client_at"] = message.timestamp
+            else:
+                diag["server_messages"] += 1
+                diag["server_bytes"] += len(message.content)
+                diag["last_server_at"] = message.timestamp
         message_content = message.content
         try:
             message_text = (
@@ -4372,7 +4409,9 @@ class LLMRouterAddon:
 
             websocket_calls.append(call_state)
             logger.info(
-                "[CODEX_WS_CALL_STARTED] call_id=%s model=%s previous_response_id=%s request_bytes=%s",
+                "[CODEX_WS_CALL_STARTED] flow_id=%s nginx_request_id=%s call_id=%s model=%s previous_response_id=%s request_bytes=%s",
+                flow.id,
+                flow.request.headers.get("X-Request-ID") or "-",
                 call_id,
                 call_state["original_model"],
                 previous_response_id or "-",
@@ -4517,7 +4556,9 @@ class LLMRouterAddon:
                 "last_activity_at": datetime.now().isoformat(),
             })
             logger.info(
-                "[CODEX_WS_CALL_FINISHED] call_id=%s transport=success business=%s duration_ms=%s",
+                "[CODEX_WS_CALL_FINISHED] flow_id=%s nginx_request_id=%s call_id=%s transport=success business=%s duration_ms=%s",
+                flow.id,
+                flow.request.headers.get("X-Request-ID") or "-",
                 call_state["call_id"],
                 business_status,
                 duration_ms,
@@ -4539,6 +4580,7 @@ class LLMRouterAddon:
         if flow.metadata.get("codex_ws_end_recorded"):
             return
         websocket_calls = flow.metadata.get("codex_ws_calls", [])
+        active_call_ids = [call_state.get("call_id") for call_state in websocket_calls]
         interrupted_calls = len(websocket_calls)
         close_code = getattr(flow.websocket, "close_code", None) if flow.websocket else None
         closed_by_client = getattr(flow.websocket, "closed_by_client", None) if flow.websocket else None
@@ -4567,6 +4609,34 @@ class LLMRouterAddon:
             transport_error,
             interrupted_calls,
         )
+        diag = flow.metadata.get("codex_ws_diag")
+        if isinstance(diag, dict):
+            ended_at = time.time()
+            client_conn = getattr(flow, "client_conn", None)
+            server_conn = getattr(flow, "server_conn", None)
+            last_client_at = diag.get("last_client_at")
+            last_server_at = diag.get("last_server_at")
+            connection_end = {
+                "flow_id": flow.id,
+                "nginx_request_id": flow.request.headers.get("X-Request-ID") or "-",
+                "client_peer": getattr(client_conn, "peername", None),
+                "server_peer": getattr(server_conn, "peername", None),
+                "duration_ms": int((ended_at - diag["started_at"]) * 1000),
+                "client_messages": diag.get("client_messages", 0),
+                "server_messages": diag.get("server_messages", 0),
+                "client_bytes": diag.get("client_bytes", 0),
+                "server_bytes": diag.get("server_bytes", 0),
+                "last_client_age_ms": int((ended_at - last_client_at) * 1000) if last_client_at is not None else None,
+                "last_server_age_ms": int((ended_at - last_server_at) * 1000) if last_server_at is not None else None,
+                "active_call_ids": active_call_ids,
+                "close_code": close_code,
+                "closed_by_client": closed_by_client,
+                "close_reason": close_reason,
+            }
+            logger.info(
+                "[CODEX_WS_CONNECTION_END] %s",
+                json.dumps(connection_end, ensure_ascii=False, separators=(",", ":")),
+            )
 
     def _record_codex_websocket_transport_failures(
         self,

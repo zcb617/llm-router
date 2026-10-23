@@ -20,18 +20,32 @@ log_dir = Path(__file__).parent / "log"
 log_dir.mkdir(exist_ok=True)
 log_file = log_dir / "llm_router.log"
 
+
+class ClientDefaultFilter(logging.Filter):
+    """为日志记录补充默认客户端字段，供连接日志统一关联。"""
+
+    def filter(self, record):
+        """保留业务日志已有客户端字段，并为缺失字段设置占位值。"""
+        record.client_display = getattr(record, "client", None) or "-"
+        return True
+
+
+client_default_filter = ClientDefaultFilter()
+
 handler_file = RotatingFileHandler(
     log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
 )
 handler_file.setLevel(logging.INFO)
+handler_file.addFilter(client_default_filter)
 handler_file.setFormatter(logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s - client=%(client_display)s"
 ))
 
 handler_console = logging.StreamHandler()
 handler_console.setLevel(logging.INFO)
+handler_console.addFilter(client_default_filter)
 handler_console.setFormatter(logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s - client=%(client_display)s"
 ))
 
 logging.basicConfig(
