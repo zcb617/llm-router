@@ -9,7 +9,6 @@ import sys
 import asyncio
 import signal
 import logging
-from datetime import datetime
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
@@ -121,13 +120,6 @@ def main():
     print("Press Ctrl+C to stop\n")
 
     try:
-        started_before = datetime.now().isoformat()
-        recovered_count = storage.recover_in_progress_calls(started_before)
-        logging.info(
-            "[CALLS_RECOVERED_AFTER_RESTART] count=%s started_before=%s",
-            recovered_count,
-            started_before,
-        )
         asyncio.run(run_proxy(config, storage))
     finally:
         storage.close()
