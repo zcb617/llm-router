@@ -21,6 +21,7 @@ _DEFAULT_CANDIDATES = [
     _PROJECT_ROOT / "codex_outbound" / "target" / "debug" / "codex_outbound",
     _PROJECT_ROOT / "bin" / "codex_outbound",
 ]
+_CODEX_HTTP_STREAM_STDERR_TASKS = set()  # 保持 HTTP 中继 stderr 读取任务直到 Rust 进程退出。
 
 
 class CodexOutboundError(RuntimeError):
@@ -242,6 +243,119 @@ def stop_codex_connect_tunnel(process: asyncio.subprocess.Process) -> None:
         process.terminate()
     except (ProcessLookupError, OSError):
         return
+
+
+async def _log_codex_http_stream_stderr(
+    process: asyncio.subprocess.Process,
+    request_id: str | None,
+    source: str | None,
+) -> None:
+    """读取 Rust HTTP 中继的脱敏诊断行，避免 stderr 管道阻塞子进程。"""
+    if process.stderr is None:
+        return
+    while True:
+        line = await process.stderr.readline()
+        if not line:
+            return
+        message = line.decode("utf-8", errors="replace").strip()
+        if message:
+            logger.warning(
+                "codex_outbound HTTP stream diagnostic: request_id=%s source=%s detail=%s",
+                request_id,
+                source,
+                message,
+            )
+
+
+async def start_codex_http_stream(
+    *,
+    method: str,
+    url: str,
+    headers: list[tuple[str, str]],
+    body: bytes | str | None,
+    timeout_ms: int = 600_000,
+    request_id: str | None = None,
+    source: str | None = None,
+) -> tuple[asyncio.subprocess.Process, str, int]:
+    """启动 Rust Codex OAuth HTTP 流式中继并等待一次性本机监听地址。"""
+    binary = resolve_codex_outbound_bin()
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            str(binary),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stderr_task = asyncio.create_task(
+            _log_codex_http_stream_stderr(process, request_id, source)
+        )
+        _CODEX_HTTP_STREAM_STDERR_TASKS.add(stderr_task)
+        stderr_task.add_done_callback(_CODEX_HTTP_STREAM_STDERR_TASKS.discard)
+        body_bytes = _body_bytes(body)
+        request_payload = json.dumps(
+            {
+                "mode": "http_stream",
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "body_b64": base64.b64encode(body_bytes).decode("ascii"),
+                "timeout_ms": timeout_ms,
+                "request_id": request_id,
+                "source": source,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        process.stdin.write(request_payload + b"\n")
+        await process.stdin.drain()
+        process.stdin.close()
+        await process.stdin.wait_closed()
+
+        ready_line = await asyncio.wait_for(process.stdout.readline(), timeout=10)
+        if not ready_line or process.returncode is not None:
+            raise CodexOutboundError(
+                "codex_outbound HTTP stream exited before becoming ready"
+            )
+        try:
+            ready = json.loads(ready_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CodexOutboundError(
+                "codex_outbound HTTP stream returned invalid ready JSON"
+            ) from exc
+        if (
+            not isinstance(ready, dict)
+            or ready.get("ok") is not True
+            or not isinstance(ready.get("host"), str)
+            or not ready["host"]
+            or not isinstance(ready.get("port"), int)
+            or isinstance(ready["port"], bool)
+            or not 1 <= ready["port"] <= 65535
+        ):
+            raise CodexOutboundError(
+                "codex_outbound HTTP stream failed to become ready"
+            )
+        return process, ready["host"], ready["port"]
+    except asyncio.CancelledError:
+        if process is not None:
+            await _terminate_and_reap_codex_connect_tunnel(process)
+        raise
+    except Exception as exc:
+        if process is not None:
+            await _terminate_and_reap_codex_connect_tunnel(process)
+        if isinstance(exc, CodexOutboundError):
+            raise
+        if isinstance(exc, asyncio.TimeoutError):
+            raise CodexOutboundError(
+                "timed out waiting for codex_outbound HTTP stream readiness"
+            ) from exc
+        raise CodexOutboundError(
+            "failed to start codex_outbound HTTP stream"
+        ) from exc
+
+
+async def stop_codex_http_stream(process: asyncio.subprocess.Process) -> None:
+    """终止并等待 Rust Codex OAuth HTTP 流式中继进程退出。"""
+    await _terminate_and_reap_codex_connect_tunnel(process)
 
 
 def send_via_codex_outbound(

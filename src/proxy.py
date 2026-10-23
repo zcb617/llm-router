@@ -25,6 +25,7 @@ from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
     CodexCliAuthManager,
     CODEX_PROMPT_CACHE_AFFINITY_TTL_SECONDS,
+    CodexResponsesChatStreamConverter,
     convert_codex_responses_to_chat,
     ensure_usage_in_upstream_response,
     host_from_url,
@@ -43,7 +44,9 @@ from src.codex_outbound_client import (
     build_outbound_diagnostics,
     send_via_codex_outbound,
     start_codex_connect_tunnel,
+    start_codex_http_stream,
     stop_codex_connect_tunnel,
+    stop_codex_http_stream,
 )
 from src.responses_cache_tokens import responses_cache_tokens_parser
 from src.stream_relay import (
@@ -160,6 +163,7 @@ class LLMRouterAddon:
         self._storage = None
         self._pending_requests = {}  # flow_id -> CapturedRequest
         self._pending_requests_lock = threading.Lock()
+        self._codex_http_stream_processes = set()  # 正在为 HTTP 流式调用工作的 Rust 子进程集合。
 
         # 健康检查定时器
         self._health_check_timer = None
@@ -1586,6 +1590,8 @@ class LLMRouterAddon:
                 model_name,
                 path,
             )
+            if flow.metadata.get("codex_http_stream_request"):
+                await self._start_codex_http_stream(flow)
             return
 
         # 判断是否为 Responses API 请求（支持 /v1/responses 和 /responses）
@@ -2247,6 +2253,53 @@ class LLMRouterAddon:
             # Force method/path bookkeeping for capture; actual send is via Rust outbound.
             flow.request.method = "POST"
 
+            if stream and not search_request:
+                protocol = "chat_completions" if legacy_chat else "responses"
+                stream_request = {
+                    "method": "POST",
+                    "url": full_url,
+                    "headers": req_headers,
+                    "body": req_data,
+                    "timeout_ms": 600_000,
+                    "request_id": captured_req.call_id,
+                    "source": outbound_source,
+                }
+                flow.metadata["codex_http_stream_request"] = dict(stream_request)
+                flow.metadata["codex_http_stream_request_details"] = dict(stream_request)
+                flow.metadata["codex_http_stream_context"] = {
+                    "model": forward_model,
+                    "protocol": protocol,
+                    "prompt_cache_key": prompt_cache_key,
+                    "session_id": session_id,
+                    "thread_id": thread_id,
+                }
+                flow.metadata["codex_http_raw_chunks"] = []
+                flow.metadata["codex_http_stream_finalized"] = False
+                flow.metadata["call_id"] = captured_req.call_id
+                flow.metadata["codex_cli_oauth"] = True
+                flow.metadata["codex_cli_oauth_first_body_at_ms"] = None
+                flow.metadata["codex_cli_oauth_first_output_at_ms"] = None
+                flow.metadata["codex_response_protocol"] = protocol
+                flow.metadata["codex_include_usage"] = prepared.include_usage
+                flow.metadata["codex_unmappable"] = [
+                    {
+                        "field": u.field,
+                        "decision": u.decision,
+                        "reason": u.reason,
+                    }
+                    for u in prepared.unmappable
+                ]
+                captured_req.body = req_body
+                captured_req.original_model = model_name
+                captured_req.overridden_model = forward_model or model_name
+                captured_req.url = full_url
+                self._store_pending_request(flow, captured_req)
+                logger.info(
+                    "[CODEX_HTTP_STREAM_ROUTE] call_id=%s mode=rust_http_stream",
+                    captured_req.call_id,
+                )
+                return
+
             response_timing = {}
             status, resp_headers, resp_body, first_body_at_ms = send_via_codex_outbound(
                 method="POST",
@@ -2377,6 +2430,9 @@ class LLMRouterAddon:
             ]
             self._store_pending_request(flow, captured_req)
         except CodexOutboundError as e:
+            flow.metadata.pop("codex_http_stream_request", None)
+            if flow.metadata.get("codex_http_stream_context"):
+                self._pop_pending_request(flow)
             logger.error(f"Codex CLI OAuth outbound failed: {e}")
             flow.response = http.Response.make(
                 502,
@@ -2385,6 +2441,9 @@ class LLMRouterAddon:
             )
             flow.metadata["local_response"] = True
         except Exception as e:
+            flow.metadata.pop("codex_http_stream_request", None)
+            if flow.metadata.get("codex_http_stream_context"):
+                self._pop_pending_request(flow)
             logger.error(f"Codex CLI OAuth upstream request failed: {e}")
             flow.response = http.Response.make(
                 502,
@@ -2392,6 +2451,59 @@ class LLMRouterAddon:
                 {"Content-Type": "application/json"},
             )
             flow.metadata["local_response"] = True
+
+    async def _start_codex_http_stream(self, flow):
+        """启动 Codex OAuth Rust HTTP 中继，并将当前 flow 定向到本机监听端口。"""
+        request_kwargs = flow.metadata.pop("codex_http_stream_request", None)
+        if not isinstance(request_kwargs, dict):
+            return
+        client_conn = getattr(flow, "client_conn", None)
+        if getattr(client_conn, "timestamp_end", None) is not None:
+            self._finish_codex_http_stream(flow)
+            return
+
+        process = None
+        try:
+            process, host, port = await start_codex_http_stream(**request_kwargs)
+            self._codex_http_stream_processes.add(process)
+            flow.metadata["codex_http_stream_process"] = process
+            if getattr(client_conn, "timestamp_end", None) is not None:
+                flow.metadata.pop("codex_http_stream_process", None)
+                self._codex_http_stream_processes.discard(process)
+                await stop_codex_http_stream(process)
+                self._finish_codex_http_stream(flow)
+                return
+
+            flow.request.url = f"http://{host}:{port}/stream"
+            flow.request.method = "POST"
+            flow.request.headers.clear()
+            flow.request.headers["Host"] = f"{host}:{port}"
+            flow.request.headers["Content-Length"] = "0"
+            flow.request.content = b""
+            flow.server_conn.via = None
+        except asyncio.CancelledError:
+            if process is not None:
+                flow.metadata.pop("codex_http_stream_process", None)
+                self._codex_http_stream_processes.discard(process)
+                await asyncio.shield(stop_codex_http_stream(process))
+            self._finish_codex_http_stream(flow)
+            raise
+        except Exception as exc:
+            if process is not None:
+                flow.metadata.pop("codex_http_stream_process", None)
+                self._codex_http_stream_processes.discard(process)
+                await stop_codex_http_stream(process)
+            flow.response = http.Response.make(
+                502,
+                b'{"error":"Codex CLI OAuth HTTP stream unavailable"}',
+                {"Content-Type": "application/json"},
+            )
+            flow.metadata["codex_http_stream_start_failed"] = True
+            logger.error(
+                "Codex CLI OAuth HTTP stream setup failed: call_id=%s error_type=%s",
+                flow.metadata.get("call_id"),
+                type(exc).__name__,
+            )
 
     def _forward_single_upstream_kimi_cli(self, flow, mapping, captured_req, model_name, path):
         """kimi-cli auth 单上游非流式专用通道：严格复刻 kimi-cli 头部模板。"""
@@ -3864,6 +3976,128 @@ class LLMRouterAddon:
             if is_pg and conn is not None:
                 self.storage._pg_close(conn, cur)
 
+    def _record_codex_http_stream_chunk(self, flow, chunk: bytes):
+        """保留 Codex 上游原始 chunk，并把实时响应写入既有流统计链路。"""
+        raw_chunks = flow.metadata.setdefault("codex_http_raw_chunks", [])
+        if chunk:
+            raw_chunks.append(chunk)
+            if flow.metadata.get("codex_cli_oauth_first_body_at_ms") is None:
+                flow.metadata["codex_cli_oauth_first_body_at_ms"] = int(time.time() * 1000)
+
+        protocol = flow.metadata.get("codex_response_protocol")
+        passthrough = flow.metadata.get("codex_http_stream_passthrough", False)
+        converter = flow.metadata.get("codex_http_stream_converter")
+        if passthrough or protocol != "chat_completions":
+            result = self._record_stream_activity(flow, chunk)
+        else:
+            converted = converter.feed(chunk) if converter is not None else b""
+            if converted:
+                if flow.metadata.get("codex_cli_oauth_first_output_at_ms") is None:
+                    for line in converted.splitlines():
+                        if not line.startswith(b"data:"):
+                            continue
+                        try:
+                            event = json.loads(line[5:].strip().decode("utf-8"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        choices = event.get("choices") if isinstance(event, dict) else None
+                        for choice in choices or []:
+                            delta = choice.get("delta") if isinstance(choice, dict) else None
+                            if not isinstance(delta, dict):
+                                continue
+                            if (
+                                delta.get("content")
+                                or delta.get("reasoning_content")
+                                or delta.get("tool_calls")
+                            ):
+                                flow.metadata["codex_cli_oauth_first_output_at_ms"] = int(time.time() * 1000)
+                                break
+                        if flow.metadata.get("codex_cli_oauth_first_output_at_ms") is not None:
+                            break
+                result = self._record_stream_activity(flow, converted)
+            elif chunk:
+                result = []
+            else:
+                result = b""
+
+        if not chunk and not flow.metadata.get("codex_http_usage_checked"):
+            flow.metadata["codex_http_usage_checked"] = True
+            status = flow.metadata.get("codex_http_stream_response_status")
+            if status is not None and 200 <= status < 300 and protocol != "search":
+                raw_body = b"".join(raw_chunks)
+                _, usage_warnings = ensure_usage_in_upstream_response(
+                    raw_body,
+                    include_usage=bool(flow.metadata.get("codex_include_usage")),
+                    stream=True,
+                )
+                for warning in usage_warnings:
+                    logger.warning(warning)
+        return result
+
+    def _setup_codex_http_stream_response(self, flow):
+        """安装 Codex HTTP 中继响应回调并移除本机分块协议的失效头。"""
+        response = flow.response
+        if response is None:
+            return
+        status = response.status_code
+        flow.metadata["codex_http_stream_response_status"] = status
+        flow.metadata["codex_http_stream_response_headers"] = list(response.headers.items())
+        for header_name in list(response.headers.keys()):
+            if header_name.lower() in {
+                "content-length",
+                "transfer-encoding",
+                "connection",
+                "keep-alive",
+            }:
+                del response.headers[header_name]
+
+        is_success = 200 <= status < 300
+        flow.metadata["codex_http_stream_passthrough"] = not is_success
+        if is_success and flow.metadata.get("codex_response_protocol") == "chat_completions":
+            context = flow.metadata.get("codex_http_stream_context") or {}
+            flow.metadata["codex_http_stream_converter"] = CodexResponsesChatStreamConverter(
+                fallback_model=context.get("model") or "",
+                include_usage=bool(flow.metadata.get("codex_include_usage")),
+            )
+            response.headers["Content-Type"] = "text/event-stream"
+        response.stream = lambda chunk: self._record_codex_http_stream_chunk(flow, chunk)
+
+    def _finish_codex_http_stream(self, flow):
+        """保存 Codex 原始出站诊断并安排 HTTP 中继进程回收。"""
+        details = flow.metadata.get("codex_http_stream_request_details")
+        if not isinstance(details, dict):
+            return
+        if not flow.metadata.get("codex_http_stream_finalized"):
+            response_headers = flow.metadata.get("codex_http_stream_response_headers")
+            if response_headers is None and flow.response is not None:
+                response_headers = list(flow.response.headers.items())
+            raw_body = b"".join(flow.metadata.get("codex_http_raw_chunks", []))
+            status = flow.metadata.get("codex_http_stream_response_status")
+            if status is None and flow.response is not None:
+                status = flow.response.status_code
+            flow.metadata["codex_outbound_diagnostics"] = build_outbound_diagnostics(
+                method=details["method"],
+                url=details["url"],
+                headers=details["headers"],
+                body=details["body"],
+                request_id=details["request_id"],
+                source=details["source"],
+                status=status,
+                response_headers=response_headers or [],
+                response_body=raw_body,
+                first_body_at_ms=flow.metadata.get("codex_cli_oauth_first_body_at_ms"),
+                context=flow.metadata.get("codex_http_stream_context"),
+            )
+            flow.metadata["codex_http_stream_finalized"] = True
+
+        process = flow.metadata.pop("codex_http_stream_process", None)
+        if process is not None:
+            self._codex_http_stream_processes.discard(process)
+            try:
+                asyncio.get_running_loop().create_task(stop_codex_http_stream(process))
+            except RuntimeError:
+                asyncio.run(stop_codex_http_stream(process))
+
     def responseheaders(self, flow: http.HTTPFlow):
         """响应头到达时触发（用于计算首字耗时）"""
         if flow.metadata.get("codex_responses_websocket"):
@@ -3873,6 +4107,9 @@ class LLMRouterAddon:
             return
         flow.metadata["headers_time"] = time.time()
         if not self._is_stream_request(flow.metadata.get("request_body_for_stream")):
+            return
+        if flow.metadata.get("codex_http_stream_request_details") is not None:
+            self._setup_codex_http_stream_response(flow)
             return
         self._capture_stream_relay_selection(flow)
         # 上游返回非 2xx 时不进行协议转换，直接透传错误响应
@@ -4469,6 +4706,7 @@ class LLMRouterAddon:
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
+        self._finish_codex_http_stream(flow)
         if flow.metadata.get("codex_responses_websocket"):
             if flow.response is None or flow.response.status_code != 101:
                 self._stop_codex_ws_outbound_process(flow)
@@ -4794,6 +5032,7 @@ class LLMRouterAddon:
 
     def error(self, flow: http.HTTPFlow):
         """将客户端断开或一般网络错误交给共享网络异常处理流程。"""
+        self._finish_codex_http_stream(flow)
         self._stop_codex_ws_outbound_process(flow)
         raw_flow_error = flow.error
         raw_flow_error_message = (
@@ -5292,6 +5531,14 @@ class LLMRouterAddon:
 
     def done(self):
         """mitmproxy addon 退出时释放资源。"""
+        stream_processes = list(self._codex_http_stream_processes)
+        self._codex_http_stream_processes.clear()
+        for process in stream_processes:
+            try:
+                asyncio.get_running_loop().create_task(stop_codex_http_stream(process))
+            except RuntimeError:
+                asyncio.run(stop_codex_http_stream(process))
+
         with self._pending_requests_lock:
             pending_requests = list(self._pending_requests.values())
             self._pending_requests.clear()

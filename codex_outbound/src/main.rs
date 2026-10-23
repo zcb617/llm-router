@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +265,31 @@ async fn main() {
         return;
     }
 
+    if req.mode.as_deref() == Some("http_stream") {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(_) => {
+                emit_connect_tunnel_startup_error("failed to bind loopback listener");
+                std::process::exit(1);
+            }
+        };
+        let local_addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(_) => {
+                emit_connect_tunnel_startup_error("failed to read loopback listener address");
+                std::process::exit(1);
+            }
+        };
+        if emit_connect_tunnel_ready(local_addr).is_err() {
+            std::process::exit(1);
+        }
+        if let Err(error) = run_http_stream(listener, &req).await {
+            eprintln!("HTTP stream forwarding failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     match run(&req).await {
         Ok(resp) => {
             emit(&resp);
@@ -425,7 +450,255 @@ async fn send_connect_response(client: &mut TcpStream, status: &str) {
     let _ = client.write_all(response.as_bytes()).await;
 }
 
+/// 处理一次本机 HTTP 中继请求，并在客户端断开时取消对应 Codex 上游请求。
+async fn run_http_stream(listener: TcpListener, req: &OutboundRequest) -> Result<(), String> {
+    const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+
+    let (mut client, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .map_err(|_| "local stream client accept timed out".to_string())?
+        .map_err(|_| "failed to accept local stream client".to_string())?;
+    drop(listener);
+
+    let header_result = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut header = Vec::new();
+        let mut ending = [0_u8; 4];
+        loop {
+            if header.len() >= MAX_HTTP_HEADER_BYTES {
+                return Err("local HTTP request header too large".to_string());
+            }
+            let mut byte = [0_u8; 1];
+            client
+                .read_exact(&mut byte)
+                .await
+                .map_err(|error| format!("incomplete local HTTP request header: {error}"))?;
+            header.push(byte[0]);
+            ending.rotate_left(1);
+            ending[3] = byte[0];
+            if ending == *b"\r\n\r\n" {
+                return Ok(header);
+            }
+        }
+    })
+    .await
+    .map_err(|_| "local HTTP request header timed out".to_string())?;
+
+    let header = match header_result {
+        Ok(header) => header,
+        Err(error) => {
+            send_http_stream_error(&mut client, 400, "Bad Request", "invalid local stream request").await;
+            return Err(error);
+        }
+    };
+    let request_header = match std::str::from_utf8(&header) {
+        Ok(value) => value,
+        Err(_) => {
+            send_http_stream_error(&mut client, 400, "Bad Request", "invalid local stream request").await;
+            return Err("invalid local HTTP request encoding".to_string());
+        }
+    };
+    let mut lines = request_header.split("\r\n");
+    if lines.next() != Some("POST /stream HTTP/1.1") {
+        send_http_stream_error(&mut client, 400, "Bad Request", "invalid local stream request").await;
+        return Err("invalid local HTTP request line".to_string());
+    }
+    let mut has_body = false;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let Some((name, value)) = line.split_once(':') else {
+            send_http_stream_error(&mut client, 400, "Bad Request", "invalid local stream request").await;
+            return Err("invalid local HTTP request header".to_string());
+        };
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            || (name.eq_ignore_ascii_case("content-length") && value.trim() != "0")
+        {
+            has_body = true;
+        }
+    }
+    if has_body {
+        send_http_stream_error(&mut client, 400, "Bad Request", "local stream request body is not allowed").await;
+        return Err("local HTTP request body is not allowed".to_string());
+    }
+
+    let (mut reader, mut writer) = client.into_split();
+    let relay = async {
+        let response = match send_request(req).await {
+            Ok(response) => response,
+            Err(error) => {
+                let mut safe_error = req
+                    .url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .map(|url| error.replace(url, "[upstream URL]"))
+                    .unwrap_or(error);
+                for (name, value) in &req.headers {
+                    if name.eq_ignore_ascii_case("authorization")
+                        || name.eq_ignore_ascii_case("proxy-authorization")
+                        || name.eq_ignore_ascii_case("cookie")
+                        || name.eq_ignore_ascii_case("set-cookie")
+                    {
+                        if !value.is_empty() {
+                            safe_error = safe_error.replace(value, "[redacted]");
+                        }
+                    }
+                }
+                eprintln!("Codex upstream request failed: {safe_error}");
+                send_http_stream_error(
+                    &mut writer,
+                    502,
+                    "Bad Gateway",
+                    "upstream request failed",
+                )
+                .await;
+                return Ok(());
+            }
+        };
+
+        let status = response.status();
+        let reason = status.canonical_reason().unwrap_or("Unknown");
+        let mut response_head = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), reason);
+        for (name, value) in response.headers().iter() {
+            let name = name.as_str();
+            if matches!(
+                name,
+                "connection"
+                    | "keep-alive"
+                    | "proxy-authenticate"
+                    | "proxy-authorization"
+                    | "te"
+                    | "trailer"
+                    | "transfer-encoding"
+                    | "upgrade"
+                    | "content-length"
+            ) {
+                continue;
+            }
+            if let Ok(value) = value.to_str() {
+                response_head.push_str(name);
+                response_head.push_str(": ");
+                response_head.push_str(value);
+                response_head.push_str("\r\n");
+            }
+        }
+        response_head.push_str("Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+        writer
+            .write_all(response_head.as_bytes())
+            .await
+            .map_err(|error| format!("failed to write local HTTP response headers: {error}"))?;
+
+        let mut upstream = response.bytes_stream();
+        while let Some(chunk) = upstream.next().await {
+            let chunk = chunk.map_err(|error| {
+                format!("failed to read upstream response stream: {}", error.without_url())
+            })?;
+            if chunk.is_empty() {
+                continue;
+            }
+            let chunk_prefix = format!("{:X}\r\n", chunk.len());
+            writer
+                .write_all(chunk_prefix.as_bytes())
+                .await
+                .map_err(|error| format!("failed to write local HTTP response chunk: {error}"))?;
+            writer
+                .write_all(&chunk)
+                .await
+                .map_err(|error| format!("failed to write local HTTP response chunk: {error}"))?;
+            writer
+                .write_all(b"\r\n")
+                .await
+                .map_err(|error| format!("failed to write local HTTP response chunk: {error}"))?;
+        }
+        writer
+            .write_all(b"0\r\n\r\n")
+            .await
+            .map_err(|error| format!("failed to finish local HTTP response: {error}"))?;
+        writer
+            .shutdown()
+            .await
+            .map_err(|error| format!("failed to close local HTTP response: {error}"))?;
+        Ok(())
+    };
+
+    tokio::select! {
+        result = relay => result,
+        read_result = async {
+            let mut extra = [0_u8; 1];
+            loop {
+                match reader.read(&mut extra).await {
+                    Ok(0) => return Ok(()),
+                    Ok(_) => return Err("unexpected data after local HTTP request headers".to_string()),
+                    Err(error) => return Err(format!("failed to monitor local HTTP client: {error}")),
+                }
+            }
+        } => read_result,
+    }
+}
+
+/// 在上游尚未返回响应头时向本机 mitmproxy 返回一个固定错误响应。
+async fn send_http_stream_error<W>(writer: &mut W, status: u16, reason: &str, message: &str)
+where
+    W: AsyncWrite + Unpin,
+{
+    let body = format!("{{\"error\":\"{message}\"}}");
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = writer.write_all(response.as_bytes()).await;
+    let _ = writer.shutdown().await;
+}
+
 async fn run(req: &OutboundRequest) -> Result<OutboundResponse, String> {
+    let response = send_request(req).await?;
+
+    let status = response.status().as_u16();
+    let mut out_headers = Vec::new();
+    for (name, value) in response.headers().iter() {
+        if let Ok(v) = value.to_str() {
+            out_headers.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+
+    let mut body = Vec::new();
+    let mut first_body_at_ms = None;
+    let mut first_output_at_ms = None;
+    let mut timing_buffer = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read body failed: {e}"))?;
+        let observed_at_ms = unix_time_ms();
+        record_first_body_at_ms(&mut first_body_at_ms, &chunk, observed_at_ms);
+        record_first_output_at_ms(
+            &mut first_output_at_ms,
+            &mut timing_buffer,
+            &chunk,
+            observed_at_ms,
+            false,
+        );
+        body.extend_from_slice(&chunk);
+    }
+    record_first_output_at_ms(
+        &mut first_output_at_ms,
+        &mut timing_buffer,
+        &[],
+        unix_time_ms(),
+        true,
+    );
+
+    Ok(OutboundResponse {
+        ok: true,
+        request_id: req.request_id.clone(),
+        source: req.source.clone(),
+        status: Some(status),
+        headers: out_headers,
+        body_b64: Some(B64.encode(body)),
+        first_body_at_ms,
+        first_output_at_ms,
+        error: None,
+    })
+}
+
+/// 按既有 OAuth HTTP 参数构造 reqwest 请求并取得真实上游响应头。
+async fn send_request(req: &OutboundRequest) -> Result<reqwest::Response, String> {
     let method_value = req
         .method
         .as_deref()
@@ -476,49 +749,5 @@ async fn run(req: &OutboundRequest) -> Result<OutboundResponse, String> {
         .await
         .map_err(|e| format!("request failed: {e}"))?;
 
-    let status = response.status().as_u16();
-    let mut out_headers = Vec::new();
-    for (name, value) in response.headers().iter() {
-        if let Ok(v) = value.to_str() {
-            out_headers.push((name.as_str().to_string(), v.to_string()));
-        }
-    }
-
-    let mut body = Vec::new();
-    let mut first_body_at_ms = None;
-    let mut first_output_at_ms = None;
-    let mut timing_buffer = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("read body failed: {e}"))?;
-        let observed_at_ms = unix_time_ms();
-        record_first_body_at_ms(&mut first_body_at_ms, &chunk, observed_at_ms);
-        record_first_output_at_ms(
-            &mut first_output_at_ms,
-            &mut timing_buffer,
-            &chunk,
-            observed_at_ms,
-            false,
-        );
-        body.extend_from_slice(&chunk);
-    }
-    record_first_output_at_ms(
-        &mut first_output_at_ms,
-        &mut timing_buffer,
-        &[],
-        unix_time_ms(),
-        true,
-    );
-
-    Ok(OutboundResponse {
-        ok: true,
-        request_id: req.request_id.clone(),
-        source: req.source.clone(),
-        status: Some(status),
-        headers: out_headers,
-        body_b64: Some(B64.encode(body)),
-        first_body_at_ms,
-        first_output_at_ms,
-        error: None,
-    })
+    Ok(response)
 }

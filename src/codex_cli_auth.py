@@ -1653,81 +1653,130 @@ def _chat_response_to_sse(response: dict[str, Any], *, include_usage: bool) -> b
     return b"".join(chunks)
 
 
-def convert_codex_responses_sse_to_chat(
-    body: str | bytes,
-    *,
-    fallback_model: str = "",
-    include_usage: bool = False,
-) -> bytes:
-    """Convert a buffered Codex Responses SSE body to Chat SSE."""
-    response_id = f"resp_{uuid.uuid4().hex[:16]}"
-    created = int(time.time())
-    model = fallback_model
-    status = "completed"
-    usage: dict[str, Any] | None = None
-    role_sent = False
-    finished = False
-    tool_indexes: dict[str, int] = {}
-    next_tool_index = 0
-    output_chunks: list[bytes] = []
+class CodexResponsesChatStreamConverter:
+    """将 Codex Responses SSE 增量转换为保持调用状态的 Chat SSE。"""
 
-    def emit_role() -> None:
-        nonlocal role_sent
-        if role_sent:
+    def __init__(
+        self,
+        fallback_model: str = "",
+        include_usage: bool = False,
+        buffered_compatibility: bool = False,
+    ):
+        """初始化一次 Responses 调用的跨 chunk 转换状态。"""
+        self.response_id = f"resp_{uuid.uuid4().hex[:16]}"  # 当前 Chat 流对外使用的响应编号。
+        self.created = int(time.time())  # 当前 Chat 流对外使用的创建时间。
+        self.model = fallback_model  # 当前 Chat 流对外使用的模型名称。
+        self.status = "completed"  # 上游 Responses 终态状态，用于计算 finish_reason。
+        self.usage: dict[str, Any] | None = None  # 上游 usage 映射后的 Chat 统计数据。
+        self.role_sent = False  # 标记 assistant role chunk 是否已经发送。
+        self.finished = False  # 标记上游终态是否已处理，防止重复结束或续写。
+        self.success_done_sent = False  # 标记 Chat 成功 finish 与 [DONE] 是否已经发送。
+        self.tool_indexes: dict[str, int] = {}  # 上游 tool call 标识到 Chat 顺序索引的映射。
+        self.next_tool_index = 0  # 下一个尚未分配的 Chat tool call 顺序索引。
+        self.buffer = b""  # 暂存跨网络 chunk 尚未组成完整 SSE 事件的字节。
+        self.include_usage = include_usage  # 控制 Chat 结束 chunk 是否回传 usage。
+        self.buffered_compatibility = buffered_compatibility  # 标记旧整段调用的 EOF 兼容模式。
+
+    def _emit_role(self, output_chunks: list[bytes]) -> None:
+        """在 Chat 流首次输出时发送 assistant role chunk。"""
+        if self.role_sent:
             return
-        role_sent = True
+        self.role_sent = True
         output_chunks.append(
             _chat_stream_chunk(
-                response_id=response_id,
-                created=created,
-                model=model,
+                response_id=self.response_id,
+                created=self.created,
+                model=self.model,
                 delta={"role": "assistant", "content": ""},
             )
         )
 
-    def tool_index(key: str) -> int:
-        nonlocal next_tool_index
-        if key not in tool_indexes:
-            tool_indexes[key] = next_tool_index
-            next_tool_index += 1
-        return tool_indexes[key]
+    def _tool_index(self, key: str) -> int:
+        """为同一个上游 function call 复用 Chat tool index。"""
+        if key not in self.tool_indexes:
+            self.tool_indexes[key] = self.next_tool_index
+            self.next_tool_index += 1
+        return self.tool_indexes[key]
 
-    for raw_event in _codex_sse_data_events(body):
-        if raw_event.strip() == "[DONE]":
-            break
+    def _finish_success(self, output_chunks: list[bytes]) -> None:
+        """完成一次明确成功的 Responses 调用并发送 Chat 终止标记。"""
+        if self.finished:
+            return
+        self.finished = True
+        self.success_done_sent = True
+        self._emit_role(output_chunks)
+        finish_reason = "tool_calls" if self.tool_indexes else ("length" if self.status == "incomplete" else "stop")
+        output_chunks.append(
+            _chat_stream_chunk(
+                response_id=self.response_id,
+                created=self.created,
+                model=self.model,
+                delta={},
+                finish_reason=finish_reason,
+                usage=self.usage if self.include_usage else None,
+            )
+        )
+        output_chunks.append(b"data: [DONE]\n\n")
+
+    def _process_event(self, raw_event: bytes, output_chunks: list[bytes]) -> None:
+        """映射一个完整 SSE 事件，并保留上游终态语义。"""
+        if self.finished:
+            return
+        text = raw_event.decode("utf-8", errors="replace")
+        data_lines = [
+            line[5:].lstrip()
+            for line in text.replace("\r\n", "\n").split("\n")
+            if line.startswith("data:")
+        ]
+        if not data_lines:
+            return
+        raw_data = "\n".join(data_lines).strip()
+        if raw_data == "[DONE]":
+            if self.buffered_compatibility:
+                self.finished = True
+            return
         try:
-            event = json.loads(raw_event)
+            event = json.loads(raw_data)
         except json.JSONDecodeError:
-            continue
+            return
         if not isinstance(event, dict):
-            continue
+            return
 
         event_type = str(event.get("type") or "")
         response = event.get("response")
         if isinstance(response, dict):
-            response_id = str(response.get("id") or response_id)
-            created = int(response.get("created_at") or created)
-            model = str(response.get("model") or model)
-            status = str(response.get("status") or status)
+            self.response_id = str(response.get("id") or self.response_id)
+            self.created = int(response.get("created_at") or self.created)
+            self.model = str(response.get("model") or self.model)
+            self.status = str(response.get("status") or self.status)
             mapped_usage = _codex_usage_to_chat(response.get("usage"))
             if mapped_usage is not None:
-                usage = mapped_usage
+                self.usage = mapped_usage
 
+        if event_type in ("response.failed", "response.incomplete", "response.error", "error"):
+            if self.buffered_compatibility:
+                return
+            output_chunks.append(
+                b"data: " + json.dumps({"error": event}, ensure_ascii=False).encode("utf-8") + b"\n\n"
+            )
+            self.finished = True
+            return
         if event_type == "response.output_item.added":
             item = event.get("item")
             if isinstance(item, dict) and item.get("type") == "function_call":
-                emit_role()
-                key = str(event.get("output_index") or item.get("id") or len(tool_indexes))
-                index = tool_index(key)
+                self._emit_role(output_chunks)
+                output_index = event.get("output_index")
+                key = str(output_index if output_index is not None else (item.get("id") or len(self.tool_indexes)))
+                index = self._tool_index(key)
                 function = {
                     "name": item.get("name") or "",
                     "arguments": item.get("arguments") or "",
                 }
                 output_chunks.append(
                     _chat_stream_chunk(
-                        response_id=response_id,
-                        created=created,
-                        model=model,
+                        response_id=self.response_id,
+                        created=self.created,
+                        model=self.model,
                         delta={
                             "tool_calls": [
                                 {
@@ -1741,12 +1790,12 @@ def convert_codex_responses_sse_to_chat(
                     )
                 )
         elif event_type == "response.output_text.delta":
-            emit_role()
+            self._emit_role(output_chunks)
             output_chunks.append(
                 _chat_stream_chunk(
-                    response_id=response_id,
-                    created=created,
-                    model=model,
+                    response_id=self.response_id,
+                    created=self.created,
+                    model=self.model,
                     delta={"content": event.get("delta") or ""},
                 )
             )
@@ -1754,24 +1803,25 @@ def convert_codex_responses_sse_to_chat(
             "response.reasoning_text.delta",
             "response.reasoning_summary_text.delta",
         ):
-            emit_role()
+            self._emit_role(output_chunks)
             output_chunks.append(
                 _chat_stream_chunk(
-                    response_id=response_id,
-                    created=created,
-                    model=model,
+                    response_id=self.response_id,
+                    created=self.created,
+                    model=self.model,
                     delta={"reasoning_content": event.get("delta") or ""},
                 )
             )
         elif event_type == "response.function_call_arguments.delta":
-            emit_role()
-            key = str(event.get("output_index") or event.get("item_id") or len(tool_indexes))
-            index = tool_index(key)
+            self._emit_role(output_chunks)
+            output_index = event.get("output_index")
+            key = str(output_index if output_index is not None else (event.get("item_id") or len(self.tool_indexes)))
+            index = self._tool_index(key)
             output_chunks.append(
                 _chat_stream_chunk(
-                    response_id=response_id,
-                    created=created,
-                    model=model,
+                    response_id=self.response_id,
+                    created=self.created,
+                    model=self.model,
                     delta={
                         "tool_calls": [
                             {
@@ -1783,24 +1833,59 @@ def convert_codex_responses_sse_to_chat(
                 )
             )
         elif event_type == "response.completed":
-            finished = True
+            self._finish_success(output_chunks)
 
-    emit_role()
-    if not finished:
-        status = "completed"
-    finish_reason = "tool_calls" if tool_indexes else ("length" if status == "incomplete" else "stop")
-    output_chunks.append(
-        _chat_stream_chunk(
-            response_id=response_id,
-            created=created,
-            model=model,
-            delta={},
-            finish_reason=finish_reason,
-            usage=usage if include_usage else None,
-        )
+    def feed(self, chunk: bytes) -> bytes:
+        """转换新增 SSE 字节，仅在收到真实 completed 事件时输出成功结束标记。"""
+        self.buffer += chunk
+        output_chunks: list[bytes] = []
+        while True:
+            lf_end = self.buffer.find(b"\n\n")
+            crlf_end = self.buffer.find(b"\r\n\r\n")
+            if lf_end < 0 and crlf_end < 0:
+                break
+            if crlf_end >= 0 and (lf_end < 0 or crlf_end < lf_end):
+                event_end = crlf_end
+                delimiter_size = 4
+            else:
+                event_end = lf_end
+                delimiter_size = 2
+            raw_event = self.buffer[:event_end]
+            self.buffer = self.buffer[event_end + delimiter_size :]
+            self._process_event(raw_event, output_chunks)
+        if not chunk and self.buffer:
+            raw_event = self.buffer
+            self.buffer = b""
+            self._process_event(raw_event, output_chunks)
+        return b"".join(output_chunks)
+
+    def finish_buffered(self) -> bytes:
+        """为旧的整段缓冲调用维持原先 EOF 即结束的兼容行为。"""
+        output_chunks: list[bytes] = []
+        if self.buffer:
+            self._process_event(self.buffer, output_chunks)
+            self.buffer = b""
+        if not self.success_done_sent:
+            self.finished = False
+            self.status = "completed"
+            self._finish_success(output_chunks)
+        return b"".join(output_chunks)
+
+
+def convert_codex_responses_sse_to_chat(
+    body: str | bytes,
+    *,
+    fallback_model: str = "",
+    include_usage: bool = False,
+) -> bytes:
+    """兼容旧整段响应转换入口，并保持其 EOF 收尾行为。"""
+    body_bytes = body.encode("utf-8") if isinstance(body, str) else bytes(body)
+    converter = CodexResponsesChatStreamConverter(
+        fallback_model=fallback_model,
+        include_usage=include_usage,
+        buffered_compatibility=True,
     )
-    output_chunks.append(b"data: [DONE]\n\n")
-    return b"".join(output_chunks)
+    return converter.feed(body_bytes) + converter.feed(b"") + converter.finish_buffered()
 
 
 def convert_codex_responses_to_chat(
