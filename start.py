@@ -7,7 +7,9 @@ LLM Router 启动脚本
 """
 import sys
 import asyncio
+import signal
 import logging
+from datetime import datetime
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
@@ -63,12 +65,27 @@ async def run_proxy(config, storage):
     )
     master.addons.add(addon)
 
+    previous_handlers = {}
+    loop = asyncio.get_running_loop()
+
+    def request_shutdown(signum, frame):
+        """把 Docker 停止信号转入代理的正常关闭流程。"""
+        signal_name = signal.Signals(signum).name
+        logging.info("[SHUTDOWN_SIGNAL] signal=%s", signal_name)
+        loop.call_soon_threadsafe(master.shutdown)
+
     try:
+        for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[shutdown_signal] = signal.signal(
+                shutdown_signal, request_shutdown
+            )
         await master.run()
     except KeyboardInterrupt:
         print("\nShutting down...")
         master.shutdown()
     finally:
+        for shutdown_signal, previous_handler in previous_handlers.items():
+            signal.signal(shutdown_signal, previous_handler)
         await codex_bridge.stop()
 
 
@@ -103,7 +120,17 @@ def main():
     print(f"\nStarting proxy on port {config.proxy.listen_port}...")
     print("Press Ctrl+C to stop\n")
 
-    asyncio.run(run_proxy(config, storage))
+    try:
+        started_before = datetime.now().isoformat()
+        recovered_count = storage.recover_in_progress_calls(started_before)
+        logging.info(
+            "[CALLS_RECOVERED_AFTER_RESTART] count=%s started_before=%s",
+            recovered_count,
+            started_before,
+        )
+        asyncio.run(run_proxy(config, storage))
+    finally:
+        storage.close()
 
 
 if __name__ == "__main__":

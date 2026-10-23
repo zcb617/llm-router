@@ -1354,6 +1354,43 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur, commit=True)
 
+    def recover_in_progress_calls(self, started_before: str) -> int:
+        """在单实例启动且接收新请求前，将遗留的进行中调用标记为服务重启中断。"""
+        self._ensure_llm_calls_schema_extensions()
+        if self.postgresql:
+            conn, cur = self._pg_conn()
+            try:
+                cur.execute(
+                    "UPDATE llm_calls SET call_status = 'failed', "
+                    "transport_status = 'failed', "
+                    "transport_error = 'Service restarted before call completion.', "
+                    "business_status = 'failed', "
+                    "business_error = 'service_restart_before_completion' "
+                    "WHERE call_status = 'in_progress' AND timestamp < %s",
+                    (started_before,),
+                )
+                recovered_count = cur.rowcount
+                conn.commit()
+                return recovered_count
+            finally:
+                self._pg_close(conn, cur)
+        conn, cur = self._sqlite_conn()
+        try:
+            cur.execute(
+                "UPDATE llm_calls SET call_status = 'failed', "
+                "transport_status = 'failed', "
+                "transport_error = 'Service restarted before call completion.', "
+                "business_status = 'failed', "
+                "business_error = 'service_restart_before_completion' "
+                "WHERE call_status = 'in_progress' AND timestamp < ?",
+                (started_before,),
+            )
+            recovered_count = cur.rowcount
+            conn.commit()
+            return recovered_count
+        finally:
+            self._sqlite_close(conn, cur)
+
     def finalize_in_progress_call(
         self,
         call_id: str,

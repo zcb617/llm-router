@@ -164,6 +164,7 @@ class LLMRouterAddon:
         self._pending_requests = {}  # flow_id -> CapturedRequest
         self._pending_requests_lock = threading.Lock()
         self._codex_http_stream_processes = set()  # 正在为 HTTP 流式调用工作的 Rust 子进程集合。
+        self._codex_ws_flows = {}  # 活动 Codex WS flow，供代理退出时完成调用记录。
 
         # 健康检查定时器
         self._health_check_timer = None
@@ -4212,6 +4213,7 @@ class LLMRouterAddon:
         """记录 Codex Responses WebSocket 上游握手响应，供调用日志关联使用。"""
         if not flow.metadata.get("codex_responses_websocket"):
             return
+        self._codex_ws_flows[flow.id] = flow
         flow.metadata["codex_ws_response_headers"] = (
             dict(flow.response.headers) if flow.response is not None else {}
         )
@@ -4530,6 +4532,7 @@ class LLMRouterAddon:
 
     def websocket_end(self, flow):
         """结束 Codex Responses WebSocket 并保存尚未完成调用的传输状态。"""
+        self._codex_ws_flows.pop(flow.id, None)
         self._stop_codex_ws_outbound_process(flow)
         if not flow.metadata.get("codex_responses_websocket"):
             return
@@ -4573,6 +4576,7 @@ class LLMRouterAddon:
         transport_error: str,
         *,
         business_default_status: Optional[str] = None,
+        save_synchronously: bool = False,
     ):
         """仅按 WebSocket 传输失败或取消状态保存未完成的 Codex 调用。"""
         for call_state in list(websocket_calls):
@@ -4591,7 +4595,7 @@ class LLMRouterAddon:
                 )
                 call_status = business_status
             last_activity_at = datetime.now().isoformat()
-            self._enqueue_call_save({
+            payload = {
                 "call_id": call_state["call_id"],
                 "timestamp": call_state["timestamp"],
                 "url": flow.metadata.get("codex_ws_target_url", ""),
@@ -4627,7 +4631,13 @@ class LLMRouterAddon:
                 "full_context": None,
                 "_call_save_operation": "finalize",
                 "last_activity_at": last_activity_at,
-            })
+            }
+            if save_synchronously:
+                payload.pop("_call_save_operation", None)
+                payload["final_responses_body"] = build_final_response(payload["response_body"])
+                self.storage.finalize_call_with_user(**payload)
+            else:
+                self._enqueue_call_save(payload)
             websocket_calls.remove(call_state)
             logger.info(
                 "[CODEX_WS_CALL_TRANSPORT_END] call_id=%s transport=%s duration_ms=%s",
@@ -5037,6 +5047,7 @@ class LLMRouterAddon:
         default_status = "cancelled" if is_client_disconnected else "failed"
         transport_status = default_status
         if flow.metadata.get("codex_responses_websocket"):
+            self._codex_ws_flows.pop(flow.id, None)
             if flow.metadata.get("codex_ws_end_recorded"):
                 return
             websocket_calls = flow.metadata.get("codex_ws_calls", [])
@@ -5512,6 +5523,38 @@ class LLMRouterAddon:
                         captured_req.call_id,
                     )
 
+        websocket_flows = list(self._codex_ws_flows.values())
+        self._codex_ws_flows.clear()
+        for flow in websocket_flows:
+            websocket_calls = flow.metadata.get("codex_ws_calls", [])
+            try:
+                self._record_codex_websocket_transport_failures(
+                    flow,
+                    websocket_calls,
+                    "failed",
+                    "Service shutdown before call completion.",
+                    business_default_status="failed",
+                    save_synchronously=True,
+                )
+            except Exception:
+                remaining_call_id = (
+                    websocket_calls[0].get("call_id") if websocket_calls else None
+                )
+                logger.exception(
+                    "Failed to finalize WebSocket calls during shutdown: flow_id=%s call_id=%s",
+                    flow.id,
+                    remaining_call_id,
+                )
+            finally:
+                flow.metadata.pop("codex_ws_calls", None)
+                flow.metadata["codex_ws_end_recorded"] = True
+                try:
+                    self._stop_codex_ws_outbound_process(flow)
+                except Exception:
+                    logger.exception(
+                        "Failed to stop WebSocket outbound process during shutdown: flow_id=%s",
+                        flow.id,
+                    )
         # 给落库队列一个短暂排空窗口，避免最后几条记录丢失。
         deadline = time.time() + 2.0
         while (
