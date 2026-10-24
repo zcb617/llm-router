@@ -2906,27 +2906,46 @@ class LLMRouterAddon:
 
     def _record_stream_activity(self, flow, chunk: bytes):
         """记录非空流式 chunk，并按节流频率异步更新调用活动状态。"""
+        first_token_received = False
         if chunk and flow.metadata.get("first_token_time") is None:
             flow.metadata["first_token_time"] = time.time()
+            first_token_received = True
         if chunk:
             flow.metadata.setdefault("streamed_response_chunks", []).append(chunk)
             call_id = flow.metadata.get("call_id")
             call_start_time = flow.metadata.get("call_start_time")
             last_persisted_at = flow.metadata.get("last_activity_persisted_at")
             current_time = time.time()
-            if (
+            first_token_ms = None
+            first_token_time = flow.metadata.get("first_token_time")
+            if call_id and call_start_time is not None and first_token_time is not None:
+                calculated_first_token_ms = int(
+                    (first_token_time - call_start_time) * 1000
+                )
+                if calculated_first_token_ms >= 0:
+                    first_token_ms = calculated_first_token_ms
+
+            activity_due = (
                 call_id
                 and call_start_time is not None
                 and last_persisted_at is not None
                 and current_time - last_persisted_at >= 10
-            ):
+            )
+            if activity_due:
                 flow.metadata["last_activity_persisted_at"] = current_time
-                self._enqueue_call_save({
+
+            if (first_token_received and first_token_ms is not None) or activity_due:
+                activity_payload = {
                     "_call_save_operation": "activity",
                     "call_id": call_id,
                     "duration_ms": int((current_time - call_start_time) * 1000),
                     "last_activity_at": datetime.now().isoformat(),
-                })
+                }
+                if first_token_ms is not None:
+                    activity_payload["first_token_ms"] = first_token_ms
+                self._enqueue_call_save(activity_payload)
+                if first_token_received and first_token_ms is not None:
+                    flow.metadata["last_activity_persisted_at"] = current_time
 
         return chunk
 
@@ -4471,22 +4490,31 @@ class LLMRouterAddon:
         if call_state is None:
             return
         current_time = received_at
-        if call_state["first_token_ms"] is None:
+        first_token_received = call_state["first_token_ms"] is None
+        if first_token_received:
             call_state["first_token_ms"] = int(
                 (current_time - call_state["start_time"]) * 1000
             )
         last_persisted_at = call_state.get("last_activity_persisted_at")
-        if (
+        activity_due = (
             last_persisted_at is not None
             and current_time - last_persisted_at >= 10
-        ):
+        )
+        if activity_due:
             call_state["last_activity_persisted_at"] = current_time
-            self._enqueue_call_save({
+
+        if first_token_received or activity_due:
+            activity_payload = {
                 "_call_save_operation": "activity",
                 "call_id": call_state["call_id"],
                 "duration_ms": int((current_time - call_state["start_time"]) * 1000),
                 "last_activity_at": datetime.now().isoformat(),
-            })
+            }
+            if call_state.get("first_token_ms") is not None:
+                activity_payload["first_token_ms"] = call_state["first_token_ms"]
+            self._enqueue_call_save(activity_payload)
+            if first_token_received:
+                call_state["last_activity_persisted_at"] = current_time
         call_state["response_frames"].append(message_text)
 
         if event_type in {

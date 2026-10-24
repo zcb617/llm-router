@@ -1310,28 +1310,66 @@ class CallStorage:
             finally:
                 self._sqlite_close(conn, cur, commit=True)
 
-    def update_call_activity(self, call_id: str, duration_ms: int, last_activity_at: str):
-        """更新进行中流式调用的运行耗时和最近活动时间。"""
+    def update_call_fields(self, call_id: str, fields: dict) -> bool:
+        """按允许字段更新仍在进行中的 LLM 调用活动记录。"""
+        allowed_fields = {"duration_ms", "last_activity_at", "first_token_ms"}
+        unknown_fields = set(fields) - allowed_fields
+        if unknown_fields:
+            raise ValueError("Unsupported llm_calls fields")
+
+        update_fields = {
+            field_name: field_value
+            for field_name, field_value in fields.items()
+            if field_value is not None
+        }
+        if not update_fields:
+            return False
+
+        field_names = tuple(update_fields)
+        field_values = tuple(update_fields.values())
         if self.postgresql:
             conn, cur = self._pg_conn()
             try:
-                cur.execute(
-                    "UPDATE llm_calls SET duration_ms = %s, last_activity_at = %s "
-                    "WHERE call_id = %s AND call_status = 'in_progress'",
-                    (duration_ms, last_activity_at, call_id),
+                set_clause = ", ".join(
+                    f"{field_name} = %s" for field_name in field_names
                 )
+                cur.execute(
+                    f"UPDATE llm_calls SET {set_clause} "
+                    "WHERE call_id = %s AND call_status = 'in_progress'",
+                    field_values + (call_id,),
+                )
+                return cur.rowcount > 0
             finally:
                 self._pg_close(conn, cur, commit=True)
         else:
             conn, cur = self._sqlite_conn()
             try:
-                cur.execute(
-                    "UPDATE llm_calls SET duration_ms = ?, last_activity_at = ? "
-                    "WHERE call_id = ? AND call_status = 'in_progress'",
-                    (duration_ms, last_activity_at, call_id),
+                set_clause = ", ".join(
+                    f"{field_name} = ?" for field_name in field_names
                 )
+                cur.execute(
+                    f"UPDATE llm_calls SET {set_clause} "
+                    "WHERE call_id = ? AND call_status = 'in_progress'",
+                    field_values + (call_id,),
+                )
+                return cur.rowcount > 0
             finally:
                 self._sqlite_close(conn, cur, commit=True)
+
+    def update_call_activity(
+        self,
+        call_id: str,
+        duration_ms: int,
+        last_activity_at: str,
+        first_token_ms: Optional[int] = None,
+    ) -> bool:
+        """更新进行中流式调用的运行耗时、最近活动时间和可用首字耗时。"""
+        fields = {
+            "duration_ms": duration_ms,
+            "last_activity_at": last_activity_at,
+            "first_token_ms": first_token_ms,
+        }
+        return self.update_call_fields(call_id, fields)
 
     def update_call_request_size(self, call_id: str, upstream_request_size_mb: Optional[float]):
         """更新 WebSocket 调用最终发往上游的数据帧大小。"""
