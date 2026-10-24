@@ -15,6 +15,7 @@ __pycache__
 *.swo
 
 # Project specific
+web/node_modules/
 .qwen
 kimi-cli/
 kimi-code/
