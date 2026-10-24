@@ -11,21 +11,7 @@
       if (theme === 'dark') document.documentElement.classList.add('dark');
     })();
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            border: 'hsl(var(--border))',
-            background: 'hsl(var(--background))',
-            foreground: 'hsl(var(--foreground))',
-          }
-        }
-      }
-    }
-  </script>
+  <link rel="stylesheet" href="/web/tailwind.css">
   <style>
     :root {
       --background: 0 0% 100%;

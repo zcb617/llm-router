@@ -3659,6 +3659,16 @@ class LLMRouterAddon:
                     flow.response = http.Response.make(404, b"Login page not found", {"Content-Type": "text/plain"})
                 return
 
+            if path == "/web/tailwind.css":
+                # 提供网页使用的本地构建 Tailwind 样式表。
+                tailwind_css_path = Path(__file__).parent.parent / "web" / "tailwind.css"
+                if tailwind_css_path.exists():
+                    content = tailwind_css_path.read_bytes()
+                    flow.response = http.Response.make(200, content, {"Content-Type": "text/css; charset=utf-8"})
+                else:
+                    flow.response = http.Response.make(404, b"Tailwind stylesheet not found", {"Content-Type": "text/plain"})
+                return
+
             if path == "/web/auth-interceptor.js":
                 auth_interceptor_path = Path(__file__).parent.parent / 'web' / 'auth-interceptor.js'
                 if auth_interceptor_path.exists():
