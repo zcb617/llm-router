@@ -64,7 +64,7 @@ async def run_proxy(config, storage):
     from src.codex_app_server import CodexBridgeServer
 
     options = Options()
-    options.set(f"listen_port={config.proxy.listen_port}", f"mode=regular")
+    options.set(f"listen_port={config.proxy.listen_port}", f"mode=regular", "tcp_timeout=300")
 
     master = DumpMaster(options)
     codex_bridge = CodexBridgeServer(storage)
