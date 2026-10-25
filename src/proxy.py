@@ -60,6 +60,7 @@ from src.stream_relay import (
 )
 
 logger = logging.getLogger(__name__)
+_CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS = 300.0
 
 
 class LLMRouterException(Exception):
@@ -165,6 +166,7 @@ class LLMRouterAddon:
         self._pending_requests_lock = threading.Lock()
         self._codex_http_stream_processes = set()  # 正在为 HTTP 流式调用工作的 Rust 子进程集合。
         self._codex_ws_flows = {}  # 活动 Codex WS flow，供代理退出时完成调用记录。
+        self._codex_ws_idle_timers = {}  # 活动 Codex WS 调用的上游业务空闲计时器，按 call_id 索引。
 
         # 健康检查定时器
         self._health_check_timer = None
@@ -4238,6 +4240,72 @@ class LLMRouterAddon:
             return None
         return int((first_token_time - captured_req.start_time) * 1000)
 
+    def _cancel_codex_ws_idle_timeout(self, call_id):
+        """取消指定 Codex WebSocket 调用的上游业务空闲计时器。"""
+        handle = self._codex_ws_idle_timers.pop(call_id, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _arm_codex_ws_idle_timeout(self, flow, call_state):
+        """为收到客户端请求或上游业务消息的 Codex 调用重置空闲计时器。"""
+        call_id = call_state["call_id"]
+        self._cancel_codex_ws_idle_timeout(call_id)
+        self._codex_ws_idle_timers[call_id] = asyncio.get_running_loop().call_later(
+            _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+            self._on_codex_ws_idle_timeout,
+            flow,
+            call_id,
+        )
+
+    def _on_codex_ws_idle_timeout(self, flow, call_id):
+        """将超时的 Codex WebSocket 调用保存为失败并关闭双向连接。"""
+        self._codex_ws_idle_timers.pop(call_id, None)
+        if flow.metadata.get("codex_ws_end_recorded"):
+            return
+        websocket_calls = flow.metadata.get("codex_ws_calls", [])
+        if not any(call_state.get("call_id") == call_id for call_state in websocket_calls):
+            return
+
+        error = (
+            "websocket_upstream_business_idle_timeout "
+            f"(timeout_seconds={_CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS:g})"
+        )
+        logger.warning(
+            "[CODEX_WS_CALL_IDLE_TIMEOUT] flow_id=%s nginx_request_id=%s route=%s call_id=%s timeout_seconds=%s",
+            flow.id,
+            flow.request.headers.get("X-Request-ID") or "-",
+            flow.metadata.get("codex_ws_route"),
+            call_id,
+            _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+        )
+        try:
+            self._handle_network_exception(flow, GeneralNetworkException(error))
+        finally:
+            self._close_codex_ws_connection(flow)
+
+    def _close_codex_ws_connection(self, flow):
+        """通过 mitmproxy 连接处理器关闭 Codex WebSocket 的上下游传输。"""
+        from mitmproxy import ctx
+
+        try:
+            proxyserver = ctx.master.addons.get("proxyserver")
+            handler = (
+                proxyserver.connections.get(flow.client_conn.id)
+                if proxyserver is not None
+                else None
+            )
+            if handler is not None:
+                for connection in (flow.server_conn, flow.client_conn):
+                    if connection in handler.transports:
+                        handler.close_connection(connection)
+            else:
+                logger.warning(
+                    "[CODEX_WS_CONNECTION_CLOSE_HANDLER_MISSING] flow_id=%s",
+                    flow.id,
+                )
+        finally:
+            self._stop_codex_ws_outbound_process(flow)
+
     def websocket_start(self, flow):
         """记录 Codex Responses WebSocket 上游握手响应，供调用日志关联使用。"""
         if not flow.metadata.get("codex_responses_websocket"):
@@ -4283,6 +4351,8 @@ class LLMRouterAddon:
     async def websocket_message(self, flow):
         """按每次调用的首次响应消息和完整结束消息记录 WebSocket 统计并透传帧。"""
         if not flow.metadata.get("codex_responses_websocket") or not flow.websocket:
+            return
+        if flow.metadata.get("codex_ws_end_recorded"):
             return
         if not flow.websocket.messages:
             return
@@ -4437,6 +4507,7 @@ class LLMRouterAddon:
                 )
 
             websocket_calls.append(call_state)
+            self._arm_codex_ws_idle_timeout(flow, call_state)
             logger.info(
                 "[CODEX_WS_CALL_STARTED] flow_id=%s nginx_request_id=%s call_id=%s model=%s previous_response_id=%s request_bytes=%s",
                 flow.id,
@@ -4489,6 +4560,7 @@ class LLMRouterAddon:
 
         if call_state is None:
             return
+        self._arm_codex_ws_idle_timeout(flow, call_state)
         current_time = received_at
         first_token_received = call_state["first_token_ms"] is None
         if first_token_received:
@@ -4523,6 +4595,7 @@ class LLMRouterAddon:
             "response.incomplete",
             "error",
         }:
+            self._cancel_codex_ws_idle_timeout(call_state["call_id"])
             response_body = "\n".join(call_state.get("response_frames", []))
             duration_ms = int((current_time - call_state["start_time"]) * 1000)
             business_status, business_error = self._judge_codex_websocket_business(
@@ -4688,6 +4761,7 @@ class LLMRouterAddon:
     ):
         """仅按 WebSocket 传输失败或取消状态保存未完成的 Codex 调用。"""
         for call_state in list(websocket_calls):
+            self._cancel_codex_ws_idle_timeout(call_state["call_id"])
             response_frames = call_state.get("response_frames", [])
             response_body = "\n".join(response_frames)
             duration_ms = int((time.time() - call_state["start_time"]) * 1000)
@@ -5596,6 +5670,10 @@ class LLMRouterAddon:
 
     def done(self):
         """mitmproxy addon 退出时释放资源。"""
+        for handle in self._codex_ws_idle_timers.values():
+            handle.cancel()
+        self._codex_ws_idle_timers.clear()
+
         stream_processes = list(self._codex_http_stream_processes)
         self._codex_http_stream_processes.clear()
         for process in stream_processes:
