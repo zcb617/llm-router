@@ -61,6 +61,8 @@ from src.stream_relay import (
 
 logger = logging.getLogger(__name__)
 _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS = 300.0
+_CODEX_WS_CAPACITY_RETRY_DELAY_SECONDS = 8.0
+_CODEX_WS_CAPACITY_MAX_RETRIES = 3
 
 
 class LLMRouterException(Exception):
@@ -167,6 +169,7 @@ class LLMRouterAddon:
         self._codex_http_stream_processes = set()  # 正在为 HTTP 流式调用工作的 Rust 子进程集合。
         self._codex_ws_flows = {}  # 活动 Codex WS flow，供代理退出时完成调用记录。
         self._codex_ws_idle_timers = {}  # 活动 Codex WS 调用的上游业务空闲计时器，按 call_id 索引。
+        self._codex_ws_capacity_retry_timers = {}  # 等待上游容量恢复的 Codex WS 重试计时器，按 call_id 索引。
 
         # 健康检查定时器
         self._health_check_timer = None
@@ -4240,6 +4243,145 @@ class LLMRouterAddon:
             return None
         return int((first_token_time - captured_req.start_time) * 1000)
 
+    def _cancel_codex_ws_capacity_retry(self, call_id):
+        """取消指定 Codex WebSocket 调用尚未发送的容量重试。"""
+        retry_timers = getattr(self, "_codex_ws_capacity_retry_timers", {})
+        handle = retry_timers.pop(call_id, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _retry_codex_ws_capacity_request(self, flow, call_id):
+        """在固定等待后复用原出站帧重试仍活动的 Codex WebSocket 调用。"""
+        retry_timers = getattr(self, "_codex_ws_capacity_retry_timers", {})
+        if retry_timers.pop(call_id, None) is None:
+            return
+
+        websocket = getattr(flow, "websocket", None)
+        if (
+            websocket is None
+            or getattr(websocket, "timestamp_end", None) is not None
+            or flow.metadata.get("codex_ws_end_recorded")
+        ):
+            return
+
+        websocket_calls = flow.metadata.get("codex_ws_calls", [])
+        call_state = next(
+            (item for item in websocket_calls if item.get("call_id") == call_id),
+            None,
+        )
+        if call_state is None:
+            return
+        if call_state.get("response_frames"):
+            return
+
+        client_conn = getattr(flow, "client_conn", None)
+        server_conn = getattr(flow, "server_conn", None)
+        if (
+            not getattr(client_conn, "connected", False)
+            or not getattr(server_conn, "connected", False)
+        ):
+            return
+
+        route = flow.metadata.get("codex_ws_route")
+        attempt = call_state.get("capacity_retry_count", 0)
+        try:
+            from mitmproxy import ctx
+
+            ctx.master.commands.call(
+                "inject.websocket",
+                flow,
+                False,
+                call_state["upstream_request_content"],
+                True,
+            )
+            self._arm_codex_ws_idle_timeout(flow, call_state)
+            logger.info(
+                "[CODEX_WS_CAPACITY_RETRY_SENT] route=%s flow_id=%s call_id=%s attempt=%s",
+                route,
+                flow.id,
+                call_id,
+                attempt,
+            )
+        except Exception:
+            logger.exception(
+                "[CODEX_WS_CAPACITY_RETRY_SEND_FAILED] route=%s flow_id=%s call_id=%s attempt=%s",
+                route,
+                flow.id,
+                call_id,
+                attempt,
+            )
+            try:
+                self._handle_network_exception(
+                    flow,
+                    GeneralNetworkException("websocket_capacity_retry_send_failed"),
+                )
+            finally:
+                self._close_codex_ws_connection(flow)
+
+    def _try_schedule_codex_ws_capacity_retry(self, flow, message, event, call_state):
+        """拦截尚未开始响应的上游容量错误并安排固定延迟重试。"""
+        if flow.metadata.get("codex_ws_route") not in {"passthrough", "oauth"}:
+            return False
+        if (
+            not isinstance(event, dict)
+            or event.get("type") != "error"
+            or event.get("status") != 429
+            or not isinstance(event.get("error"), dict)
+            or event["error"].get("code") != "turn_rate_limit_exceeded"
+        ):
+            return False
+
+        websocket_calls = flow.metadata.get("codex_ws_calls", [])
+        if len(websocket_calls) != 1 or websocket_calls[0] is not call_state:
+            return False
+
+        upstream_request_content = call_state.get("upstream_request_content")
+        if not isinstance(upstream_request_content, bytes) or not upstream_request_content:
+            return False
+        if call_state.get("response_frames"):
+            return False
+
+        call_id = call_state["call_id"]
+        retry_timers = getattr(self, "_codex_ws_capacity_retry_timers", None)
+        if retry_timers is None:
+            retry_timers = {}
+            self._codex_ws_capacity_retry_timers = retry_timers
+        if call_id in retry_timers:
+            message.drop()
+            return True
+        if call_state.get("capacity_retry_count", 0) >= _CODEX_WS_CAPACITY_MAX_RETRIES:
+            return False
+
+        message.drop()
+        call_state["capacity_retry_count"] = call_state.get("capacity_retry_count", 0) + 1
+        delay_seconds = _CODEX_WS_CAPACITY_RETRY_DELAY_SECONDS
+        retry_timers[call_id] = asyncio.get_running_loop().call_later(
+            delay_seconds,
+            self._retry_codex_ws_capacity_request,
+            flow,
+            call_id,
+        )
+
+        retry_after = None
+        event_headers = event.get("headers")
+        if isinstance(event_headers, dict):
+            for header_name, header_value in event_headers.items():
+                if isinstance(header_name, str) and header_name.lower() == "retry-after":
+                    retry_after = header_value
+                    break
+
+        logger.warning(
+            "[CODEX_WS_CAPACITY_RETRY_SCHEDULED] route=%s flow_id=%s call_id=%s attempt=%s delay_seconds=%s retry_after=%s error.code=%s",
+            flow.metadata.get("codex_ws_route"),
+            flow.id,
+            call_id,
+            call_state["capacity_retry_count"],
+            delay_seconds,
+            retry_after if retry_after is not None else "-",
+            event["error"].get("code"),
+        )
+        return True
+
     def _cancel_codex_ws_idle_timeout(self, call_id):
         """取消指定 Codex WebSocket 调用的上游业务空闲计时器。"""
         handle = self._codex_ws_idle_timers.pop(call_id, None)
@@ -4385,6 +4527,14 @@ class LLMRouterAddon:
             event = None
 
         websocket_calls = flow.metadata.setdefault("codex_ws_calls", [])
+        if message.from_client and getattr(message, "injected", False):
+            if any(
+                call_state.get("capacity_retry_count", 0) > 0
+                and call_state.get("upstream_request_content") == message.content
+                for call_state in websocket_calls
+            ):
+                return
+
         if message.from_client:
             if not isinstance(event, dict) or event.get("type") != "response.create":
                 return
@@ -4493,6 +4643,8 @@ class LLMRouterAddon:
                     separators=(",", ":"),
                 ).encode("utf-8")
 
+            call_state["upstream_request_content"] = bytes(message.content)
+            call_state["capacity_retry_count"] = 0
             call_state["upstream_request_size_mb"] = self._request_body_size_mb(message.content)
             try:
                 self.storage.update_call_request_size(
@@ -4561,6 +4713,8 @@ class LLMRouterAddon:
         if call_state is None:
             return
         self._arm_codex_ws_idle_timeout(flow, call_state)
+        if self._try_schedule_codex_ws_capacity_retry(flow, message, event, call_state):
+            return
         current_time = received_at
         first_token_received = call_state["first_token_ms"] is None
         if first_token_received:
@@ -4596,6 +4750,7 @@ class LLMRouterAddon:
             "error",
         }:
             self._cancel_codex_ws_idle_timeout(call_state["call_id"])
+            self._cancel_codex_ws_capacity_retry(call_state["call_id"])
             response_body = "\n".join(call_state.get("response_frames", []))
             duration_ms = int((current_time - call_state["start_time"]) * 1000)
             business_status, business_error = self._judge_codex_websocket_business(
@@ -4762,6 +4917,7 @@ class LLMRouterAddon:
         """仅按 WebSocket 传输失败或取消状态保存未完成的 Codex 调用。"""
         for call_state in list(websocket_calls):
             self._cancel_codex_ws_idle_timeout(call_state["call_id"])
+            self._cancel_codex_ws_capacity_retry(call_state["call_id"])
             response_frames = call_state.get("response_frames", [])
             response_body = "\n".join(response_frames)
             duration_ms = int((time.time() - call_state["start_time"]) * 1000)
@@ -5673,6 +5829,10 @@ class LLMRouterAddon:
         for handle in self._codex_ws_idle_timers.values():
             handle.cancel()
         self._codex_ws_idle_timers.clear()
+        capacity_retry_timers = getattr(self, "_codex_ws_capacity_retry_timers", {})
+        for handle in capacity_retry_timers.values():
+            handle.cancel()
+        capacity_retry_timers.clear()
 
         stream_processes = list(self._codex_http_stream_processes)
         self._codex_http_stream_processes.clear()
