@@ -1155,14 +1155,17 @@ def test_codex_websocket_network_error_preserves_completed_business_status():
 
 
 @pytest.mark.parametrize(
-    ("model", "account_id", "expected_route"),
+    ("model", "account_id", "expected_route", "guardian", "with_hint"),
     [
-        ("codex-auto-review", "chatgpt-account", "oauth"),
-        ("gpt-6.1-terra", None, "oauth"),
-        ("gpt-6.1-terra", "chatgpt-account", "passthrough"),
+        ("codex-auto-review", "chatgpt-account", "oauth", True, False),
+        ("codex-auto-review", "chatgpt-account", "oauth", False, True),
+        ("gpt-6.1-terra", None, "oauth", False, True),
+        ("gpt-6.1-terra", "chatgpt-account", "passthrough", True, True),
     ],
 )
-def test_codex_websocket_handshake_routes_models(model, account_id, expected_route, monkeypatch):
+def test_codex_websocket_handshake_routes_models(
+    model, account_id, expected_route, guardian, with_hint, monkeypatch
+):
     addon = _make_addon_for_route_tests()
     addon._model_cache = {
         model: {
@@ -1187,12 +1190,16 @@ def test_codex_websocket_handshake_routes_models(model, account_id, expected_rou
 
     monkeypatch.setattr(proxy_module, "start_codex_connect_tunnel", start_tunnel)
     monkeypatch.setattr(proxy_module, "parse_server_spec", lambda value, scheme: (value, scheme))
-    flow = _make_flow({
-        "x-codex-routing-hint": f"model={model}",
+    headers = {
         "connection": "upgrade",
         "upgrade": "websocket",
         "sec-websocket-key": "test-key",
-    })
+    }
+    if with_hint:
+        headers["x-codex-routing-hint"] = f"model={model}"
+    if guardian:
+        headers["x-codex-guardian"] = "reviewer"
+    flow = _make_flow(headers)
     if account_id:
         flow.request.headers["chatgpt-account-id"] = account_id
     flow.request.url = "https://router.test/router-key/v1/responses"

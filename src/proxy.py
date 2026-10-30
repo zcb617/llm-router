@@ -1263,6 +1263,11 @@ class LLMRouterAddon:
             ),
             "",
         )
+        if (
+            not handshake_model
+            and flow.request.headers.get("x-codex-guardian", "").strip().lower() == "reviewer"
+        ):
+            handshake_model = "codex-auto-review"
         has_codex_responses_websocket_intent = (
             flow.request.method == "GET"
             and request_path == "/v1/responses"

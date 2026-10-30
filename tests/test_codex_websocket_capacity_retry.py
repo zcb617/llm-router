@@ -576,6 +576,142 @@ def test_duplicate_error_does_not_schedule_additional_retry(monkeypatch, route):
     asyncio.run(scenario())
 
 
+def test_real_guardian_websocket_without_routing_hint(monkeypatch, tmp_path):
+    """无模型提示的审核握手应升级为 WebSocket，并转发首个真实模型帧。"""
+    import websockets
+
+    from mitmproxy import options
+    from mitmproxy.tools.dump import DumpMaster
+
+    addon = _make_addon()
+    addon._model_cache = {
+        "codex-auto-review": {
+            "auth_mode": "codex_cli_oauth",
+            "target_base_url": "https://upstream.example/v1",
+        },
+        "other-review-model": {
+            "auth_mode": "codex_cli_oauth",
+            "target_base_url": "https://upstream.example/v1",
+            "forward_model": "mapped-review-model",
+        },
+    }
+    addon._default_model_key = None
+    addon._match_model = lambda model: LLMRouterAddon._match_model(addon, model)
+    addon._kimi_cli_auth = SimpleNamespace(is_kimi_cli_auth=lambda config: False)
+    addon._verify_api_key_cached = lambda key: {"user_id": 42, "id": 7} if key == "router-key" else None
+    addon._codex_cli_auth.resolve_snapshot = lambda **kwargs: SimpleNamespace(
+        access_token="oauth-token", account_id="oauth-account", is_fedramp_account=False
+    )
+    addon._codex_cli_auth.build_full_headers = lambda **kwargs: [
+        ("Host", kwargs["host"]),
+        ("Authorization", "Bearer oauth-token"),
+        ("chatgpt-account-id", "oauth-account"),
+    ]
+    observed_flows = []
+    received_requests = []
+    tunnel_calls = []
+
+    async def start_tunnel(host, port):
+        tunnel_calls.append((host, port))
+        return object(), "127.0.0.1", 12345
+
+    monkeypatch.setattr(proxy_module, "start_codex_connect_tunnel", start_tunnel)
+    monkeypatch.setattr(proxy_module, "stop_codex_connect_tunnel", lambda process: None)
+
+    async def upstream_handler(websocket, path=None):
+        async for request in websocket:
+            received_requests.append(json.loads(request))
+            await websocket.send(json.dumps({
+                "type": "response.completed",
+                "response": {"id": f"review-response-{len(received_requests)}", "status": "completed"},
+            }))
+
+    async def scenario():
+        upstream_server = await websockets.serve(upstream_handler, "127.0.0.1", 0)
+        upstream_port = upstream_server.sockets[0].getsockname()[1]
+        proxy_socket = socket.socket()
+        proxy_socket.bind(("127.0.0.1", 0))
+        proxy_port = proxy_socket.getsockname()[1]
+        proxy_socket.close()
+
+        class _AddonAdapter:
+            async def request(self, flow):
+                await addon.request(flow)
+                if flow.metadata.get("codex_responses_websocket"):
+                    # 保留生产入口和模型处理，将测试出站指向本地模拟上游。
+                    flow.server_conn.via = None
+                    flow.request.url = f"http://127.0.0.1:{upstream_port}/v1/responses"
+
+            def websocket_start(self, flow):
+                observed_flows.append(flow)
+                addon.websocket_start(flow)
+
+            async def websocket_message(self, flow):
+                await addon.websocket_message(flow)
+
+            def websocket_end(self, flow):
+                addon.websocket_end(flow)
+
+        master = DumpMaster(
+            options.Options(
+                listen_host="127.0.0.1",
+                listen_port=proxy_port,
+                mode=[f"reverse:http://127.0.0.1:{upstream_port}"],
+                confdir=str(tmp_path / "mitmproxy"),
+                ssl_insecure=True,
+            ),
+            with_termlog=False,
+            with_dumper=False,
+        )
+        master.options.update(connection_strategy="lazy")
+        master.addons.add(_AddonAdapter())
+        master_task = asyncio.create_task(master.run())
+        try:
+            await asyncio.sleep(0.2)
+            async with websockets.connect(
+                f"ws://127.0.0.1:{proxy_port}/router-key/v1/responses",
+                extra_headers={
+                    "x-codex-guardian": "reviewer",
+                    "x-openai-subagent": "guardian",
+                    "chatgpt-account-id": "client-account",
+                },
+                open_timeout=3,
+                ping_interval=None,
+                compression=None,
+            ) as client:
+                for model in ("codex-auto-review", "other-review-model"):
+                    await client.send(json.dumps({
+                        "type": "response.create",
+                        "model": model,
+                        "client_metadata": {},
+                    }))
+                    event = json.loads(await asyncio.wait_for(client.recv(), timeout=3))
+                    assert event["type"] == "response.completed"
+
+            assert len(observed_flows) == 1
+            assert observed_flows[0].response.status_code == 101
+            assert observed_flows[0].metadata["codex_ws_route"] == "oauth"
+            client_headers = {
+                key.lower(): value
+                for key, value in observed_flows[0].metadata["codex_ws_client_headers"].items()
+            }
+            assert client_headers["x-codex-guardian"] == "reviewer"
+            assert "x-codex-routing-hint" not in client_headers
+            assert tunnel_calls == [("upstream.example", 443)]
+            assert received_requests[0]["model"] == "codex-auto-review"
+            assert received_requests[1]["model"] == "mapped-review-model"
+            assert addon._storage.started_calls[0]["original_model"] == "codex-auto-review"
+            assert addon._storage.started_calls[1]["original_model"] == "other-review-model"
+            assert addon._storage.started_calls[0]["transport_type"] == "websocket"
+        finally:
+            master.shutdown()
+            await asyncio.wait_for(master_task, timeout=3)
+            upstream_server.close()
+            await upstream_server.wait_closed()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("route", ["passthrough", "oauth"])
 @pytest.mark.parametrize("mode", ["success", "exhausted"])
 def test_real_proxy_retries_capacity_without_delivering_intermediate_error(
