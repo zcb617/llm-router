@@ -1154,6 +1154,63 @@ def test_codex_websocket_network_error_preserves_completed_business_status():
     assert saved_payloads[0]["_call_save_operation"] == "finalize"
 
 
+@pytest.mark.parametrize(
+    ("model", "account_id", "expected_route"),
+    [
+        ("codex-auto-review", "chatgpt-account", "oauth"),
+        ("gpt-6.1-terra", None, "oauth"),
+        ("gpt-6.1-terra", "chatgpt-account", "passthrough"),
+    ],
+)
+def test_codex_websocket_handshake_routes_models(model, account_id, expected_route, monkeypatch):
+    addon = _make_addon_for_route_tests()
+    addon._model_cache = {
+        model: {
+            "auth_mode": "codex_cli_oauth",
+            "target_base_url": "https://upstream.example/v1",
+        }
+    }
+    addon._default_model_key = None
+    addon._verify_api_key_cached = lambda key: {"user_id": 42, "id": 7} if key == "router-key" else None
+    addon._codex_cli_auth = SimpleNamespace(
+        resolve_snapshot=lambda **kwargs: SimpleNamespace(
+            access_token="oauth-token", account_id="oauth-account", is_fedramp_account=False
+        ),
+        build_full_headers=lambda **kwargs: [("Host", kwargs["host"])],
+    )
+
+    tunnel_calls = []
+
+    async def start_tunnel(host, port):
+        tunnel_calls.append((host, port))
+        return object(), "127.0.0.1", 12345
+
+    monkeypatch.setattr(proxy_module, "start_codex_connect_tunnel", start_tunnel)
+    monkeypatch.setattr(proxy_module, "parse_server_spec", lambda value, scheme: (value, scheme))
+    flow = _make_flow({
+        "x-codex-routing-hint": f"model={model}",
+        "connection": "upgrade",
+        "upgrade": "websocket",
+        "sec-websocket-key": "test-key",
+    })
+    if account_id:
+        flow.request.headers["chatgpt-account-id"] = account_id
+    flow.request.url = "https://router.test/router-key/v1/responses"
+    flow.request.path = "/v1/responses"
+    flow.request.method = "GET"
+    flow.request.content = b""
+    flow.response = None
+    flow.server_conn = SimpleNamespace(via=None)
+
+    asyncio.run(addon.request(flow))
+
+    assert flow.response is None
+    assert flow.metadata["codex_responses_websocket"] is True
+    assert flow.metadata["codex_ws_route"] == expected_route
+    assert flow.metadata["codex_ws_original_model"] == model
+    assert tunnel_calls == ([("upstream.example", 443)] if expected_route == "oauth" else [])
+
+
 def test_codex_websocket_ingress_fallback_records_transport_type():
     """验证识别到 Codex WS 意图但握手头缺失时按 WebSocket 记录本地 426。"""
     addon = _make_addon_for_route_tests()

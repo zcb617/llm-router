@@ -1266,7 +1266,10 @@ class LLMRouterAddon:
         has_codex_responses_websocket_intent = (
             flow.request.method == "GET"
             and request_path == "/v1/responses"
-            and handshake_model.lower().startswith("gpt")
+            and (
+                handshake_model.lower().startswith("gpt")
+                or handshake_model.lower() == "codex-auto-review"
+            )
         )
         connection_tokens = {
             token.strip().lower()
