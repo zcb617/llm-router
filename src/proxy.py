@@ -16,7 +16,7 @@ import queue
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from src.protocol_converter_registry import get_protocol_converter
 from src.final_response import build_final_response
@@ -1159,8 +1159,18 @@ class LLMRouterAddon:
             return
 
         # === OpenAI 兼容模型列表接口（公开访问） ===
-        request_path = urlparse(flow.request.url).path
+        request_url = urlparse(flow.request.url)
+        request_path = request_url.path
         if flow.request.method == "GET" and request_path == "/v1/models":
+            if (
+                url_api_key is not None
+                and "client_version" in parse_qs(request_url.query, keep_blank_values=True)
+            ):
+                flow.request.url = f"https://chatgpt.com/backend-api/codex/models?{request_url.query}"
+                flow.request.scheme = "https"
+                flow.request.headers["Host"] = "chatgpt.com"
+                flow.metadata["codex_models_passthrough"] = True
+                return
             flow.response = http.Response.make(
                 200,
                 json.dumps(self._build_models_response(), ensure_ascii=False).encode("utf-8"),
@@ -4986,6 +4996,8 @@ class LLMRouterAddon:
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
+        if flow.metadata.get("codex_models_passthrough"):
+            return
         self._finish_codex_http_stream(flow)
         if flow.metadata.get("codex_responses_websocket"):
             if flow.response is None or flow.response.status_code != 101:

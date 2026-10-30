@@ -205,6 +205,101 @@ def test_request_models_returns_openai_compatible_list_without_forwarding():
     assert flow.metadata["local_response"] is True
 
 
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(200, b'{"models":[]}'), (304, b""), (401, b'{"error":"unauthorized"}')],
+)
+@pytest.mark.parametrize(
+    "query",
+    ["client_version=0.123.4&trace=a%2Bb&client_version=other", "trace=first&client_version="],
+)
+def test_codex_models_request_forwards_to_fixed_upstream(status, body, query):
+    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon._model_cache = {"router-model": {"target_base_url": "https://other.example"}}
+    checked_keys = []
+
+    def verify_api_key(api_key):
+        checked_keys.append(api_key)
+        return {"user_id": 42, "id": 7}
+
+    addon._verify_api_key_cached = verify_api_key
+    flow = _make_flow({
+        "Authorization": "Bearer chatgpt-access-token",
+        "chatgpt-account-id": "chatgpt-account",
+        "If-None-Match": '"catalog-etag"',
+    })
+    flow.request.url = f"https://router.test/router-key/v1/models?{query}"
+    flow.request.path = f"/v1/models?{query}"
+    flow.request.method = "GET"
+    flow.request.content = b""
+    flow.response = None
+
+    asyncio.run(addon.request(flow))
+
+    assert checked_keys == ["router-key"]
+    assert flow.request.url == f"https://chatgpt.com/backend-api/codex/models?{query}"
+    assert flow.request.method == "GET"
+    assert flow.request.scheme == "https"
+    assert flow.request.headers["Host"] == "chatgpt.com"
+    assert flow.request.headers["Authorization"] == "Bearer chatgpt-access-token"
+    assert flow.request.headers["chatgpt-account-id"] == "chatgpt-account"
+    assert flow.request.headers["If-None-Match"] == '"catalog-etag"'
+    assert flow.metadata["user_id"] == 42
+    assert flow.metadata["api_key_id"] == 7
+    assert flow.response is None
+
+    upstream_response = SimpleNamespace(
+        status_code=status, content=body, headers={"ETag": '"catalog-etag"'}
+    )
+    flow.response = upstream_response
+    addon.responseheaders(flow)
+    addon.response(flow)
+    assert flow.response is upstream_response
+    assert flow.response.status_code == status
+    assert flow.response.content == body
+    assert flow.response.headers == {"ETag": '"catalog-etag"'}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://router.test/v1/models?client_version=0.123.4",
+        "https://router.test/router-key/v1/models?available=true",
+        "https://router.test/router-key/v1/models?not_client_version=0.123.4",
+    ],
+)
+def test_other_models_requests_keep_local_response(url):
+    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon._model_cache = {"router-model": {}}
+    addon._verify_api_key_cached = lambda _key: {"user_id": 42, "id": 7}
+    flow = _make_flow()
+    flow.request.url = url
+    flow.request.path = "/v1/models"
+    flow.request.method = "GET"
+    flow.request.content = b""
+
+    asyncio.run(addon.request(flow))
+
+    assert flow.response["status"] == 200
+    assert json.loads(flow.response["content"])["data"][0]["id"] == "router-model"
+    assert flow.metadata["local_response"] is True
+
+
+def test_codex_models_request_rejects_invalid_url_key():
+    addon = LLMRouterAddon.__new__(LLMRouterAddon)
+    addon._verify_api_key_cached = lambda _key: None
+    flow = _make_flow()
+    flow.request.url = "https://router.test/invalid-key/v1/models?client_version=0.123.4"
+    flow.request.path = "/v1/models?client_version=0.123.4"
+    flow.request.method = "GET"
+    flow.request.content = b""
+
+    asyncio.run(addon.request(flow))
+
+    assert flow.response["status"] == 403
+    assert flow.metadata["local_response"] is True
+
+
 def test_apply_multi_upstream_route_rewrites_flow_for_native_proxy():
     addon = _make_addon_for_route_tests()
     flow = _make_flow()
