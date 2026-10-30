@@ -1,5 +1,51 @@
 # Codex GPT Responses WebSocket 转发方案
 
+## 当前实现：审核请求的 WebSocket 路由
+
+以下内容按 2026-10-30 的项目代码和当时的路由配置整理，代码基线为提交 `ea7a536`。路由配置可以调整；上游地址和账号以实际配置为准。
+
+### 握手、模型和上游的先后顺序
+
+1. Codex 先向 Router 发起 `GET /v1/responses` WebSocket 握手，携带 `Upgrade: websocket`、`Connection: upgrade` 和 `Sec-WebSocket-Key`。这是建立连接，不是探活；此时请求体为空。
+2. 普通 Codex 请求可能通过 `x-codex-routing-hint: model=...` 在握手时提供模型名。审核请求可能不带这个提示，而带 `x-codex-guardian: reviewer` 和 `x-openai-subagent: guardian`。这些审核标记表示请求角色，不包含具体模型名。
+3. Router 必须先选上游并与上游完成握手，才能向 Codex 返回 `101 Switching Protocols`。当前代码遇到没有模型提示的 `reviewer` 握手时，先用 `codex-auto-review` 的模型配置选择上游；它是握手阶段的路由默认值，不是从请求头读出的实际模型。
+4. 连接建立后，Codex 才在 WebSocket 中发送 `response.create` 消息，消息中的 `model` 才是本次调用的实际模型。Router 根据该模型匹配模型配置，记录原始模型，并在 OAuth 路径按配置处理 `forward_model`。
+
+例如，握手后的一条消息可能是：
+
+```json
+{"type":"response.create","model":"codex-auto-review","input":[]}
+```
+
+第 4 步可以匹配和处理消息中的模型，但不能改变第 3 步已建立连接的上游。当前默认做法适用于审核请求使用 `codex-auto-review` 对应上游的情况；如果将审核模型配置到另一个上游，仅凭 `reviewer` 标记无法在握手前判断实际模型。相关实现见 [`LLMRouterAddon.request` 和 `websocket_message`](../src/proxy.py)。
+
+### 当前审核请求转发到哪里
+
+当时的 `codex-auto-review` 模型配置指向单上游 **codex-cli oauth**，认证方式为 `codex_cli_oauth`，上游基地址为 `https://chatgpt.com/backend-api/codex`。因此，审核 WebSocket 连接目标为该基地址的 `/responses`，即 `https://chatgpt.com/backend-api/codex/responses`，通过 HTTP Upgrade 建立 WebSocket。
+
+Router 完成入口认证后，从该上游配置取得 Codex OAuth 登录信息，使用 Router 配置的账号建立上游连接；OAuth 出站使用 Rust CONNECT 隧道，WebSocket 握手和消息由代理继续转发。上游的 `target_base_url` 如已配置则优先使用；未配置时，代码依次读取对应 Codex 配置的 `openai_base_url` 或使用默认 ChatGPT 地址。不要在此文档记录 token、API Key 或账号标识。[`Codex CLI OAuth 地址解析`](../src/codex_cli_auth.py)
+
+### 与 `/v1/models` 的区别
+
+| 项目 | 审核 WebSocket | Codex 模型列表请求 |
+| --- | --- | --- |
+| 入口 | `GET /v1/responses`，请求 WebSocket 升级 | `GET /v1/models` |
+| 上游选择 | 无模型提示的 `reviewer` 握手先匹配 `codex-auto-review` 的模型路由 | URL API Key 已通过验证且查询参数包含 `client_version` 时，转发到固定的 ChatGPT Codex 模型列表接口；其他情况返回 Router 本地模型列表 |
+| 当时的目标 | `chatgpt.com/backend-api/codex/responses` | `chatgpt.com/backend-api/codex/models`，保留查询参数 |
+| 上游认证 | 使用 Router 配置的 Codex OAuth 账号 | 保留客户端传入的 `Authorization` 和 `chatgpt-account-id`（如果有） |
+
+两者可以访问同一个 ChatGPT 后端，但接口、路由选择和上游认证方式不同。模型列表的特殊转发条件和实现见 [`LLMRouterAddon.request`](../src/proxy.py)。
+
+### 为什么曾经看到 POST
+
+审核 WebSocket 握手未携带 `x-codex-routing-hint` 时，旧入口逻辑无法识别模型；由于请求体也为空，Router 将它误当成探活返回 `200`。Codex 没有收到 WebSocket 升级所需的 `101`，重试后回退为 HTTP POST；POST 请求体里包含 `model: codex-auto-review`。
+
+因此，调用记录里看到 POST 不代表模型只能使用 POST；应按同一个审核线程关联握手和后续请求。WebSocket 成功后的实际模型调用在记录中使用握手方法 `GET`，并标记 `transport_type=websocket`。Codex 可能在已回退的会话中继续使用 HTTP，验证修复时应使用新的审核会话。
+
+无模型提示的审核握手、本地 `101` 升级和 `response.create` 模型匹配由 [`test_real_guardian_websocket_without_routing_hint`](../tests/test_codex_websocket_capacity_retry.py) 覆盖。该测试使用本地模拟上游；是否已经部署，以及真实上游连接是否成功，需要结合运行环境和调用日志确认。
+
+> 以下第 1 至 9 节保留原始设计方案和当时的代码状态，不代表上述提交后的当前实现；如有差异，以本节及项目代码为准。
+
 ## 1. 目的
 
 Codex 在 Responses WebSocket 上可以基于 `previous_response_id` 发送新增 input；HTTP 请求则可能携带完整 input。当前 Router 在 Codex WebSocket 握手时返回 `426`，Codex 因而切到 HTTP，导致历史内容以及图片、视频等大内容在后续请求中重复上传。
