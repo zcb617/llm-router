@@ -1346,7 +1346,7 @@ class LLMRouterAddon:
         )
         if (
             not handshake_model
-            and flow.request.headers.get("x-codex-guardian", "").strip().lower() == "reviewer"
+            and flow.request.headers.get("x-codex-guardian", "").strip().lower() in ("reviewer", "classifier")
         ):
             handshake_model = "codex-auto-review"
         has_codex_responses_websocket_intent = (

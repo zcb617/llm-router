@@ -576,7 +576,11 @@ def test_duplicate_error_does_not_schedule_additional_retry(monkeypatch, route):
     asyncio.run(scenario())
 
 
-def test_real_guardian_websocket_without_routing_hint(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("guardian", "first_model"),
+    [("reviewer", "codex-auto-review"), ("classifier", "gpt-5.6-luna")],
+)
+def test_real_guardian_websocket_without_routing_hint(monkeypatch, tmp_path, guardian, first_model):
     """无模型提示的审核握手应升级为 WebSocket，并转发首个真实模型帧。"""
     import websockets
 
@@ -584,8 +588,13 @@ def test_real_guardian_websocket_without_routing_hint(monkeypatch, tmp_path):
     from mitmproxy.tools.dump import DumpMaster
 
     addon = _make_addon()
+    addon._capturer = None
     addon._model_cache = {
         "codex-auto-review": {
+            "auth_mode": "codex_cli_oauth",
+            "target_base_url": "https://upstream.example/v1",
+        },
+        "gpt-5.6-luna": {
             "auth_mode": "codex_cli_oauth",
             "target_base_url": "https://upstream.example/v1",
         },
@@ -671,7 +680,7 @@ def test_real_guardian_websocket_without_routing_hint(monkeypatch, tmp_path):
             async with websockets.connect(
                 f"ws://127.0.0.1:{proxy_port}/router-key/v1/responses",
                 extra_headers={
-                    "x-codex-guardian": "reviewer",
+                    "x-codex-guardian": guardian,
                     "x-openai-subagent": "guardian",
                     "chatgpt-account-id": "client-account",
                 },
@@ -679,7 +688,7 @@ def test_real_guardian_websocket_without_routing_hint(monkeypatch, tmp_path):
                 ping_interval=None,
                 compression=None,
             ) as client:
-                for model in ("codex-auto-review", "other-review-model"):
+                for model in (first_model, "other-review-model"):
                     await client.send(json.dumps({
                         "type": "response.create",
                         "model": model,
@@ -695,12 +704,12 @@ def test_real_guardian_websocket_without_routing_hint(monkeypatch, tmp_path):
                 key.lower(): value
                 for key, value in observed_flows[0].metadata["codex_ws_client_headers"].items()
             }
-            assert client_headers["x-codex-guardian"] == "reviewer"
+            assert client_headers["x-codex-guardian"] == guardian
             assert "x-codex-routing-hint" not in client_headers
             assert tunnel_calls == [("upstream.example", 443)]
-            assert received_requests[0]["model"] == "codex-auto-review"
+            assert received_requests[0]["model"] == first_model
             assert received_requests[1]["model"] == "mapped-review-model"
-            assert addon._storage.started_calls[0]["original_model"] == "codex-auto-review"
+            assert addon._storage.started_calls[0]["original_model"] == first_model
             assert addon._storage.started_calls[1]["original_model"] == "other-review-model"
             assert addon._storage.started_calls[0]["transport_type"] == "websocket"
         finally:

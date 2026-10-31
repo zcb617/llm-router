@@ -4,6 +4,8 @@
 
 以下内容按 2026-10-30 的项目代码和当时的路由配置整理，代码基线为提交 `ea7a536`。路由配置可以调整；上游地址和账号以实际配置为准。
 
+2026-10-31 补充：没有模型提示时，`classifier` 和 `reviewer` 共用 `codex-auto-review` 配置完成握手，并使用 Router 配置的 OAuth 账号；连接后的 `response.create.model` 才是实际模型，例如分类器使用 `gpt-5.6-luna`。当时这两个模型配置指向相同上游，握手完成后不会根据实际模型切换上游。分类器连接池没有可用连接时，客户端仍可能直接使用 POST。
+
 ### 握手、模型和上游的先后顺序
 
 1. Codex 先向 Router 发起 `GET /v1/responses` WebSocket 握手，携带 `Upgrade: websocket`、`Connection: upgrade` 和 `Sec-WebSocket-Key`。这是建立连接，不是探活；此时请求体为空。

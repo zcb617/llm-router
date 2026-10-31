@@ -1157,10 +1157,11 @@ def test_codex_websocket_network_error_preserves_completed_business_status():
 @pytest.mark.parametrize(
     ("model", "account_id", "expected_route", "guardian", "with_hint"),
     [
-        ("codex-auto-review", "chatgpt-account", "oauth", True, False),
-        ("codex-auto-review", "chatgpt-account", "oauth", False, True),
-        ("gpt-6.1-terra", None, "oauth", False, True),
-        ("gpt-6.1-terra", "chatgpt-account", "passthrough", True, True),
+        ("codex-auto-review", "chatgpt-account", "oauth", "reviewer", False),
+        ("codex-auto-review", "chatgpt-account", "oauth", "classifier", False),
+        ("codex-auto-review", "chatgpt-account", "oauth", None, True),
+        ("gpt-6.1-terra", None, "oauth", None, True),
+        ("gpt-6.1-terra", "chatgpt-account", "passthrough", "reviewer", True),
     ],
 )
 def test_codex_websocket_handshake_routes_models(
@@ -1198,7 +1199,7 @@ def test_codex_websocket_handshake_routes_models(
     if with_hint:
         headers["x-codex-routing-hint"] = f"model={model}"
     if guardian:
-        headers["x-codex-guardian"] = "reviewer"
+        headers["x-codex-guardian"] = guardian
     flow = _make_flow(headers)
     if account_id:
         flow.request.headers["chatgpt-account-id"] = account_id
