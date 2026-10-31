@@ -2,7 +2,7 @@
 配置管理模块 - 加载和解析YAML配置
 """
 import yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 from pathlib import Path
 
@@ -36,9 +36,19 @@ class DatabaseConfig:
 
 
 @dataclass
+class AsrConfig:
+    """保存常驻语音转写服务的兼容配置。"""
+
+    host: str = "127.0.0.1"  # ASR 服务仅绑定的本机地址
+    port: int = 8788  # 容器内部 ASR 服务监听端口
+    model: str = "whisper-1"  # 供兼容调用方读取的转写模型名称
+
+
+@dataclass
 class Config:
     proxy: ProxyConfig
     database: DatabaseConfig
+    asr: AsrConfig = field(default_factory=AsrConfig)  # 语音转写服务配置
 
 
 def load_config(config_path: str = "config.yaml") -> Config:
@@ -49,6 +59,9 @@ def load_config(config_path: str = "config.yaml") -> Config:
 
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+
+    # 解析语音转写服务配置
+    asr_config = raw.get("asr") or {}
 
     # 解析数据库配置
     db_config = raw.get("database", {})
@@ -77,5 +90,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
         database=DatabaseConfig(
             path=db_config.get("path", "./data/llm_calls.db"),
             postgresql=postgresql
-        )
+        ),
+        asr=AsrConfig(
+            host=asr_config.get("host", "127.0.0.1"),
+            port=int(asr_config.get("port", 8788)),
+            model=asr_config.get("model", "whisper-1"),
+        ),
     )

@@ -62,6 +62,7 @@ async def run_proxy(config, storage):
     from mitmproxy.options import Options
     from mitmproxy.tools.dump import DumpMaster
     from src.codex_app_server import CodexBridgeServer
+    from src.asr_service import CodexAsrService
 
     options = Options()
     options.set(f"listen_port={config.proxy.listen_port}", f"mode=regular", "tcp_timeout=300")
@@ -69,14 +70,7 @@ async def run_proxy(config, storage):
     master = DumpMaster(options)
     codex_bridge = CodexBridgeServer(storage)
     codex_bridge_url = await codex_bridge.start()
-
-    addon = create_addon(
-        config,
-        storage,
-        codex_bridge_url=codex_bridge_url,
-        codex_bridge_token=codex_bridge.bridge_token,
-    )
-    master.addons.add(addon)
+    asr_service = CodexAsrService(config.asr, storage)
 
     previous_handlers = {}
     loop = asyncio.get_running_loop()
@@ -88,6 +82,15 @@ async def run_proxy(config, storage):
         loop.call_soon_threadsafe(master.shutdown)
 
     try:
+        await asr_service.start()
+        addon = create_addon(
+            config,
+            storage,
+            codex_bridge_url=codex_bridge_url,
+            codex_bridge_token=codex_bridge.bridge_token,
+            asr_service=asr_service,
+        )
+        master.addons.add(addon)
         for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[shutdown_signal] = signal.signal(
                 shutdown_signal, request_shutdown
@@ -99,6 +102,7 @@ async def run_proxy(config, storage):
     finally:
         for shutdown_signal, previous_handler in previous_handlers.items():
             signal.signal(shutdown_signal, previous_handler)
+        await asr_service.stop()
         await codex_bridge.stop()
 
 

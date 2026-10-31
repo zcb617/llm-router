@@ -1,3 +1,7 @@
+FROM scratch AS codex-asr-binary
+
+ADD codex-asr-x86_64-unknown-linux-gnu.tar.xz /asr/
+
 FROM node:24-bookworm-slim AS web-assets
 
 WORKDIR /web
@@ -19,6 +23,9 @@ RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.li
 # Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+
+COPY --from=codex-asr-binary /asr/codex-asr-x86_64-unknown-linux-gnu/codex-asr /usr/local/bin/codex-asr
+RUN chmod 0755 /usr/local/bin/codex-asr && /usr/local/bin/codex-asr --version
 
 # Copy application code
 COPY . .

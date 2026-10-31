@@ -108,7 +108,7 @@ class LLMRouterAddon:
     }
 
     
-    def __init__(self, config=None, storage=None, codex_bridge_url=None, codex_bridge_token=None):
+    def __init__(self, config=None, storage=None, codex_bridge_url=None, codex_bridge_token=None, asr_service=None):
         self._external_storage = storage  # 从外部传入的 storage（已初始化数据库表）
         # 延迟导入避免循环依赖
         if config is None:
@@ -153,6 +153,7 @@ class LLMRouterAddon:
             )
 
         self.config = config
+        self._asr_service = asr_service  # 可选的本机 ASR 转发服务
         self._codex_bridge_url = (codex_bridge_url or "").rstrip("/")
         self._codex_bridge_token = codex_bridge_token or ""
 
@@ -1136,6 +1137,11 @@ class LLMRouterAddon:
     async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
         url_api_key = self._extract_url_api_key(flow.request)
+        is_asr_transcription_request = (
+            flow.request.method == "POST"
+            and urlparse(flow.request.url).path
+            in {"/v1/audio/transcriptions", "/audio/transcriptions"}
+        )
         key_info = None
         if url_api_key is not None:
             key_info = self._verify_api_key_cached(url_api_key)
@@ -1216,10 +1222,13 @@ class LLMRouterAddon:
                 # 记录 JSON 顶层字段名称，不记录 Prompt 内容。
                 "keys": [],
             }
-            try:
-                request_json = json.loads(request_content)
-            except (TypeError, ValueError):
+            if is_asr_transcription_request:
                 request_json = None
+            else:
+                try:
+                    request_json = json.loads(request_content)
+                except (TypeError, ValueError):
+                    request_json = None
             if isinstance(request_json, dict):
                 diagnostic_body["keys"] = sorted(str(key) for key in request_json.keys())
                 if "model" in request_json:
@@ -1247,10 +1256,11 @@ class LLMRouterAddon:
                 # 记录不含正文的请求体特征。
                 "body": diagnostic_body,
             }
-            logger.info(
-                "[PACKET_DIAG] %s",
-                json.dumps(packet_diagnostic, ensure_ascii=False, sort_keys=True, default=str),
-            )
+            if not is_asr_transcription_request:
+                logger.info(
+                    "[PACKET_DIAG] %s",
+                    json.dumps(packet_diagnostic, ensure_ascii=False, sort_keys=True, default=str),
+                )
         except Exception:
             logger.warning("[PACKET_DIAG] diagnostic logging failed; continuing request flow")
 
@@ -1294,7 +1304,11 @@ class LLMRouterAddon:
         )
 
         # === LLM 转发请求：验证 API Key ===
-        request_body = (flow.request.content or b"").decode("utf-8", errors="replace")
+        request_body = (
+            ""
+            if is_asr_transcription_request
+            else (flow.request.content or b"").decode("utf-8", errors="replace")
+        )
         request_model = (
             handshake_model
             if has_codex_responses_websocket_intent
@@ -1335,6 +1349,39 @@ class LLMRouterAddon:
             # 存储用户信息到 flow.metadata，供 response() 使用
             flow.metadata["user_id"] = key_info["user_id"]
             flow.metadata["api_key_id"] = key_info["id"]
+
+        if is_asr_transcription_request:
+            if self._asr_service is None or not self._asr_service.is_running():
+                flow.response = http.Response.make(
+                    503,
+                    b'{"error":"ASR service unavailable"}',
+                    {"Content-Type": "application/json"},
+                )
+                flow.metadata["local_response"] = True
+                return
+            credentials_available = await asyncio.to_thread(
+                self._asr_service.refresh_credentials,
+                self._codex_cli_auth,
+            )
+            if not credentials_available:
+                flow.response = http.Response.make(
+                    503,
+                    b'{"error":"Codex OAuth credentials unavailable"}',
+                    {"Content-Type": "application/json"},
+                )
+                flow.metadata["local_response"] = True
+                return
+
+            audio_path = urlparse(flow.request.url).path
+            asr_port = int(self.config.asr.port)
+            self._pop_header(flow.request.headers, "Authorization")
+            self._pop_header(flow.request.headers, "X-Api-Key")
+            self._pop_header(flow.request.headers, "Proxy-Authorization")
+            flow.request.url = f"http://127.0.0.1:{asr_port}{audio_path}"
+            flow.request.scheme = "http"
+            flow.request.headers["Host"] = f"127.0.0.1:{asr_port}"
+            flow.metadata["asr_forward"] = True
+            return
 
         if has_codex_responses_websocket_intent and missing_websocket_headers:
             response_body = self._record_codex_ws_ingress_fallback(
@@ -4093,6 +4140,8 @@ class LLMRouterAddon:
 
     def responseheaders(self, flow: http.HTTPFlow):
         """响应头到达时触发（用于计算首字耗时）"""
+        if flow.metadata.get("asr_forward"):
+            return
         if flow.metadata.get("codex_responses_websocket"):
             return
         # 记录响应头到达时间，跳过本地请求
@@ -5004,6 +5053,8 @@ class LLMRouterAddon:
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
+        if flow.metadata.get("asr_forward"):
+            return
         if flow.metadata.get("codex_models_passthrough"):
             return
         self._finish_codex_http_stream(flow)
@@ -5339,6 +5390,8 @@ class LLMRouterAddon:
 
     def error(self, flow: http.HTTPFlow):
         """将客户端断开或一般网络错误交给共享网络异常处理流程。"""
+        if flow.metadata.get("asr_forward"):
+            return
         self._finish_codex_http_stream(flow)
         self._stop_codex_ws_outbound_process(flow)
         raw_flow_error = flow.error
@@ -5957,6 +6010,6 @@ addons = [LLMRouterAddon()]
 
 
 
-def create_addon(config, storage=None, codex_bridge_url=None, codex_bridge_token=None) -> LLMRouterAddon:
+def create_addon(config, storage=None, codex_bridge_url=None, codex_bridge_token=None, asr_service=None) -> LLMRouterAddon:
     """创建addon实例（供start.py调用）"""
-    return LLMRouterAddon(config, storage, codex_bridge_url, codex_bridge_token)
+    return LLMRouterAddon(config, storage, codex_bridge_url, codex_bridge_token, asr_service)

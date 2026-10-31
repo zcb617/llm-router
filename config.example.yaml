@@ -18,3 +18,8 @@ database:
   #   user: ""
   #   password: ""
   #   dbname: "llm_router"
+
+asr:
+  host: "127.0.0.1"
+  port: 8788
+  model: "whisper-1"
