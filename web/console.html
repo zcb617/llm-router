@@ -595,7 +595,9 @@
           <div><span class="text-zinc-500">传输:</span> <span id="dTransport" class="ml-1"></span></div>
           <div><span class="text-zinc-500">方法:</span> <span id="dMethod" class="ml-1"></span></div>
           <div><span class="text-zinc-500">状态:</span> <span id="dStatus" class="ml-1"></span></div>
+          <div><span class="text-zinc-500">HTTP 状态码:</span> <span id="dHttpStatus" class="ml-1"></span></div>
           <div><span class="text-zinc-500">URL:</span> <span id="dUrl" class="ml-1 break-all"></span></div>
+          <div><span class="text-zinc-500">错误:</span> <span id="dError" class="ml-1 break-all"></span></div>
           <div><span class="text-zinc-500">原始模型:</span> <span id="dOriginalModel" class="ml-1"></span></div>
           <div><span class="text-zinc-500">映射模型:</span> <span id="dOverriddenModel" class="ml-1"></span></div>
           <div><span class="text-zinc-500">耗时:</span> <span id="dDuration" class="ml-1"></span></div>
@@ -1504,6 +1506,15 @@ async function loadLogsData(paginationMode = 'offset', cursorDirection = '', cur
   }
 }
 
+// PostgreSQL JSON 字段可能已被解码为对象，SQLite 则返回字符串。
+function formatLogValue(value) {
+  if (value == null || value === '') return '';
+  if (typeof value === 'string') {
+    try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return value; }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
 // 按数据库记录 ID 加载调用详情并展示传输类型、真实方法和请求响应内容。
 async function showDetail(row) {
   try {
@@ -1519,7 +1530,13 @@ async function showDetail(row) {
     document.getElementById('dTransport').textContent = detail.transport_type === 'websocket' ? 'WebSocket' : (detail.transport_type === 'http' ? 'HTTP' : '-');
     document.getElementById('dMethod').textContent = detail.method || '';
     document.getElementById('dStatus').textContent = detail.call_status === 'failed' ? '失败' : (detail.call_status === 'success' ? '成功' : (detail.call_status === 'in_progress' ? '进行中' : (detail.call_status === 'cancelled' ? '已取消' : '-')));
+    let diagnostics = detail.outbound_diagnostics;
+    if (typeof diagnostics === 'string') {
+      try { diagnostics = JSON.parse(diagnostics); } catch { diagnostics = null; }
+    }
+    document.getElementById('dHttpStatus').textContent = diagnostics?.response_status ?? '-';
     document.getElementById('dUrl').textContent = detail.url || '';
+    document.getElementById('dError').textContent = detail.transport_error || detail.business_error || '-';
     document.getElementById('dOriginalModel').textContent = detail.original_model || '-';
     document.getElementById('dOverriddenModel').textContent = detail.overridden_model || '-';
     let detailDuration = detail.duration_ms;
@@ -1530,15 +1547,16 @@ async function showDetail(row) {
     document.getElementById('dDuration').textContent = (detailDuration ?? '-') + ' ms';
     document.getElementById('dFirstToken').textContent = detail.first_token_ms ? detail.first_token_ms + ' ms' : '-';
     document.getElementById('dStreamType').textContent = detail.stream_type === 'stream' ? '流式' : '非流式';
-    document.getElementById('dTokens').textContent = `输入: ${detail.tokens_input ?? 0}, 输出: ${detail.tokens_output ?? 0}`;
+    const missingTokens = diagnostics?.service === 'codex-asr' ? '-' : 0;
+    document.getElementById('dTokens').textContent = `输入: ${detail.tokens_input ?? missingTokens}, 输出: ${detail.tokens_output ?? missingTokens}`;
     document.getElementById('dCached').textContent = detail.cached_hit_tokens != null ? detail.cached_hit_tokens : '-';
     document.getElementById('dCacheMiss').textContent = detail.cache_miss_tokens != null ? detail.cache_miss_tokens : '-';
     document.getElementById('dSpeed').textContent = detail.tokens_per_second != null ? detail.tokens_per_second + ' t/s' : '-';
     document.getElementById('dUpstreamRequestSize').textContent = detail.upstream_request_size_mb == null || detail.upstream_request_size_mb === '' ? '-' : Number(detail.upstream_request_size_mb).toFixed(3) + ' MB';
-    try { document.getElementById('dReqHeaders').textContent = JSON.stringify(JSON.parse(detail.request_headers || '{}'), null, 2); } catch { document.getElementById('dReqHeaders').textContent = detail.request_headers || ''; }
-    try { document.getElementById('dReqBody').textContent = JSON.stringify(JSON.parse(detail.request_body || '{}'), null, 2); } catch { document.getElementById('dReqBody').textContent = detail.request_body || ''; }
-    try { document.getElementById('dResHeaders').textContent = JSON.stringify(JSON.parse(detail.response_headers || '{}'), null, 2); } catch { document.getElementById('dResHeaders').textContent = detail.response_headers || ''; }
-    try { document.getElementById('dResBody').textContent = JSON.stringify(JSON.parse(detail.response_body || '{}'), null, 2); } catch { document.getElementById('dResBody').textContent = detail.response_body || ''; }
+    document.getElementById('dReqHeaders').textContent = formatLogValue(detail.request_headers);
+    document.getElementById('dReqBody').textContent = formatLogValue(detail.request_body);
+    document.getElementById('dResHeaders').textContent = formatLogValue(detail.response_headers);
+    document.getElementById('dResBody').textContent = formatLogValue(detail.response_body);
     document.getElementById('detailModal').classList.remove('hidden');
   } catch (e) {
     document.getElementById('detailModal').classList.add('hidden');

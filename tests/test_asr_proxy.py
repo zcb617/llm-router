@@ -2,6 +2,8 @@
 
 import asyncio
 import importlib.util
+import json
+import logging
 import sys
 import types
 from types import SimpleNamespace
@@ -91,6 +93,8 @@ def _make_addon(asr_service):
     addon._verify_api_key_cached = lambda api_key: (
         {"user_id": 42, "id": 7} if api_key == "router-key" else None
     )
+    addon.saved_calls = []
+    addon._enqueue_call_save = addon.saved_calls.append
     return addon
 
 
@@ -208,3 +212,202 @@ def test_asr_response_and_error_bypass_text_processing():
 
     assert flow.response.status_code == 200
     assert flow.response.headers == {"Content-Type": "audio/json"}
+
+
+def _multipart(audio, filename="sample.wav", content_type="audio/wav"):
+    return (
+        b'--asr-boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n'
+        b'--asr-boundary\r\nContent-Disposition: form-data; name="language"\r\n\r\nzh\r\n'
+        b'--asr-boundary\r\nContent-Disposition: form-data; name="language"\r\n\r\nen\r\n'
+        + f'--asr-boundary\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+          f'Content-Type: {content_type}\r\n\r\n'.encode()
+        + audio + b'\r\n--asr-boundary--\r\n'
+    )
+
+
+@pytest.mark.parametrize("status,response_body", [(200, b'{"text":""}'), (502, b'{"error":"Error in ASR API"}')])
+def test_asr_call_records_metadata_and_full_response_without_audio_or_secrets(status, response_body, caplog):
+    audio = b"RIFF\x18\x00\x00\x00WAVEaudio_secret_bytes\x00\xff"
+    content = _multipart(audio)
+    addon = _make_addon(FakeAsrService())
+    flow = _make_audio_flow("/v1/audio/transcriptions?access_token=query-secret", {
+        "Authorization": "Bearer router-key", "Cookie": "cookie-secret",
+        "Proxy-Authorization": "Basic proxy-secret",
+    }, content)
+    with caplog.at_level(logging.INFO, logger="src.proxy"):
+        asyncio.run(addon.request(flow))
+        assert flow.request.content == content
+        flow.response = SimpleNamespace(status_code=status, headers={"Content-Type": "application/json", "Set-Cookie": "response-secret"}, content=response_body)
+        addon.response(flow)
+        addon.response(flow)
+
+    assert len(addon.saved_calls) == 1
+    call = addon.saved_calls[0]
+    body = json.loads(call["request_body"])
+    assert body["fields"] == [
+        {"name": "model", "value": "whisper-1"},
+        {"name": "language", "value": "zh"},
+        {"name": "language", "value": "en"},
+    ]
+    assert body["files"] == [{"field": "file", "filename": "sample.wav", "content_type": "audio/wav", "size_bytes": len(audio), "detected_format": "wav"}]
+    assert call["original_model"] == "whisper-1"
+    assert call["user_id"] == 42 and call["api_key_id"] == 7
+    assert call["response_body"] == response_body.decode()
+    assert call["outbound_diagnostics"]["response_status"] == status
+    assert call["transport_status"] == "success"
+    assert call["business_status"] == ("success" if status == 200 else "failed")
+    assert call["tokens_input"] is None and call["tokens_output"] is None
+    assert call["request_headers"]["Authorization"] == "[REDACTED]"
+    assert call["response_headers"]["Set-Cookie"] == "[REDACTED]"
+    logged = json.dumps(call, ensure_ascii=False) + caplog.text
+    for secret in ("audio_secret_bytes", "router-key", "cookie-secret", "proxy-secret", "query-secret", "response-secret"):
+        assert secret not in logged
+
+
+@pytest.mark.parametrize("audio,expected", [
+    (b"\xff\xf1\x50\x80voice", "aac/adts"),
+    (b"\x1a\x45\xdf\xa3voice", "webm/matroska"),
+    (b"unknown\x00binary", None),
+])
+def test_asr_file_type_is_detected_from_bytes(audio, expected):
+    addon = _make_addon(FakeAsrService())
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key"}, _multipart(audio, "input.bin", "application/octet-stream"))
+    asyncio.run(addon.request(flow))
+    flow.response = SimpleNamespace(status_code=200, headers={}, content=b"hello")
+    addon.response(flow)
+    file_info = json.loads(addon.saved_calls[0]["request_body"])["files"][0]
+    assert file_info["size_bytes"] == len(audio)
+    assert file_info["detected_format"] == expected
+
+
+def test_asr_file_without_filename_is_never_logged_as_text():
+    addon = _make_addon(FakeAsrService())
+    content = (b'--asr-boundary\r\nContent-Disposition: form-data; name="file"\r\n'
+               b'Content-Type: text/plain\r\n\r\naudio-ascii-canary\r\n--asr-boundary--\r\n')
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key"}, content)
+    asyncio.run(addon.request(flow))
+    flow.response = SimpleNamespace(status_code=200, headers={}, content=b"ok")
+    addon.response(flow)
+    body = json.loads(addon.saved_calls[0]["request_body"])
+    assert body["files"][0]["size_bytes"] == len(b"audio-ascii-canary")
+    assert "audio-ascii-canary" not in addon.saved_calls[0]["request_body"]
+    assert flow.request.content == content
+
+
+@pytest.mark.parametrize("content_type,content", [
+    ("multipart/form-data; boundary=asr-boundary", b"malformed-audio"),
+    ("multipart/form-data; boundary=非ASCII", b"malformed-audio"),
+    ("audio/wav", b"RIFF\x00\x00\x00\x00WAVEaudio-canary"),
+])
+def test_invalid_multipart_is_logged_without_interrupting_forwarding(content_type, content):
+    addon = _make_addon(FakeAsrService())
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key", "Content-Type": content_type}, content)
+    asyncio.run(addon.request(flow))
+    assert flow.metadata["asr_forward"] is True
+    assert flow.request.content == content
+    flow.response = SimpleNamespace(status_code=400, headers={}, content=b"invalid form")
+    addon.response(flow)
+    body = json.loads(addon.saved_calls[0]["request_body"])
+    assert body["parse_error"]
+    assert "audio-canary" not in addon.saved_calls[0]["request_body"]
+
+
+def test_asr_metadata_capture_failure_does_not_interrupt_forwarding(monkeypatch):
+    def fail_capture(_request):
+        raise RuntimeError("sensitive request content")
+
+    monkeypatch.setattr("src.proxy.capture_asr_request", fail_capture)
+    addon = _make_addon(FakeAsrService())
+    content = _multipart(b"audio-canary")
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key"}, content)
+    asyncio.run(addon.request(flow))
+    assert flow.metadata["asr_forward"] is True
+    assert flow.request.content == content
+    flow.response = SimpleNamespace(status_code=200, headers={}, content=b"ok")
+    addon.response(flow)
+    assert json.loads(addon.saved_calls[0]["request_body"])["parse_error"] == "ASR request metadata capture failed"
+    assert "audio-canary" not in json.dumps(addon.saved_calls[0])
+
+
+@pytest.mark.parametrize("path,headers,service,status", [
+    ("/v1/audio/transcriptions", {}, FakeAsrService(), 401),
+    ("/v1/audio/transcriptions", {"Authorization": "Bearer invalid"}, FakeAsrService(), 403),
+    ("/invalid/v1/audio/transcriptions", {}, FakeAsrService(), 403),
+    ("/v1/audio/transcriptions", {"Authorization": "Bearer router-key"}, FakeAsrService(running=False), 503),
+    ("/v1/audio/transcriptions", {"Authorization": "Bearer router-key"}, FakeAsrService(credentials=False), 503),
+])
+def test_asr_local_failures_are_logged_once(path, headers, service, status, caplog):
+    addon = _make_addon(service)
+    flow = _make_audio_flow(path, headers, _multipart(b"RIFF\x00\x00\x00\x00WAVEsecret"))
+    with caplog.at_level(logging.INFO, logger="src.proxy"):
+        asyncio.run(addon.request(flow))
+        addon.response(flow)
+    assert len(addon.saved_calls) == 1
+    call = addon.saved_calls[0]
+    assert call["outbound_diagnostics"]["response_status"] == status
+    assert call["outbound_diagnostics"]["upstream_attempted"] is False
+    assert call["call_status"] == "failed"
+    assert call["transport_status"] == "success"
+    assert call["business_status"] == "failed"
+    assert call["user_id"] == (42 if status == 503 else None)
+    assert "[ASR_CALL]" in caplog.text
+    assert "WAVEsecret" not in caplog.text
+
+
+def test_asr_network_error_is_recorded_without_fabricated_http_status():
+    addon = _make_addon(FakeAsrService())
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key"}, _multipart(b"\xff\xf1voice"))
+    asyncio.run(addon.request(flow))
+    flow.error = SimpleNamespace(msg="connection refused")
+    addon.error(flow)
+    addon.error(flow)
+    assert len(addon.saved_calls) == 1
+    call = addon.saved_calls[0]
+    assert call["transport_status"] == "failed"
+    assert call["transport_error"] == "connection refused"
+    assert call["business_status"] is None
+    assert call["outbound_diagnostics"]["response_status"] is None
+    assert call["outbound_diagnostics"]["upstream_attempted"] is True
+
+
+def test_asr_status_is_recorded_if_response_content_cannot_be_decoded():
+    class InvalidResponse:
+        status_code = 502
+        headers = {"Content-Type": "application/json"}
+
+        @property
+        def content(self):
+            raise ValueError("sensitive response content")
+
+    addon = _make_addon(FakeAsrService())
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key"})
+    asyncio.run(addon.request(flow))
+    flow.response = InvalidResponse()
+    addon.response(flow)
+    call = addon.saved_calls[0]
+    assert call["outbound_diagnostics"]["response_status"] == 502
+    assert call["response_body"] == "[response body unavailable: ValueError]"
+
+
+def test_asr_log_round_trips_through_existing_sqlite_storage(tmp_path):
+    import sqlite3
+    from scripts.init_database import SQLITE_TABLES
+    from src.storage import CallStorage
+
+    db_path = tmp_path / "calls.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(dict(SQLITE_TABLES)["llm_calls"])
+    addon = _make_addon(FakeAsrService())
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key"}, _multipart(b"RIFF\x00\x00\x00\x00WAVEaudio_not_saved"))
+    asyncio.run(addon.request(flow))
+    flow.response = SimpleNamespace(status_code=502, headers={"Content-Type": "application/json"}, content=b'{"error":"upstream failure"}')
+    addon.response(flow)
+    storage = CallStorage(str(db_path))
+    storage.save_call_with_user(**addon.saved_calls[0])
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT request_body, response_body, outbound_diagnostics, user_id, api_key_id FROM llm_calls").fetchone()
+    assert json.loads(row[0])["files"][0]["detected_format"] == "wav"
+    assert "audio_not_saved" not in row[0]
+    assert row[1] == '{"error":"upstream failure"}'
+    assert json.loads(row[2])["response_status"] == 502
+    assert row[3:] == (42, 7)

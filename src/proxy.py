@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from src.protocol_converter_registry import get_protocol_converter
 from src.final_response import build_final_response
+from src.asr_logging import asr_response_details, capture_asr_request
 from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
@@ -1134,6 +1135,54 @@ class LLMRouterAddon:
         )
         return response_body.encode("utf-8")
 
+    def _record_asr_call(self, flow: http.HTTPFlow, transport_error=None):
+        """将一次 ASR 调用写入现有调用记录，并保留脱敏服务日志。"""
+        captured = flow.metadata.get("asr_logging")
+        if captured is None or flow.metadata.get("asr_logged"):
+            return
+        flow.metadata["asr_logged"] = True
+        try:
+            status, response_headers, response_body = asr_response_details(flow.response)
+            client_address = getattr(getattr(flow, "client_conn", None), "address", None)
+            transport_status = "failed" if transport_error else "success"
+            business_status = None if transport_error else ("success" if status and 200 <= status < 300 else "failed")
+            payload = {
+                "call_id": captured["call_id"],
+                "timestamp": captured["timestamp"],
+                "url": captured["url"],
+                "method": captured["method"],
+                "transport_type": "http",
+                "request_headers": captured["request_headers"],
+                "request_body": captured["request_body"],
+                "response_headers": response_headers,
+                "response_body": response_body,
+                "duration_ms": max(0, int((time.monotonic() - captured["started_at"]) * 1000)),
+                "tokens_input": None,
+                "tokens_output": None,
+                "token_source": None,
+                "stream_type": "non_stream",
+                "original_model": captured["model"],
+                "overridden_model": captured["model"],
+                "user_id": flow.metadata.get("user_id"),
+                "api_key_id": flow.metadata.get("api_key_id"),
+                "call_status": "failed" if transport_error else business_status,
+                "transport_status": transport_status,
+                "transport_error": transport_error,
+                "business_status": business_status,
+                "business_error": response_body if business_status == "failed" else None,
+                "outbound_diagnostics": {
+                    "service": "codex-asr",
+                    "response_status": status,
+                    "upstream_attempted": bool(flow.metadata.get("asr_forward")),
+                    "client_address": str(client_address) if client_address is not None else None,
+                },
+            }
+            # 未认证请求没有 user_id，用户控制台不可见；服务日志仍可完整排查。
+            logger.info("[ASR_CALL] %s", json.dumps(payload, ensure_ascii=False, default=str))
+            self._enqueue_call_save(payload)
+        except Exception:
+            logger.exception("Failed to record ASR call: call_id=%s", captured.get("call_id"))
+
     async def request(self, flow: http.HTTPFlow):
         """拦截并处理请求"""
         url_api_key = self._extract_url_api_key(flow.request)
@@ -1142,6 +1191,21 @@ class LLMRouterAddon:
             and urlparse(flow.request.url).path
             in {"/v1/audio/transcriptions", "/audio/transcriptions"}
         )
+        if is_asr_transcription_request:
+            try:
+                flow.metadata["asr_logging"] = capture_asr_request(flow.request)
+            except Exception as exc:
+                logger.warning("ASR request metadata capture failed: %s", type(exc).__name__)
+                flow.metadata["asr_logging"] = {
+                    "call_id": str(uuid.uuid4()),
+                    "timestamp": datetime.now().isoformat(),
+                    "started_at": time.monotonic(),
+                    "url": urlparse(flow.request.url).path,
+                    "method": str(flow.request.method),
+                    "request_headers": {},
+                    "request_body": '{"parse_error":"ASR request metadata capture failed"}',
+                    "model": None,
+                }
         key_info = None
         if url_api_key is not None:
             key_info = self._verify_api_key_cached(url_api_key)
@@ -1152,6 +1216,8 @@ class LLMRouterAddon:
                     {"Content-Type": "application/json"}
                 )
                 flow.metadata["local_response"] = True
+                if is_asr_transcription_request:
+                    self._record_asr_call(flow)
                 return
 
             flow.metadata["user_id"] = key_info["user_id"]
@@ -1334,6 +1400,8 @@ class LLMRouterAddon:
                     json.dumps({"error": "Unauthorized: missing API key"}, ensure_ascii=False).encode("utf-8"),
                     {"Content-Type": "application/json"}
                 )
+                if is_asr_transcription_request:
+                    self._record_asr_call(flow)
                 return
 
             # 验证 API Key
@@ -1344,6 +1412,8 @@ class LLMRouterAddon:
                     json.dumps({"error": "Invalid or expired API key"}, ensure_ascii=False).encode("utf-8"),
                     {"Content-Type": "application/json"}
                 )
+                if is_asr_transcription_request:
+                    self._record_asr_call(flow)
                 return
 
             # 存储用户信息到 flow.metadata，供 response() 使用
@@ -1358,6 +1428,7 @@ class LLMRouterAddon:
                     {"Content-Type": "application/json"},
                 )
                 flow.metadata["local_response"] = True
+                self._record_asr_call(flow)
                 return
             credentials_available = await asyncio.to_thread(
                 self._asr_service.refresh_credentials,
@@ -1370,6 +1441,7 @@ class LLMRouterAddon:
                     {"Content-Type": "application/json"},
                 )
                 flow.metadata["local_response"] = True
+                self._record_asr_call(flow)
                 return
 
             audio_path = urlparse(flow.request.url).path
@@ -5053,6 +5125,9 @@ class LLMRouterAddon:
 
     def response(self, flow: http.HTTPFlow):
         """拦截并处理响应"""
+        if flow.metadata.get("asr_logging"):
+            self._record_asr_call(flow)
+            return
         if flow.metadata.get("asr_forward"):
             return
         if flow.metadata.get("codex_models_passthrough"):
@@ -5390,6 +5465,11 @@ class LLMRouterAddon:
 
     def error(self, flow: http.HTTPFlow):
         """将客户端断开或一般网络错误交给共享网络异常处理流程。"""
+        if flow.metadata.get("asr_logging"):
+            raw_error = flow.error
+            error_message = getattr(raw_error, "msg", None) or str(raw_error or "unknown network error")
+            self._record_asr_call(flow, transport_error=error_message)
+            return
         if flow.metadata.get("asr_forward"):
             return
         self._finish_codex_http_stream(flow)
