@@ -244,6 +244,8 @@ def test_asr_call_records_metadata_and_full_response_without_audio_or_secrets(st
     assert len(addon.saved_calls) == 1
     call = addon.saved_calls[0]
     body = json.loads(call["request_body"])
+    assert call["url"] == "https://chatgpt.com/backend-api/transcribe"
+    assert call["upstream_request_size_mb"] == len(content) / 1_000_000
     assert body["fields"] == [
         {"name": "model", "value": "whisper-1"},
         {"name": "language", "value": "zh"},
@@ -346,6 +348,7 @@ def test_asr_local_failures_are_logged_once(path, headers, service, status, capl
     call = addon.saved_calls[0]
     assert call["outbound_diagnostics"]["response_status"] == status
     assert call["outbound_diagnostics"]["upstream_attempted"] is False
+    assert call["upstream_request_size_mb"] is None
     assert call["call_status"] == "failed"
     assert call["transport_status"] == "success"
     assert call["business_status"] == "failed"
@@ -368,6 +371,18 @@ def test_asr_network_error_is_recorded_without_fabricated_http_status():
     assert call["business_status"] is None
     assert call["outbound_diagnostics"]["response_status"] is None
     assert call["outbound_diagnostics"]["upstream_attempted"] is True
+    assert call["upstream_request_size_mb"] == len(flow.request.content) / 1_000_000
+
+
+def test_asr_log_uses_service_upstream_address():
+    service = FakeAsrService()
+    service.endpoint = "https://asr.example/transcribe"
+    addon = _make_addon(service)
+    flow = _make_audio_flow("/audio/transcriptions", {"Authorization": "Bearer router-key"})
+    asyncio.run(addon.request(flow))
+    flow.response = SimpleNamespace(status_code=200, headers={}, content=b"ok")
+    addon.response(flow)
+    assert addon.saved_calls[0]["url"] == service.endpoint
 
 
 def test_asr_status_is_recorded_if_response_content_cannot_be_decoded():
@@ -405,9 +420,11 @@ def test_asr_log_round_trips_through_existing_sqlite_storage(tmp_path):
     storage = CallStorage(str(db_path))
     storage.save_call_with_user(**addon.saved_calls[0])
     with sqlite3.connect(db_path) as conn:
-        row = conn.execute("SELECT request_body, response_body, outbound_diagnostics, user_id, api_key_id FROM llm_calls").fetchone()
+        row = conn.execute("SELECT request_body, response_body, outbound_diagnostics, user_id, api_key_id, url, upstream_request_size_mb FROM llm_calls").fetchone()
     assert json.loads(row[0])["files"][0]["detected_format"] == "wav"
     assert "audio_not_saved" not in row[0]
     assert row[1] == '{"error":"upstream failure"}'
     assert json.loads(row[2])["response_status"] == 502
-    assert row[3:] == (42, 7)
+    assert row[3:5] == (42, 7)
+    assert row[5] == "https://chatgpt.com/backend-api/transcribe"
+    assert row[6] == len(flow.request.content) / 1_000_000

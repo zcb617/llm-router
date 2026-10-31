@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from src.protocol_converter_registry import get_protocol_converter
 from src.final_response import build_final_response
 from src.asr_logging import asr_response_details, capture_asr_request
+from src.asr_service import ASR_UPSTREAM_URL
 from src.chat_completion_cache_tokens import chat_completion_cache_tokens_parser
 from src.kimi_cli_auth import KIMI_CLI_OAUTH_BASE_URL, KimiCliAuthManager
 from src.codex_cli_auth import (
@@ -1149,7 +1150,7 @@ class LLMRouterAddon:
             payload = {
                 "call_id": captured["call_id"],
                 "timestamp": captured["timestamp"],
-                "url": captured["url"],
+                "url": getattr(self._asr_service, "endpoint", ASR_UPSTREAM_URL),
                 "method": captured["method"],
                 "transport_type": "http",
                 "request_headers": captured["request_headers"],
@@ -1157,6 +1158,11 @@ class LLMRouterAddon:
                 "response_headers": response_headers,
                 "response_body": response_body,
                 "duration_ms": max(0, int((time.monotonic() - captured["started_at"]) * 1000)),
+                "upstream_request_size_mb": (
+                    captured["request_size_bytes"] / 1_000_000
+                    if flow.metadata.get("asr_forward") and captured.get("request_size_bytes") is not None
+                    else None
+                ),
                 "tokens_input": None,
                 "tokens_output": None,
                 "token_source": None,
@@ -1200,7 +1206,6 @@ class LLMRouterAddon:
                     "call_id": str(uuid.uuid4()),
                     "timestamp": datetime.now().isoformat(),
                     "started_at": time.monotonic(),
-                    "url": urlparse(flow.request.url).path,
                     "method": str(flow.request.method),
                     "request_headers": {},
                     "request_body": '{"parse_error":"ASR request metadata capture failed"}',

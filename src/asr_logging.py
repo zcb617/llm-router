@@ -6,7 +6,6 @@ import uuid
 from datetime import datetime
 from email.message import Message
 from email.parser import BytesHeaderParser
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 _SENSITIVE_HEADERS = {
@@ -28,17 +27,6 @@ def _safe_headers(headers):
         str(name): "[REDACTED]" if str(name).lower() in _SENSITIVE_HEADERS else str(value)
         for name, value in headers.items()
     }
-
-
-def _safe_url(url):
-    """路径中的网关密钥已由调用方剥离，这里隐藏 URL 用户信息和敏感参数。"""
-    parts = urlsplit(str(url))
-    netloc = parts.netloc.rsplit("@", 1)[-1]
-    query = urlencode([
-        (name, "[REDACTED]" if _sensitive_field(name) else value)
-        for name, value in parse_qsl(parts.query, keep_blank_values=True)
-    ])
-    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
 
 
 def _audio_format(prefix):
@@ -144,10 +132,10 @@ def capture_asr_request(request):
         "call_id": str(uuid.uuid4()),
         "timestamp": datetime.now().isoformat(),
         "started_at": time.monotonic(),
-        "url": _safe_url(request.url),
         "method": str(request.method),
         "request_headers": _safe_headers(request.headers),
         "request_body": json.dumps(body, ensure_ascii=False),
+        "request_size_bytes": len(content),
         "model": model,
     }
 

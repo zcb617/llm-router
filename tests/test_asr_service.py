@@ -158,6 +158,8 @@ def test_start_and_stop_with_configured_oauth(monkeypatch, tmp_path: Path):
         "127.0.0.1",
         "--port",
         "8788",
+        "--endpoint",
+        "https://chatgpt.com/backend-api/transcribe",
         "--auth-file",
         str(oauth_home_expected / "auth.json"),
         "--no-api-key",

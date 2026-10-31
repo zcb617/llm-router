@@ -10,6 +10,7 @@ from src.codex_cli_auth import CodexCliAuthManager, resolve_oauth_home
 
 
 logger = logging.getLogger(__name__)
+ASR_UPSTREAM_URL = "https://chatgpt.com/backend-api/transcribe"
 
 
 class CodexAsrService:
@@ -18,6 +19,7 @@ class CodexAsrService:
     def __init__(self, config, storage):
         """保存服务配置和上游存储，并初始化子进程状态。"""
         self.config = config  # ASR 服务的地址和监听端口配置
+        self.endpoint = ASR_UPSTREAM_URL  # codex-asr 实际请求的上游地址
         self.storage = storage  # 提供启用上游授权目录的存储对象
         self.process = None  # 当前管理的 codex-asr 子进程
         self.oauth_home = None  # 子进程读取授权文件的唯一目录
@@ -84,6 +86,8 @@ class CodexAsrService:
                 "127.0.0.1",
                 "--port",
                 str(port),
+                "--endpoint",
+                self.endpoint,
                 "--auth-file",
                 str(home / "auth.json"),
                 "--no-api-key",
