@@ -625,3 +625,51 @@ def test_ws_non_codex_flow_does_not_start_timer():
 
     assert addon._codex_ws_idle_timers == {}
     assert flow.metadata.get("codex_ws_calls") is None
+
+
+@pytest.mark.parametrize("route", ["passthrough", "oauth"])
+def test_idle_timeout_logs_snapshot_before_state_is_cleared(monkeypatch, caplog, route):
+    """保留匹配、丢弃原因和调度延迟，且主动关闭不依赖 websocket_end 日志。"""
+    addon = _make_addon()
+    flow = _make_flow(route)
+    addon.websocket_start(flow)
+    fake_loop = _FakeLoop()
+    _patch_fake_loop(monkeypatch, fake_loop)
+    addon._close_codex_ws_connection = lambda target: None
+
+    async def scenario():
+        await _send_event(addon, flow, True, {"type": "response.create", "model": "gpt-test"})
+        await _send_event(addon, flow, False, {
+            "type": "response.created", "sequence_number": 0,
+            "response": {"id": "partial-response"},
+        })
+        call_state = flow.metadata["codex_ws_calls"][0]
+        handle = addon._codex_ws_idle_timers[call_state["call_id"]]
+        for event in (b"\xff", b"not-json", {"type": "ping"}, {
+            "type": "response.output_text.delta", "response_id": "other-response",
+        }):
+            await _send_event(addon, flow, False, event)
+        assert addon._codex_ws_idle_timers[call_state["call_id"]] is handle
+        monkeypatch.setattr(proxy_module.time, "monotonic", lambda: call_state["idle_deadline_monotonic"] + 2)
+        handle.fire()
+        records = [r.getMessage() for r in caplog.records if "[CODEX_WS_IDLE_TIMEOUT_DIAG]" in r.getMessage()]
+        assert len(records) == 1
+        snapshot = json.loads(records[0].split("] ", 1)[1])
+        assert snapshot["call_id"] == call_state["call_id"]
+        assert snapshot["route"] == route
+        assert snapshot["timer_callback_lag_ms"] == 2000
+        assert snapshot["response_frames"] == 1
+        assert snapshot["last_business_event"]["type"] == "response.created"
+        assert snapshot["last_business_event"]["sequence_number"] == 0
+        assert snapshot["connection_messages"]["server_messages"] == 5
+        assert snapshot["connection_messages"]["server_dispositions"] == {
+            "matched": 1, "invalid_utf8": 1, "invalid_json": 1,
+            "not_business_event": 1, "unmatched_response": 1,
+        }
+        assert snapshot["last_server_message_age_ms"] is not None
+        assert snapshot["client_connection"]["state"]
+        assert snapshot["server_connection"]["state"]
+        assert not flow.metadata.get("codex_ws_calls")
+        assert "not-json" not in records[0]
+
+    asyncio.run(scenario())

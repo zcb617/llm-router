@@ -4536,6 +4536,7 @@ class LLMRouterAddon:
         """为收到客户端请求或上游业务消息的 Codex 调用重置空闲计时器。"""
         call_id = call_state["call_id"]
         self._cancel_codex_ws_idle_timeout(call_id)
+        call_state["idle_deadline_monotonic"] = time.monotonic() + _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS
         self._codex_ws_idle_timers[call_id] = asyncio.get_running_loop().call_later(
             _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS,
             self._on_codex_ws_idle_timeout,
@@ -4549,9 +4550,46 @@ class LLMRouterAddon:
         if flow.metadata.get("codex_ws_end_recorded"):
             return
         websocket_calls = flow.metadata.get("codex_ws_calls", [])
-        if not any(call_state.get("call_id") == call_id for call_state in websocket_calls):
+        call_state = next(
+            (item for item in websocket_calls if item.get("call_id") == call_id), None
+        )
+        if call_state is None:
             return
 
+        # 失败处理会清空活动调用，必须先保留诊断现场。
+        now = time.time()
+        diag = dict(flow.metadata.get("codex_ws_diag") or {})
+        deadline = call_state.get("idle_deadline_monotonic", time.monotonic())
+        snapshot = {
+            "flow_id": flow.id,
+            "call_id": call_id,
+            "nginx_request_id": flow.request.headers.get("X-Request-ID") or "-",
+            "route": flow.metadata.get("codex_ws_route"),
+            "timeout_seconds": _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+            "timer_callback_lag_ms": round(max(0.0, time.monotonic() - deadline) * 1000, 3),
+            "call_duration_ms": int((now - call_state["start_time"]) * 1000),
+            "response_id": call_state.get("response_id"),
+            "response_frames": len(call_state.get("response_frames", [])),
+            "last_business_event": call_state.get("last_business_event"),
+            "active_call_ids": [item.get("call_id") for item in websocket_calls],
+            "connection_messages": diag,
+        }
+        for side in ("client", "server"):
+            last_at = diag.get(f"last_{side}_at")
+            snapshot[f"last_{side}_message_age_ms"] = (
+                int((now - last_at) * 1000) if last_at is not None else None
+            )
+            conn = getattr(flow, f"{side}_conn", None)
+            snapshot[f"{side}_connection"] = {
+                "peer": getattr(conn, "peername", None),
+                "sock": getattr(conn, "sockname", None),
+                "state": str(getattr(conn, "state", None)),
+                "error": getattr(conn, "error", None),
+            }
+        logger.warning(
+            "[CODEX_WS_IDLE_TIMEOUT_DIAG] %s",
+            json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+        )
         error = (
             "websocket_upstream_business_idle_timeout "
             f"(timeout_seconds={_CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS:g})"
@@ -4591,6 +4629,15 @@ class LLMRouterAddon:
                 )
         finally:
             self._stop_codex_ws_outbound_process(flow)
+
+    @staticmethod
+    def _note_codex_ws_server_message(flow, disposition):
+        """统计完整服务端消息的处理结果，不包含控制帧和未组装完的分片。"""
+        diag = flow.metadata.get("codex_ws_diag")
+        if isinstance(diag, dict):
+            diag["last_server_disposition"] = disposition
+            counts = diag.setdefault("server_dispositions", {})
+            counts[disposition] = counts.get(disposition, 0) + 1
 
     def websocket_start(self, flow):
         """记录 Codex Responses WebSocket 上游握手响应，供调用日志关联使用。"""
@@ -4663,6 +4710,8 @@ class LLMRouterAddon:
                 else str(message_content)
             )
         except UnicodeDecodeError:
+            if not message.from_client:
+                self._note_codex_ws_server_message(flow, "invalid_utf8")
             return
 
         try:
@@ -4816,6 +4865,8 @@ class LLMRouterAddon:
             return
 
         event_type = event.get("type") if isinstance(event, dict) else None
+        if isinstance(diag, dict):
+            diag["last_server_event_type"] = event_type[:128] if isinstance(event_type, str) else None
         if (
             not isinstance(event, dict)
             or not isinstance(event_type, str)
@@ -4824,8 +4875,12 @@ class LLMRouterAddon:
                 or event_type == "error"
             )
         ):
+            self._note_codex_ws_server_message(
+                flow, "invalid_json" if event is None else "not_business_event"
+            )
             return
         if not websocket_calls:
+            self._note_codex_ws_server_message(flow, "no_active_call")
             return
 
         response_obj = event.get("response") if isinstance(event, dict) else None
@@ -4855,7 +4910,14 @@ class LLMRouterAddon:
             call_state = websocket_calls[0]
 
         if call_state is None:
+            self._note_codex_ws_server_message(flow, "unmatched_response")
             return
+        self._note_codex_ws_server_message(flow, "matched")
+        call_state["last_business_event"] = {
+            "type": event_type[:128],
+            "sequence_number": event.get("sequence_number"),
+            "received_at": received_at,
+        }
         self._arm_codex_ws_idle_timeout(flow, call_state)
         if self._try_schedule_codex_ws_capacity_retry(flow, message, event, call_state):
             return
