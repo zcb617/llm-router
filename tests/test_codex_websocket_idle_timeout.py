@@ -34,7 +34,7 @@ class _FakeTimerHandle:
 
 
 class _FakeLoop:
-    """记录 call_later 参数，供不等待真实 300 秒的边界验证使用。"""
+    """记录 call_later 参数，供不等待真实 60 秒的边界验证使用。"""
 
     def __init__(self):
         self.handles = []  # 本次测试注册的全部计时器句柄。
@@ -173,8 +173,8 @@ def _patch_fake_loop(monkeypatch, fake_loop):
 
 
 @pytest.mark.parametrize("route", ["passthrough", "oauth"])
-def test_ws_idle_timeout_is_300_seconds_and_refreshes_per_call(monkeypatch, route):
-    """确认两条路由使用固定 300 秒并仅按归属调用的业务帧刷新。"""
+def test_ws_idle_timeout_is_60_seconds_and_refreshes_per_call(monkeypatch, route):
+    """确认两条路由使用固定 60 秒并仅按归属调用的业务帧刷新。"""
     addon = _make_addon()
     flow = _make_flow(route)
     fake_loop = _FakeLoop()
@@ -185,7 +185,7 @@ def test_ws_idle_timeout_is_300_seconds_and_refreshes_per_call(monkeypatch, rout
         await _send_event(addon, flow, True, {"type": "response.create", "model": "gpt-test"})
         call_state = flow.metadata["codex_ws_calls"][0]
         first_handle = addon._codex_ws_idle_timers[call_state["call_id"]]
-        assert fake_loop.delays == [300.0]
+        assert fake_loop.delays == [60.0]
 
         await _send_event(
             addon,
@@ -206,7 +206,7 @@ def test_ws_idle_timeout_is_300_seconds_and_refreshes_per_call(monkeypatch, rout
             {"type": "response.output_text.delta", "response_id": "another-response"},
         )
         assert addon._codex_ws_idle_timers[call_state["call_id"]] is refreshed_handle
-        assert fake_loop.delays == [300.0, 300.0]
+        assert fake_loop.delays == [60.0, 60.0]
 
     asyncio.run(scenario())
 
