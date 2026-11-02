@@ -18,6 +18,7 @@ class ProxyConfig:
     call_save_queue_size: int = 5000
     call_save_workers: int = 2
     stream_route_preconnect_timeout_ms: int = 800
+    codex_ws_upstream_idle_timeout_seconds: float = 60.0
 
 
 @dataclass
@@ -86,6 +87,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
             call_save_queue_size=int(raw["proxy"].get("call_save_queue_size", 5000)),
             call_save_workers=int(raw["proxy"].get("call_save_workers", 2)),
             stream_route_preconnect_timeout_ms=int(raw["proxy"].get("stream_route_preconnect_timeout_ms", 800)),
+            codex_ws_upstream_idle_timeout_seconds=float(
+                raw["proxy"].get("codex_ws_upstream_idle_timeout_seconds")
+                if raw["proxy"].get("codex_ws_upstream_idle_timeout_seconds") is not None else 60.0
+            ),
         ),
         database=DatabaseConfig(
             path=db_config.get("path", "./data/llm_calls.db"),

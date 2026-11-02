@@ -140,6 +140,10 @@ class LLMRouterAddon:
                         model_mappings={},  # 不再从配置文件读取
                         default_model=raw_config["proxy"].get("default_model"),
                         auto_retry_max_attempts=int(raw_config["proxy"].get("auto_retry_max_attempts", 1)),
+                        codex_ws_upstream_idle_timeout_seconds=float(
+                            raw_config["proxy"].get("codex_ws_upstream_idle_timeout_seconds")
+                            if raw_config["proxy"].get("codex_ws_upstream_idle_timeout_seconds") is not None else 60.0
+                        ),
                     ),
                     database=DatabaseConfig(
                         path=db_config.get("path", "./data/llm_calls.db"),
@@ -4536,9 +4540,16 @@ class LLMRouterAddon:
         """为收到客户端请求或上游业务消息的 Codex 调用重置空闲计时器。"""
         call_id = call_state["call_id"]
         self._cancel_codex_ws_idle_timeout(call_id)
-        call_state["idle_deadline_monotonic"] = time.monotonic() + _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS
+        proxy_config = getattr(getattr(self, "config", None), "proxy", None)
+        timeout_seconds = getattr(
+            proxy_config, "codex_ws_upstream_idle_timeout_seconds", None
+        )
+        if timeout_seconds is None:
+            timeout_seconds = _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS
+        call_state["idle_timeout_seconds"] = timeout_seconds
+        call_state["idle_deadline_monotonic"] = time.monotonic() + timeout_seconds
         self._codex_ws_idle_timers[call_id] = asyncio.get_running_loop().call_later(
-            _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+            timeout_seconds,
             self._on_codex_ws_idle_timeout,
             flow,
             call_id,
@@ -4556,6 +4567,7 @@ class LLMRouterAddon:
         if call_state is None:
             return
 
+        timeout_seconds = call_state.get("idle_timeout_seconds", _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS)
         # 失败处理会清空活动调用，必须先保留诊断现场。
         now = time.time()
         diag = dict(flow.metadata.get("codex_ws_diag") or {})
@@ -4565,7 +4577,7 @@ class LLMRouterAddon:
             "call_id": call_id,
             "nginx_request_id": flow.request.headers.get("X-Request-ID") or "-",
             "route": flow.metadata.get("codex_ws_route"),
-            "timeout_seconds": _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+            "timeout_seconds": timeout_seconds,
             "timer_callback_lag_ms": round(max(0.0, time.monotonic() - deadline) * 1000, 3),
             "call_duration_ms": int((now - call_state["start_time"]) * 1000),
             "response_id": call_state.get("response_id"),
@@ -4592,7 +4604,7 @@ class LLMRouterAddon:
         )
         error = (
             "websocket_upstream_business_idle_timeout "
-            f"(timeout_seconds={_CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS:g})"
+            f"(timeout_seconds={timeout_seconds:g})"
         )
         logger.warning(
             "[CODEX_WS_CALL_IDLE_TIMEOUT] flow_id=%s nginx_request_id=%s route=%s call_id=%s timeout_seconds=%s",
@@ -4600,7 +4612,7 @@ class LLMRouterAddon:
             flow.request.headers.get("X-Request-ID") or "-",
             flow.metadata.get("codex_ws_route"),
             call_id,
-            _CODEX_WS_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+            timeout_seconds,
         )
         try:
             self._handle_network_exception(flow, GeneralNetworkException(error))

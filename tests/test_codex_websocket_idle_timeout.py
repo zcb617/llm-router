@@ -673,3 +673,26 @@ def test_idle_timeout_logs_snapshot_before_state_is_cleared(monkeypatch, caplog,
         assert "not-json" not in records[0]
 
     asyncio.run(scenario())
+
+
+def test_ws_idle_timeout_uses_config_for_timer_and_error(monkeypatch, caplog):
+    """配置值贯穿计时器、诊断及失败记录，业务事件仍刷新同一个时限。"""
+    addon = _make_addon()
+    addon.config = SimpleNamespace(proxy=SimpleNamespace(codex_ws_upstream_idle_timeout_seconds=90.0))
+    flow = _make_flow()
+    fake_loop = _FakeLoop()
+    _patch_fake_loop(monkeypatch, fake_loop)
+    addon._close_codex_ws_connection = lambda target: None
+
+    async def scenario():
+        await _send_event(addon, flow, True, {"type": "response.create", "model": "gpt-test"})
+        await _send_event(addon, flow, False, {"type": "response.created", "response": {"id": "configured"}})
+        call_state = flow.metadata["codex_ws_calls"][0]
+        assert fake_loop.delays == [90.0, 90.0]
+        addon._codex_ws_idle_timers[call_state["call_id"]].fire()
+        payload = addon.saved_payloads[-1]
+        assert payload["transport_error"] == "websocket_upstream_business_idle_timeout (timeout_seconds=90)"
+        record = next(r.getMessage() for r in caplog.records if "[CODEX_WS_IDLE_TIMEOUT_DIAG]" in r.getMessage())
+        assert json.loads(record.split("] ", 1)[1])["timeout_seconds"] == 90.0
+
+    asyncio.run(scenario())
