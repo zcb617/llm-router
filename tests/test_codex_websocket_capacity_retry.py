@@ -211,6 +211,21 @@ def _capacity_error(retry_after="299"):
     }
 
 
+def _server_overloaded_error(response_id="response-overloaded", retry_after="303"):
+    """构造已建立响应后的服务器过载错误事件。"""
+    return {
+        "type": "error",
+        "response_id": response_id,
+        "sequence_number": 3,
+        "error": {
+            "type": "service_unavailable_error",
+            "code": "server_is_overloaded",
+            "message": "servers overloaded",
+            "headers": {"retry-after": retry_after},
+        },
+    }
+
+
 def _final_payloads(addon):
     """合并测试中异步和同步保存的调用终态记录。"""
     return [
@@ -313,7 +328,7 @@ def test_capacity_error_is_hidden_and_retried_for_both_routes(monkeypatch, route
 
         injected_message = SimpleNamespace(
             from_client=True,
-            injected=True,
+            injected=False,
             content=outgoing_content,
             timestamp=time.time(),
         )
@@ -322,6 +337,7 @@ def test_capacity_error_is_hidden_and_retried_for_both_routes(monkeypatch, route
         assert addon._storage.started_calls == [started_call]
         assert len(flow.metadata["codex_ws_calls"]) == 1
         assert flow.metadata["codex_ws_calls"][0]["call_id"] == call_id
+        assert not call_state["capacity_retry_injection_pending"]
         assert len(addon.auth_build_calls) == (1 if route == "oauth" else 0)
         assert len(compression_calls) == (1 if compressed else 0)
 
@@ -367,7 +383,7 @@ def test_pending_retry_does_not_send_after_close_or_first_response(monkeypatch, 
 
 @pytest.mark.parametrize("route", ["passthrough", "oauth"])
 def test_repeated_capacity_errors_stop_after_three_retries(monkeypatch, route):
-    """确认同一调用只安排三次重试并把第四次错误作为唯一终态透传。"""
+    """确认同一调用只安排三次重试并把第四次错误转换为唯一失败终态。"""
     addon = _make_addon()
     flow = _make_flow(route)
     fake_loop = _FakeLoop()
@@ -399,12 +415,51 @@ def test_repeated_capacity_errors_stop_after_three_retries(monkeypatch, route):
         assert call_state["capacity_retry_count"] == 3
         assert addon._codex_ws_capacity_retry_timers == {}
         assert flow.metadata["codex_ws_calls"] == []
+        assert json.loads(error_message.content)["type"] == "response.failed"
         final_payloads = _final_payloads(addon)
         assert len(final_payloads) == 1
         assert final_payloads[0]["transport_status"] == "success"
         assert final_payloads[0]["call_status"] == "failed"
         assert "capacity unavailable" in final_payloads[0]["response_body"]
         assert addon._storage.started_calls[0]["call_id"] == call_id
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("route", ["passthrough", "oauth"])
+def test_server_overloaded_is_converted_to_failed_terminal(monkeypatch, route):
+    """确认已建立响应后的服务器过载错误能明确结束原调用。"""
+    addon = _make_addon()
+    flow = _make_flow(route)
+    fake_loop = _FakeLoop()
+    _patch_fake_loop(monkeypatch, fake_loop)
+
+    async def scenario():
+        await _send_event(addon, flow, True, {"type": "response.create", "model": "gpt-test"})
+        await _send_event(
+            addon,
+            flow,
+            False,
+            {"type": "response.created", "response": {"id": "response-overloaded"}},
+        )
+        message = await _send_event(
+            addon,
+            flow,
+            False,
+            _server_overloaded_error(),
+        )
+
+        terminal = json.loads(message.content)
+        assert terminal["type"] == "response.failed"
+        assert terminal["response"]["id"] == "response-overloaded"
+        assert terminal["response"]["status"] == "failed"
+        assert terminal["response"]["error"]["code"] == "server_is_overloaded"
+        assert terminal["response"]["error"]["headers"]["retry-after"] == "303"
+        assert flow.metadata["codex_ws_calls"] == []
+        assert addon._codex_ws_capacity_retry_timers == {}
+        final_payloads = _final_payloads(addon)
+        assert len(final_payloads) == 1
+        assert final_payloads[0]["business_error"] == "server_is_overloaded"
 
     asyncio.run(scenario())
 
@@ -888,8 +943,8 @@ def test_real_proxy_retries_capacity_without_delivering_intermediate_error(
                 assert second_visible_event["type"] == "response.completed"
                 assert len(addon._storage.started_calls) == 2
             else:
-                assert first_visible_event["type"] == "error"
-                assert first_visible_event["error"]["code"] == "turn_rate_limit_exceeded"
+                assert first_visible_event["type"] == "response.failed"
+                assert first_visible_event["response"]["error"]["code"] == "turn_rate_limit_exceeded"
                 assert len(received_requests) == 4
                 assert len(first_final_payloads) == 1
                 assert first_final_payloads[0]["call_status"] == "failed"

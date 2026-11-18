@@ -4432,6 +4432,7 @@ class LLMRouterAddon:
 
         route = flow.metadata.get("codex_ws_route")
         attempt = call_state.get("capacity_retry_count", 0)
+        call_state["capacity_retry_injection_pending"] = True
         try:
             from mitmproxy import ctx
 
@@ -4451,6 +4452,7 @@ class LLMRouterAddon:
                 attempt,
             )
         except Exception:
+            call_state["capacity_retry_injection_pending"] = False
             logger.exception(
                 "[CODEX_WS_CAPACITY_RETRY_SEND_FAILED] route=%s flow_id=%s call_id=%s attempt=%s",
                 route,
@@ -4466,16 +4468,48 @@ class LLMRouterAddon:
             finally:
                 self._close_codex_ws_connection(flow)
 
+    @staticmethod
+    def _codex_ws_capacity_error(event):
+        """识别 Codex WebSocket 上游返回的容量不足错误。"""
+        if not isinstance(event, dict) or event.get("type") != "error":
+            return None
+        error = event.get("error")
+        if not isinstance(error, dict):
+            return None
+        error_code = error.get("code")
+        if error_code == "server_is_overloaded":
+            return error
+        if error_code == "turn_rate_limit_exceeded" and event.get("status") == 429:
+            return error
+        return None
+
+    @staticmethod
+    def _normalize_codex_ws_capacity_terminal(event, call_state):
+        """把容量错误转换为带调用归属的 Responses 失败终态。"""
+        error = dict(event["error"])
+        if "headers" not in error and isinstance(event.get("headers"), dict):
+            error["headers"] = dict(event["headers"])
+        response = {
+            "id": event.get("response_id") or call_state.get("response_id"),
+            "status": "failed",
+            "error": error,
+        }
+        normalized = {
+            "type": "response.failed",
+            "response": response,
+        }
+        if event.get("sequence_number") is not None:
+            normalized["sequence_number"] = event["sequence_number"]
+        return normalized
+
     def _try_schedule_codex_ws_capacity_retry(self, flow, message, event, call_state):
         """拦截尚未开始响应的上游容量错误并安排固定延迟重试。"""
         if flow.metadata.get("codex_ws_route") not in {"passthrough", "oauth"}:
             return False
+        capacity_error = self._codex_ws_capacity_error(event)
         if (
-            not isinstance(event, dict)
-            or event.get("type") != "error"
-            or event.get("status") != 429
-            or not isinstance(event.get("error"), dict)
-            or event["error"].get("code") != "turn_rate_limit_exceeded"
+            capacity_error is None
+            or capacity_error.get("code") != "turn_rate_limit_exceeded"
         ):
             return False
 
@@ -4732,12 +4766,18 @@ class LLMRouterAddon:
             event = None
 
         websocket_calls = flow.metadata.setdefault("codex_ws_calls", [])
-        if message.from_client and getattr(message, "injected", False):
-            if any(
-                call_state.get("capacity_retry_count", 0) > 0
-                and call_state.get("upstream_request_content") == message.content
-                for call_state in websocket_calls
-            ):
+        if message.from_client:
+            retry_call_state = next(
+                (
+                    call_state
+                    for call_state in websocket_calls
+                    if call_state.get("capacity_retry_injection_pending")
+                    and call_state.get("upstream_request_content") == message.content
+                ),
+                None,
+            )
+            if retry_call_state is not None:
+                retry_call_state["capacity_retry_injection_pending"] = False
                 return
 
         if message.from_client:
@@ -4933,6 +4973,17 @@ class LLMRouterAddon:
         self._arm_codex_ws_idle_timeout(flow, call_state)
         if self._try_schedule_codex_ws_capacity_retry(flow, message, event, call_state):
             return
+        capacity_error = self._codex_ws_capacity_error(event)
+        if capacity_error is not None:
+            event = self._normalize_codex_ws_capacity_terminal(event, call_state)
+            event_type = event["type"]
+            message_text = json.dumps(
+                event,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            message.content = message_text.encode("utf-8")
+            call_state["last_business_event"]["type"] = event_type
         current_time = received_at
         first_token_received = call_state["first_token_ms"] is None
         if first_token_received:
@@ -4976,6 +5027,8 @@ class LLMRouterAddon:
                 call_state.get("response_frames", []),
                 default_status="failed",
             )
+            if capacity_error is not None:
+                business_error = capacity_error.get("code") or business_error
             tokens_input = None
             tokens_output = None
             cached_hit_tokens = None
