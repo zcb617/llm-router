@@ -4766,13 +4766,12 @@ class LLMRouterAddon:
             event = None
 
         websocket_calls = flow.metadata.setdefault("codex_ws_calls", [])
-        if message.from_client:
+        if message.from_client and getattr(message, "injected", False):
             retry_call_state = next(
                 (
                     call_state
                     for call_state in websocket_calls
                     if call_state.get("capacity_retry_injection_pending")
-                    and call_state.get("upstream_request_content") == message.content
                 ),
                 None,
             )
