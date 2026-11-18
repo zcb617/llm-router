@@ -16,13 +16,13 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
-# Use Tsinghua mirrors for apt and pip
-RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
-    && sed -i 's|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+# Use Aliyun mirrors for apt and pip
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
 
 # Install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt
 
 COPY --from=codex-asr-binary /asr/codex-asr-x86_64-unknown-linux-gnu/codex-asr /usr/local/bin/codex-asr
 RUN chmod 0755 /usr/local/bin/codex-asr && /usr/local/bin/codex-asr --version
